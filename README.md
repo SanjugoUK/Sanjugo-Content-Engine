@@ -3,11 +3,11 @@
 This turns ContentFlow from a Claude Artifact into a real, independently-hosted website with:
 - **Real shared data** (Cloudflare D1) — every device/teammate sees the same calendar, queue, settings.
 - **Real video/photo storage** (Cloudflare R2) — uploads are actually stored and rewatchable, not just a thumbnail.
-- **Real hosting** (Cloudflare Pages) — a real URL, not a private Claude Artifact link.
+- **Real hosting** (Cloudflare Workers, with static assets) — a real URL, not a private Claude Artifact link.
 
-Everything below runs in **your own Mac Terminal** (not through Claude) — that's the app on your
-Applications, called "Terminal". Copy each command, paste it in, press enter, wait for it to finish,
-then move to the next one. It's about 10 minutes total.
+It's deployed automatically from GitHub — Cloudflare rebuilds and redeploys every time this repo's
+`main` branch changes. You already did the GitHub connection. What's left is a one-time infrastructure
+setup: creating the database and the storage bucket. Everything below runs in **your own Mac Terminal**.
 
 ## One-time setup
 
@@ -16,9 +16,9 @@ then move to the next one. It's about 10 minutes total.
 npm install -g wrangler
 ```
 
-**2. Go into this folder**
+**2. Go into this folder** (adjust the path if you put it somewhere else)
 ```
-cd ~/Documents/contentflow-app
+cd ~/Documents/"Sanjugo Content Engine"/contentflow-app
 ```
 
 **3. Log in to Cloudflare** (opens your browser, click "Allow")
@@ -50,40 +50,50 @@ wrangler d1 execute contentflow-db --remote --file=schema.sql
 wrangler r2 bucket create contentflow-media
 ```
 
-**7. Deploy**
+**7. Commit and push the updated wrangler.toml**
 ```
-wrangler pages deploy public --project-name=contentflow
+git add wrangler.toml
+git commit -m "Add D1 database id"
+git push
 ```
-The first time, it may ask to create the Pages project — say yes. At the end it prints your
-real live URL, something like `https://contentflow.pages.dev`. Open it — that's the real app.
+Pushing to `main` triggers Cloudflare to rebuild and deploy automatically — no manual deploy
+command needed. Watch it under Workers & Pages → sanjugo-content-engine → Deployments.
 
-**If step 7 complains it can't find the D1/R2 bindings:** open the Cloudflare dashboard →
-Workers & Pages → contentflow → Settings → Functions, and add the bindings manually there:
-- D1 database binding: variable name `DB` → database `contentflow-db`
-- R2 bucket binding: variable name `MEDIA` → bucket `contentflow-media`
-
-Then redeploy with the same command from step 7.
+Once it succeeds, your real live URL is shown at the top of that project's dashboard page
+(something like `https://sanjugo-content-engine.<your-subdomain>.workers.dev`).
 
 ## Updating later
 
-Whenever I hand you new files for this project, just re-run:
-```
-wrangler pages deploy public --project-name=contentflow
-```
-from inside `~/Documents/contentflow-app`. That's the only command you'll need for future updates.
+From now on, any update just needs `git push` to the `main` branch — Cloudflare picks it up and
+redeploys automatically. No Terminal commands needed unless a future change adds new infrastructure
+(another database table, another bucket, etc.), in which case I'll flag exactly what's needed.
 
 ## Important: this has no login wall yet
 
-Right now, anyone with the `https://contentflow.pages.dev` link can open and use the app —
-there's no password. Two ways to lock it down, both free:
+Right now, anyone with the live link can open and use the app — there's no password. Two ways to
+lock it down, both free:
 
 **Recommended — Cloudflare Access** (takes ~5 min, no app code changes needed):
 1. Cloudflare dashboard → Zero Trust → Access → Applications → "Add an application" → "Self-hosted".
-2. Point it at your `contentflow.pages.dev` domain.
+2. Point it at your `sanjugo-content-engine` domain.
 3. Add a policy: "Allow" if email is in `cyrus@sanjugo.co.uk`, `marketing@sanjugo.co.uk`, `admin@sanjugo.co.uk`.
 4. Anyone else who visits gets a one-time email code prompt instead of the app — free for up to 50 users.
 
 This is the real version of the "admin allowlist" ContentFlow's Settings page already has —
 Cloudflare Access enforces it at the front door, before your app even loads.
+
+## Installing it like an app (once it's deployed)
+
+ContentFlow is set up as an installable web app — no App Store needed:
+
+- **iPhone (Safari):** open the site → tap the Share icon → "Add to Home Screen". It gets a real
+  icon on the home screen and opens full-screen, no browser bar.
+- **Android (Chrome):** open the site → Chrome shows an "Install app" prompt automatically (or:
+  menu ⋮ → "Install app").
+- **Mac/Windows (Chrome or Edge):** open the site → click the install icon (⊕ or a monitor icon)
+  at the right end of the address bar → "Install".
+
+Each of Cyrus, Yan Yan, and AI Dev can do this on their own phone/laptop — it's the same live
+app either way, so everyone stays in sync in real time, just like opening the Instagram app.
 
 Tell me once you've deployed (or if any step errors) and I'll help from there.

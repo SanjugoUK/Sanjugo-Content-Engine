@@ -1,6 +1,10 @@
-name = "contentflow"
-pages_build_output_dir = "public"
+name = "sanjugo-content-engine"
+main = "src/worker.js"
 compatibility_date = "2024-09-23"
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
 
 # Filled in automatically by the setup commands in README.md — you shouldn't need to touch this.
 [[d1_databases]]

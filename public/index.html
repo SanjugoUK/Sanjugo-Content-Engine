@@ -989,6 +989,21 @@ function reducer(state, action){
         toasts:[...state.toasts, {id:uid("toast"), message: decision==="approved"? approvedMsg : decision==="rejected"? "Rejected — "+item.title : "Changes requested — "+item.title, variant: decision==="approved"?"ok": decision==="rejected"?"danger":"warn"}]};
     }
     case "SET_TEMPLATE": return {...state, calendarTemplate: action.template};
+    case "MARK_PUBLISHED": {
+      // Until auto-publishing is wired up, someone records when a post actually went live. Once every platform
+      // is published the post counts as Published, and 7 days later its file moves out of ContentFlow storage.
+      const {contentId, platforms, publishedAt, urls} = action;
+      const item = state.contentItems.find(i=>i.id===contentId);
+      if(!item) return state;
+      const variants = {...item.variants};
+      platforms.forEach(p=>{ if(variants[p]) variants[p] = {...variants[p], publishStatus:"published", publishedAt, postUrl: (urls&&urls[p]) || variants[p].postUrl || null}; });
+      const all = Object.values(variants).every(v=>v.publishStatus==="published");
+      const items = state.contentItems.map(i=> i.id===contentId ? {...i, variants, status: all? "published" : i.status} : i);
+      const log = {id:uid("act"), at:new Date().toISOString(), type:"published", contentId, contentTitle:item.title, user:state.currentUserId,
+        detail:"Marked as published — "+platforms.map(p=>PLATFORM_META[p].label).join(", ")};
+      return {...state, contentItems:items, activityLog:[log, ...state.activityLog],
+        toasts:[...state.toasts, {id:uid("toast"), message: all? "Published — "+item.title : "Marked "+platforms.length+" platform"+(platforms.length>1?"s":"")+" as published", variant:"ok"}]};
+    }
     case "SET_ADMIN_EMAILS": return {...state, adminEmails: action.emails};
     case "ADD_CAMPAIGN": return {...state, campaigns:[...state.campaigns, action.campaign]};
     case "UPDATE_CAMPAIGN": return {...state, campaigns: state.campaigns.map(c=> c.id===action.id? {...c, ...action.patch} : c)};
@@ -1194,11 +1209,47 @@ function ScheduleEditor({item, platform, scheduledAt}){
     </div>
   );
 }
+function MarkPublishedModal({item, open, onClose}){
+  const {dispatch} = useApp();
+  const pending = Object.values(item.variants||{}).filter(v=>v.publishStatus!=="published").map(v=>v.platform);
+  const [sel, setSel] = useState(pending);
+  const [when, setWhen] = useState(()=>isoToLocalInput(new Date().toISOString()));
+  const [urls, setUrls] = useState({});
+  useEffect(()=>{ if(open){ setSel(pending); setWhen(isoToLocalInput(new Date().toISOString())); setUrls({}); } }, [open]);
+  const input = {padding:"8px 10px", borderRadius:8, border:"1px solid var(--border)", fontSize:13, background:"var(--surface)", color:"var(--ink)", width:"100%"};
+  return (
+    <Modal open={open} onClose={onClose} width={460}>
+      <div style={{padding:20}}>
+        <div style={{fontSize:16, fontWeight:600, marginBottom:4}}>Mark as published</div>
+        <div style={{fontSize:12.5, color:"var(--ink-soft)", lineHeight:1.5, marginBottom:14}}>Record where this post went live. Links are optional but make it easy to find later. {item.libraryRef ? "The file stays viewable from the Drive library." : "7 days after every platform is published, the file moves to the ContentFlow Archive folder in Google Drive to free up storage — links keep working."}</div>
+        {pending.length===0 ? <div style={{fontSize:13, color:"var(--ink-mute)", marginBottom:14}}>Every platform is already marked as published.</div> :
+        pending.map(p=>(
+          <div key={p} style={{border:"1px solid var(--border)", borderRadius:9, padding:10, marginBottom:8}}>
+            <label style={{display:"flex", alignItems:"center", gap:8, fontSize:13, fontWeight:600, cursor:"pointer"}}>
+              <input type="checkbox" checked={sel.includes(p)} onChange={e=>setSel(s=> e.target.checked? [...s,p] : s.filter(x=>x!==p))}/>
+              <PlatformIcon platform={p} size={12}/>{PLATFORM_META[p].label} <span style={{fontWeight:400, color:"var(--ink-mute)"}}>· {(item.variants[p]||{}).postType||"Post"}</span>
+            </label>
+            {sel.includes(p) && <input value={urls[p]||""} onChange={e=>setUrls(u=>({...u, [p]:e.target.value}))} placeholder="Link to the live post (optional)" style={{...input, marginTop:8}}/>}
+          </div>
+        ))}
+        {pending.length>0 && <label style={{display:"block", fontSize:12.5, fontWeight:600, color:"var(--ink-soft)", margin:"12px 0 6px"}}>Went live at</label>}
+        {pending.length>0 && <input type="datetime-local" value={when} onChange={e=>setWhen(e.target.value)} style={input}/>}
+        <div style={{display:"flex", justifyContent:"flex-end", gap:8, marginTop:18}}>
+          <Button variant="ghost" onClick={onClose}>Cancel</Button>
+          {pending.length>0 && <Button variant="success" icon="check" disabled={!sel.length} onClick={()=>{ dispatch({type:"MARK_PUBLISHED", contentId:item.id, platforms:sel, publishedAt:new Date(when).toISOString(), urls}); onClose(); }}>Mark published</Button>}
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 function ContentDetailDrawer({item, onClose}){
   const {state} = useApp();
   const [tab, setTab] = useState("overview");
   const [compareVersion, setCompareVersion] = useState(null);
+  const [publishing, setPublishing] = useState(false);
   if(!item) return null;
+  const canMarkPublished = ["approved","scheduled","publishing","failed","published"].includes(item.status) && Object.values(item.variants||{}).some(v=>v.publishStatus!=="published");
   const brand = BRANDS.find(b=>b.id===item.brand);
   const campaign = {name: campaignLabel(state.campaigns, item.campaign)};
   const creator = USERS.find(u=>u.id===item.creator);
@@ -1215,6 +1266,8 @@ function ContentDetailDrawer({item, onClose}){
           <button onClick={onClose} style={{width:32,height:32,borderRadius:9,border:"1px solid var(--border)",background:"var(--surface)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><Icon name="x" size={16}/></button>
         </div>
         <div style={{display:"flex", gap:8, marginTop:10, flexWrap:"wrap"}}><StatusBadge status={item.status}/><PriorityDot priority={item.priority}/><Badge label={"v"+item.currentVersion} color="var(--accent)" soft="var(--accent-soft)"/></div>
+        {canMarkPublished && <div style={{marginTop:12}}><Button variant="success" size="sm" icon="check" onClick={()=>setPublishing(true)}>Mark as published</Button></div>}
+        <MarkPublishedModal item={item} open={publishing} onClose={()=>setPublishing(false)}/>
         <div style={{display:"flex", gap:6, marginTop:14}}>
           {["overview","platforms","versions","activity"].map(t=>(
             <button key={t} onClick={()=>setTab(t)} style={{padding:"7px 12px", borderRadius:8, border:"none", background: tab===t?"var(--accent-soft)":"transparent", color: tab===t?"var(--accent)":"var(--ink-soft)", fontWeight:700, fontSize:12.5, cursor:"pointer", textTransform:"capitalize"}}>{t}</button>
@@ -1236,6 +1289,12 @@ function ContentDetailDrawer({item, onClose}){
               <a href={item.media.fileUrl} target="_blank" rel="noopener noreferrer" style={{fontSize:12, fontWeight:700, color:"var(--accent)", textDecoration:"none", display:"flex", alignItems:"center", gap:5, marginTop:-8}}>
                 <Icon name="upload" size={13}/>Open original in a new tab
               </a>
+            )}
+            {!item.libraryRef && item.media.fileUrl && item.status==="published" && (
+              <div style={{display:"flex", alignItems:"center", gap:8, flexWrap:"wrap", padding:"9px 11px", borderRadius:8, border:"1px solid var(--border)", fontSize:12.5, color:"var(--ink-soft)"}}>
+                <span>Published — the file moves to the <strong>ContentFlow Archive</strong> in Google Drive 7 days after publishing.</span>
+                <a href={item.media.fileUrl+"?view=drive"} target="_blank" rel="noopener noreferrer" style={{marginLeft:"auto", color:"var(--accent)", fontWeight:600, textDecoration:"none"}}>Open Drive copy</a>
+              </div>
             )}
             {item.libraryRef && (
               <div style={{display:"flex", alignItems:"center", gap:8, flexWrap:"wrap", padding:"9px 11px", borderRadius:8, border:"1px solid var(--border)", fontSize:12.5}}>
@@ -3163,6 +3222,10 @@ function DriveSettings(){
         {st.rootFolderId && <a href={driveFolderUrl(st.rootFolderId)} target="_blank" rel="noopener noreferrer" style={{textDecoration:"none"}}><Button variant="ghost" icon="external">Open library folder</Button></a>}
         {st.method==="google_signin" && <Button variant="ghost" onClick={disconnect} disabled={busy} style={{color:"var(--red)"}}>Disconnect</Button>}
       </div>
+      {st.method==="google_signin" && !st.canArchive && <div style={{marginTop:12, padding:"10px 12px", borderRadius:8, background:"var(--amber-soft)", fontSize:12.5, lineHeight:1.5, display:"flex", gap:10, alignItems:"center", flexWrap:"wrap"}}>
+        <span style={{flex:1, minWidth:220}}><strong>One more permission needed</strong> so ContentFlow can move published uploads into a "ContentFlow Archive" folder in Drive (it can only touch files it creates).</span>
+        <a href="/api/google/connect" style={{textDecoration:"none"}}><Button variant="primary" size="sm">Reconnect Google Drive</Button></a>
+      </div>}
     </div>
   );
   if(st.signInConfigured) return (
@@ -3184,6 +3247,70 @@ function DriveSettings(){
         <li>Reload this page and press <strong>Connect Google Drive</strong>.</li>
       </ol>
       <Button variant="ghost" size="sm" icon="refresh" onClick={load}>Check again</Button>
+    </div>
+  );
+}
+
+function StorageSettings(){
+  const {dispatch} = useApp();
+  const [rep, setRep] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [open, setOpen] = useState(false);
+  const load = ()=> fetch("/api/storage", {cache:"no-store"}).then(async r=>{ const d = await r.json().catch(()=>({})); if(!r.ok) throw new Error(d.error||"Storage report unavailable"); return d; }).then(setRep).catch(e=>setRep({error:e.message}));
+  useEffect(()=>{ load(); }, []);
+  async function clean(){
+    setBusy(true);
+    try{
+      const r = await fetch("/api/storage/cleanup", {method:"POST"});
+      const d = await r.json().catch(()=>({}));
+      if(!r.ok) throw new Error(d.error || "Clean-up failed");
+      dispatch({type:"ADD_TOAST", message: d.freedBytes ? "Freed "+fmtBytes(d.freedBytes)+" — "+d.archived+" archived to Drive, "+d.deleted+" removed" : "Nothing to clean up right now", variant: d.errors && d.errors.length ? "warn" : "ok"});
+      load();
+    }catch(e){ dispatch({type:"ADD_TOAST", message:e.message, variant:"danger"}); }
+    setBusy(false);
+  }
+  if(!rep) return <Skeleton h={90}/>;
+  if(rep.error) return <div style={{fontSize:12.5, color:"var(--ink-mute)"}}>{rep.error} — storage details are available on the live site.</div>;
+  const pct = Math.min(100, rep.totalBytes/rep.limitBytes*100);
+  const cats = [["uploads","Post uploads","var(--accent)"],["library","Library files in posts","var(--blue)"],["thumbnails","Thumbnails","var(--violet)"],["system","System","var(--ink-mute)"]];
+  const row = (a)=>(
+    <div key={a.key} style={{display:"flex", alignItems:"center", gap:10, padding:"7px 0", borderTop:"1px solid var(--border)", fontSize:12.5}}>
+      <span style={{flex:1, minWidth:0, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>{(a.titles && a.titles[0]) || a.key}</span>
+      <span style={{color:"var(--ink-mute)", whiteSpace:"nowrap"}}>{a.action==="archive"? "→ Drive archive" : a.category==="library"? "→ Drive library" : "delete (unused)"}</span>
+      {a.dueAt && a.ready===false && <span style={{color:"var(--ink-mute)", whiteSpace:"nowrap"}}>{fmtDate(a.dueAt,{day:"numeric",month:"short"})}</span>}
+      <span className="num" style={{width:64, textAlign:"right"}}>{fmtBytes(a.size)}</span>
+    </div>
+  );
+  return (
+    <div>
+      <div style={{display:"flex", alignItems:"baseline", justifyContent:"space-between", gap:10, flexWrap:"wrap", marginBottom:8}}>
+        <div><span className="num" style={{fontSize:22, fontWeight:600}}>{fmtBytes(rep.totalBytes)}</span> <span style={{color:"var(--ink-mute)", fontSize:13}}>of {fmtBytes(rep.limitBytes)} used · {rep.objectCount} files</span></div>
+        <span style={{fontSize:12.5, color: pct>80? "var(--red)" : pct>50? "var(--amber)" : "var(--green)", fontWeight:600}}>{(100-pct).toFixed(1)}% free</span>
+      </div>
+      <div style={{display:"flex", height:10, borderRadius:6, overflow:"hidden", background:"var(--surface-2)", marginBottom:10}}>
+        {cats.map(([k,,c])=> rep.byCategory[k].bytes>0 && <div key={k} title={k} style={{width:Math.max(0.6, rep.byCategory[k].bytes/rep.limitBytes*100)+"%", background:c}}/>)}
+      </div>
+      <div style={{display:"flex", gap:16, flexWrap:"wrap", fontSize:12, color:"var(--ink-soft)", marginBottom:14}}>
+        {cats.map(([k,l,c])=><span key={k} style={{display:"flex", alignItems:"center", gap:6}}><span style={{width:8, height:8, borderRadius:2, background:c}}/>{l}: <strong className="num">{fmtBytes(rep.byCategory[k].bytes)}</strong> ({rep.byCategory[k].count})</span>)}
+      </div>
+      <div style={{fontSize:12.5, color:"var(--ink-soft)", lineHeight:1.6, background:"var(--surface-2)", borderRadius:8, padding:"10px 12px", marginBottom:12}}>
+        <strong>How storage is kept free:</strong> a post's video/photo stays here while it's being reviewed, scheduled or if it's rejected. <strong>{rep.policy.publishedGraceDays} days after it's published</strong> on every platform, it leaves ContentFlow storage — library files point back to the Drive library, and uploads are moved to the <strong>ContentFlow Archive</strong> folder in Drive. Uploads never used in a post are removed after {rep.policy.orphanGraceHours} hours. Links keep working either way. This runs automatically every night.
+      </div>
+      <div style={{display:"flex", gap:10, flexWrap:"wrap", alignItems:"center", fontSize:12.5, marginBottom:6}}>
+        <span><strong className="num">{rep.readyNow.count}</strong> file{rep.readyNow.count===1?"":"s"} ready to clear now ({fmtBytes(rep.readyNow.bytes)})</span>
+        <span style={{color:"var(--ink-mute)"}}>· {rep.upcoming.count} waiting out the {rep.policy.publishedGraceDays}-day window ({fmtBytes(rep.upcoming.bytes)})</span>
+        <span style={{color:"var(--ink-mute)"}}>· {rep.archivedToDrive.count} archived to Drive so far</span>
+      </div>
+      {!rep.canArchive && rep.readyNow.items.concat(rep.upcoming.items).some(a=>a.action==="archive") && <div style={{fontSize:12, color:"var(--amber)", fontWeight:600, marginBottom:8}}>Reconnect Google Drive (above) so uploads can be moved to the Drive archive.</div>}
+      <div style={{display:"flex", gap:8, flexWrap:"wrap", alignItems:"center"}}>
+        <Button variant="primary" icon="refresh" onClick={clean} disabled={busy || rep.readyNow.count===0}>{busy? "Cleaning up…" : "Clean up now"}</Button>
+        {(rep.readyNow.count+rep.upcoming.count)>0 && <Button variant="ghost" size="sm" onClick={()=>setOpen(v=>!v)}>{open? "Hide details" : "Show what will be cleared"}</Button>}
+        {rep.lastCleanup && <span style={{fontSize:12, color:"var(--ink-mute)"}}>Last run {fmtDateTime(rep.lastCleanup.at)} ({rep.lastCleanup.trigger}) · freed {fmtBytes(rep.lastCleanup.freedBytes)}{rep.lastCleanup.errors && rep.lastCleanup.errors.length? " · "+rep.lastCleanup.errors.length+" error(s)" : ""}</span>}
+      </div>
+      {open && <div style={{marginTop:12}}>
+        {rep.readyNow.items.length>0 && <><div style={{fontSize:12, fontWeight:600, color:"var(--ink-mute)", margin:"6px 0"}}>Ready now</div>{rep.readyNow.items.map(row)}</>}
+        {rep.upcoming.items.length>0 && <><div style={{fontSize:12, fontWeight:600, color:"var(--ink-mute)", margin:"12px 0 6px"}}>Coming up (date it clears)</div>{rep.upcoming.items.map(row)}</>}
+      </div>}
     </div>
   );
 }
@@ -4624,6 +4751,8 @@ function SettingsPage(){
       <PageHeader title="Settings" subtitle="Integrations, workflows and account management."/>
       <SectionTitle>Google Drive content library</SectionTitle>
       <Card style={{padding:18, marginBottom:26}}><DriveSettings/></Card>
+      <SectionTitle>Storage</SectionTitle>
+      <Card style={{padding:18, marginBottom:26}}><StorageSettings/></Card>
       <SectionTitle>Campaigns</SectionTitle>
       <Card style={{padding:18, marginBottom:26}}><CampaignManager/></Card>
       <SectionTitle>Integrations</SectionTitle>

@@ -3,8 +3,22 @@
 // the API routes itself and hands everything else off to the static files in public/ via ASSETS.
 
 export default {
+  // Nightly storage clean-up (see the Storage lifecycle section below; schedule is in wrangler.toml).
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(runCleanup(env, { trigger: "nightly" }).catch((e) => console.error("cleanup failed", e)));
+  },
+
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+
+    if (url.pathname === "/api/storage" || url.pathname === "/api/storage/cleanup") {
+      try {
+        if (url.pathname === "/api/storage" && request.method === "GET") return json(await storageReport(env));
+        if (url.pathname === "/api/storage/cleanup" && request.method === "POST") return json(await runCleanup(env, { trigger: "manual" }));
+      } catch (e) {
+        return json({ error: e.message || "Storage error" }, e.status || 500);
+      }
+    }
 
     if (url.pathname === "/api/state") {
       if (request.method === "GET") return getState(env);
@@ -131,10 +145,20 @@ async function uploadFile(request, env) {
 // ---------------------------------------------------------------------------
 
 async function serveMedia(key, request, env) {
+  const wantsDrive = new URL(request.url).searchParams.get("view") === "drive";
+  if (wantsDrive) {
+    const alt = await archivedLocation(key, env);
+    if (alt) return Response.redirect(new URL(alt.view, request.url).toString(), 302);
+  }
   const range = request.headers.get("range");
   const obj = range ? await env.MEDIA.get(key, { range: parseRange(range) }) : await env.MEDIA.get(key);
 
-  if (!obj) return new Response("Not found", { status: 404 });
+  if (!obj) {
+    // Cleaned up after publishing — the same URL keeps working by pointing at the Google Drive copy.
+    const alt = await archivedLocation(key, env);
+    if (alt) return Response.redirect(new URL(alt.play, request.url).toString(), 302);
+    return new Response("Not found", { status: 404 });
+  }
 
   const headers = new Headers();
   obj.writeHttpMetadata(headers);
@@ -142,7 +166,7 @@ async function serveMedia(key, request, env) {
   headers.set("Cache-Control", "public, max-age=31536000, immutable");
   headers.set("Accept-Ranges", "bytes");
 
-  if (obj.range && "offset" in obj.range) {
+  if (range && obj.range && "offset" in obj.range) {
     const end = obj.range.offset + obj.range.length - 1;
     headers.set("Content-Range", `bytes ${obj.range.offset}-${end}/${obj.size}`);
     return new Response(obj.body, { status: 206, headers });
@@ -285,6 +309,7 @@ async function libraryStatus(env) {
     method: sa ? "service_account" : auth ? "google_signin" : null,
     serviceEmail: sa ? sa.client_email : auth ? auth.email : null,
     connectedAt: auth ? auth.connected_at : null,
+    canArchive: !!(auth && (auth.scopes || "").includes("drive.file")),
     signInConfigured: oauthConfigured(env),
     rootFolderId: env.LIBRARY_FOLDER_ID || null,
     lastRefresh: head ? (head.customMetadata && head.customMetadata.updatedAt) || head.uploaded : null,
@@ -459,7 +484,8 @@ async function libraryStream(id, request, env) {
 // The long-lived refresh token is kept server-side in D1; browsers only ever see file data, never tokens.
 // ---------------------------------------------------------------------------
 
-const GOOGLE_SCOPES = "openid email https://www.googleapis.com/auth/drive.readonly";
+// drive.readonly: read the library. drive.file: create/manage only files ContentFlow itself makes (the archive).
+const GOOGLE_SCOPES = "openid email https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file";
 function oauthConfigured(env) { return !!(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET); }
 function redirectUri(request) { return new URL("/api/google/callback", request.url).toString(); }
 
@@ -469,12 +495,13 @@ async function ensureGoogleAuthTable(env) {
   await env.DB.prepare(
     `CREATE TABLE IF NOT EXISTS google_auth (id INTEGER PRIMARY KEY, email TEXT, refresh_token TEXT NOT NULL, connected_at TEXT NOT NULL)`
   ).run();
+  try { await env.DB.prepare("ALTER TABLE google_auth ADD COLUMN scopes TEXT").run(); } catch (e) { /* already there */ }
   googleAuthTableReady = true;
 }
 async function getGoogleAuth(env) {
   if (!oauthConfigured(env)) return null;
   await ensureGoogleAuthTable(env);
-  return await env.DB.prepare("SELECT email, refresh_token, connected_at FROM google_auth WHERE id = 1").first();
+  return await env.DB.prepare("SELECT email, refresh_token, connected_at, scopes FROM google_auth WHERE id = 1").first();
 }
 
 async function oauthAccessToken(env) {
@@ -543,9 +570,9 @@ async function googleCallback(request, env) {
   const refresh = data.refresh_token || (existing && existing.refresh_token);
   if (!refresh) return backToSettings(request, { drive: "error", msg: "Google didn't return long-term access — disconnect ContentFlow in your Google account's third-party access page and connect again." });
   await env.DB.prepare(
-    `INSERT INTO google_auth (id, email, refresh_token, connected_at) VALUES (1, ?1, ?2, ?3)
-     ON CONFLICT(id) DO UPDATE SET email = excluded.email, refresh_token = excluded.refresh_token, connected_at = excluded.connected_at`
-  ).bind(email, refresh, new Date().toISOString()).run();
+    `INSERT INTO google_auth (id, email, refresh_token, connected_at, scopes) VALUES (1, ?1, ?2, ?3, ?4)
+     ON CONFLICT(id) DO UPDATE SET email = excluded.email, refresh_token = excluded.refresh_token, connected_at = excluded.connected_at, scopes = excluded.scopes`
+  ).bind(email, refresh, new Date().toISOString(), data.scope || "").run();
   googleToken = { token: data.access_token, exp: Math.floor(Date.now() / 1000) + (data.expires_in || 3600) };
   return backToSettings(request, { drive: "connected" });
 }
@@ -559,4 +586,200 @@ async function googleDisconnect(env) {
   }
   googleToken = null;
   return json({ ok: true });
+}
+
+// ---------------------------------------------------------------------------
+// Storage lifecycle — keep R2 (10 GB on the free plan) close to empty.
+//   • A post's file stays while the post is in the workflow (draft → published) or rejected.
+//   • 7 days after every platform of a post is published, the file leaves R2:
+//       - library files are simply deleted (the original is in the Drive library);
+//       - hand uploads are first copied to the "ContentFlow Archive" folder in Google Drive.
+//   • Files not used by any post (e.g. an abandoned upload) are deleted after 48 hours.
+//   • /api/media/<key> keeps working afterwards — it redirects to the Drive copy.
+// Thumbnails and the library index are small and stay.
+// ---------------------------------------------------------------------------
+
+const STORAGE_LIMIT_BYTES = 10e9; // R2 free tier: 10 GB
+const PUBLISHED_GRACE_DAYS = 7;
+const ORPHAN_GRACE_HOURS = 48;
+const MAX_ARCHIVES_PER_RUN = 8; // each archive is ~3 Drive calls; stays well under the 50-subrequest limit
+
+let storageTablesReady = false;
+async function ensureStorageTables(env) {
+  if (storageTablesReady) return;
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS media_archive (key TEXT PRIMARY KEY, drive_id TEXT NOT NULL, size INTEGER, title TEXT, archived_at TEXT NOT NULL)`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS app_kv (k TEXT PRIMARY KEY, v TEXT)`).run();
+  storageTablesReady = true;
+}
+async function kvGet(env, k) { await ensureStorageTables(env); const r = await env.DB.prepare("SELECT v FROM app_kv WHERE k = ?1").bind(k).first(); return r ? JSON.parse(r.v) : null; }
+async function kvSet(env, k, v) { await ensureStorageTables(env); await env.DB.prepare("INSERT INTO app_kv (k, v) VALUES (?1, ?2) ON CONFLICT(k) DO UPDATE SET v = excluded.v").bind(k, JSON.stringify(v)).run(); }
+
+const IMAGE_EXT = /\.(jpe?g|png|webp|gif|heic|heif)$/i;
+// Where a cleaned-up /api/media key lives now: { play: URL the app can load, view: Google Drive page }.
+async function archivedLocation(key, env) {
+  const lib = /^library\/([\w-]{10,})\.[a-z0-9]+$/i.exec(key);
+  if (lib) {
+    const id = lib[1];
+    return { play: IMAGE_EXT.test(key) ? `/api/library/thumb/${id}?s=1200` : `/api/library/stream/${id}`, view: `https://drive.google.com/file/d/${id}/view` };
+  }
+  await ensureStorageTables(env);
+  const row = await env.DB.prepare("SELECT drive_id FROM media_archive WHERE key = ?1").bind(key).first();
+  if (!row) return null;
+  return { play: `/api/library/stream/${row.drive_id}`, view: `https://drive.google.com/file/d/${row.drive_id}/view` };
+}
+
+async function listAllObjects(env) {
+  const out = [];
+  let cursor;
+  do {
+    const r = await env.MEDIA.list({ cursor, limit: 1000 });
+    out.push(...r.objects);
+    cursor = r.truncated ? r.cursor : undefined;
+  } while (cursor);
+  return out;
+}
+function storageCategory(key) {
+  if (key.startsWith("thumbs/")) return "thumbnails";
+  if (key.startsWith("library/")) return "library";
+  if (key.startsWith("meta/")) return "system";
+  return "uploads";
+}
+const mediaKeyOf = (url) => { const m = /^\/api\/media\/([^?#]+)/.exec(url || ""); return m ? decodeURIComponent(m[1]) : null; };
+
+// When a post stopped needing its file: the latest publish time once *every* platform is published.
+function finishedAt(item) {
+  const vs = Object.values(item.variants || {});
+  if (!vs.length || vs.some((v) => v.publishStatus !== "published")) return null;
+  const t = vs.map((v) => Date.parse(v.publishedAt || v.scheduledAt || "")).filter(Number.isFinite);
+  return t.length ? Math.max(...t) : Date.now();
+}
+
+async function planCleanup(env, now = Date.now()) {
+  const [objects, stateRow] = await Promise.all([
+    listAllObjects(env),
+    env.DB.prepare("SELECT data FROM app_state WHERE id = 1").first(),
+  ]);
+  const items = stateRow ? (JSON.parse(stateRow.data).contentItems || []) : [];
+  const users = new Map();
+  for (const it of items) {
+    const keys = new Set([mediaKeyOf(it.media && it.media.fileUrl), mediaKeyOf(it.media && it.media.previewUrl)].filter(Boolean));
+    for (const k of keys) { if (!users.has(k)) users.set(k, []); users.get(k).push(it); }
+  }
+  // Safety: with no shared post data to compare against, never treat files as unused.
+  const canJudgeOrphans = items.length > 0;
+  const actions = [];
+  for (const o of objects) {
+    const cat = storageCategory(o.key);
+    if (cat !== "uploads" && cat !== "library") continue;
+    const us = users.get(o.key) || [];
+    const base = { key: o.key, size: o.size, category: cat };
+    if (!us.length) {
+      if (!canJudgeOrphans) continue;
+      const age = now - new Date(o.uploaded).getTime();
+      if (age > ORPHAN_GRACE_HOURS * 3600e3) actions.push({ ...base, action: "delete", reason: "Not used by any post", dueAt: null });
+      continue;
+    }
+    const done = us.map(finishedAt);
+    if (done.some((t) => t === null)) continue; // still being worked on, scheduled or rejected
+    const dueAt = Math.max(...done) + PUBLISHED_GRACE_DAYS * 86400e3;
+    const a = { ...base, action: cat === "library" ? "delete" : "archive", titles: us.map((u) => u.title), reason: "Published", dueAt: new Date(dueAt).toISOString() };
+    actions.push({ ...a, ready: now >= dueAt });
+  }
+  return { objects, actions };
+}
+
+async function storageReport(env) {
+  const { objects, actions } = await planCleanup(env);
+  const byCategory = { uploads: { bytes: 0, count: 0 }, library: { bytes: 0, count: 0 }, thumbnails: { bytes: 0, count: 0 }, system: { bytes: 0, count: 0 } };
+  let total = 0;
+  for (const o of objects) { const c = byCategory[storageCategory(o.key)]; c.bytes += o.size; c.count++; total += o.size; }
+  const ready = actions.filter((a) => a.ready !== false);
+  const upcoming = actions.filter((a) => a.ready === false);
+  await ensureStorageTables(env);
+  const archived = await env.DB.prepare("SELECT COUNT(*) AS n, COALESCE(SUM(size),0) AS bytes FROM media_archive").first();
+  const auth = serviceAccount(env) ? null : await getGoogleAuth(env);
+  return {
+    totalBytes: total, limitBytes: STORAGE_LIMIT_BYTES, objectCount: objects.length, byCategory,
+    readyNow: { count: ready.length, bytes: ready.reduce((s, a) => s + a.size, 0), items: ready.slice(0, 50) },
+    upcoming: { count: upcoming.length, bytes: upcoming.reduce((s, a) => s + a.size, 0), items: upcoming.sort((a, b) => a.dueAt.localeCompare(b.dueAt)).slice(0, 50) },
+    archivedToDrive: { count: archived.n, bytes: archived.bytes },
+    canArchive: !!(auth && (auth.scopes || "").includes("drive.file")),
+    lastCleanup: await kvGet(env, "last_cleanup"),
+    policy: { publishedGraceDays: PUBLISHED_GRACE_DAYS, orphanGraceHours: ORPHAN_GRACE_HOURS },
+  };
+}
+
+async function archiveFolderId(env, token) {
+  const saved = await kvGet(env, "archive_folder_id");
+  if (saved) {
+    const r = await fetch(`https://www.googleapis.com/drive/v3/files/${saved}?fields=id,trashed`, { headers: { Authorization: "Bearer " + token } });
+    const d = await r.json().catch(() => ({}));
+    if (r.ok && !d.trashed) return saved;
+  }
+  const r = await fetch("https://www.googleapis.com/drive/v3/files?fields=id", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+    body: JSON.stringify({ name: "ContentFlow Archive", mimeType: DRIVE_FOLDER, description: "Published post media moved out of ContentFlow's storage. Managed by ContentFlow." }),
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok || !d.id) throw new HttpError(502, "Couldn't create the ContentFlow Archive folder in Drive: " + ((d.error && d.error.message) || r.status));
+  await kvSet(env, "archive_folder_id", d.id);
+  return d.id;
+}
+
+async function archiveToDrive(env, token, folderId, action) {
+  const obj = await env.MEDIA.get(action.key);
+  if (!obj) return null;
+  const type = (obj.httpMetadata && obj.httpMetadata.contentType) || "application/octet-stream";
+  const ext = action.key.includes(".") ? "." + action.key.split(".").pop() : "";
+  const date = new Date().toISOString().slice(0, 10);
+  const title = ((action.titles && action.titles[0]) || "ContentFlow media").replace(/[\\/:*?"<>|]+/g, " ").slice(0, 80);
+  const init = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + token, "Content-Type": "application/json; charset=UTF-8", "X-Upload-Content-Type": type, "X-Upload-Content-Length": String(obj.size) },
+    body: JSON.stringify({ name: `${date} ${title}${ext}`, parents: [folderId], description: "Archived by ContentFlow from /api/media/" + action.key }),
+  });
+  const session = init.headers.get("location");
+  if (!init.ok || !session) { obj.body.cancel(); throw new Error("Drive upload couldn't start (" + init.status + ")"); }
+  const { readable, writable } = new FixedLengthStream(obj.size);
+  const pump = obj.body.pipeTo(writable);
+  const up = await fetch(session, { method: "PUT", headers: { "Content-Type": type }, body: readable });
+  await pump;
+  const d = await up.json().catch(() => ({}));
+  if (!up.ok || !d.id) throw new Error("Drive upload failed (" + up.status + ")");
+  return d.id;
+}
+
+async function runCleanup(env, { trigger }) {
+  const { actions } = await planCleanup(env);
+  const due = actions.filter((a) => a.ready !== false);
+  const result = { at: new Date().toISOString(), trigger, deleted: 0, archived: 0, freedBytes: 0, skipped: 0, errors: [] };
+  let token = null, folderId = null, archivesLeft = MAX_ARCHIVES_PER_RUN;
+  for (const a of due) {
+    try {
+      if (a.action === "archive") {
+        if (archivesLeft <= 0) { result.skipped++; continue; }
+        if (!token) {
+          const auth = await getGoogleAuth(env);
+          if (!auth || !(auth.scopes || "").includes("drive.file")) { result.skipped++; result.needsReconnect = true; continue; }
+          token = await getGoogleToken(env);
+          folderId = await archiveFolderId(env, token);
+        }
+        archivesLeft--;
+        const driveId = await archiveToDrive(env, token, folderId, a);
+        if (!driveId) continue;
+        await env.DB.prepare("INSERT OR REPLACE INTO media_archive (key, drive_id, size, title, archived_at) VALUES (?1, ?2, ?3, ?4, ?5)")
+          .bind(a.key, driveId, a.size, (a.titles || [])[0] || null, new Date().toISOString()).run();
+        result.archived++;
+      } else {
+        result.deleted++;
+      }
+      await env.MEDIA.delete(a.key);
+      result.freedBytes += a.size;
+    } catch (e) {
+      result.errors.push({ key: a.key, error: e.message });
+    }
+  }
+  await kvSet(env, "last_cleanup", result);
+  return result;
 }

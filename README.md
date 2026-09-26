@@ -120,3 +120,16 @@ revokes it. Alternative for organisations that allow service-account keys: put t
 
 ContentFlow only ever *reads* the folder. Files used in a post are copied into R2 so they preview and play like
 uploads; camera RAW photos come in as Drive's full-size JPEG. The folder ID is `LIBRARY_FOLDER_ID` in `wrangler.toml`.
+
+## Storage (R2) — keeping the 10 GB free
+
+A post's video/photo lives in R2 only while it's needed:
+- Draft → Submitted → Changes requested → Approved → Scheduled, and Rejected: **kept**.
+- **7 days after every platform is marked Published**: removed from R2. Library files point back to the Drive
+  library; hand uploads are first copied to a **"ContentFlow Archive"** folder in the connected Google Drive.
+- Uploads never attached to a post: removed after 48 hours.
+- `/api/media/<key>` keeps working after removal — it redirects to the Drive copy.
+
+Runs nightly (cron `30 3 * * *` in `wrangler.toml`) and on demand from Settings → Storage → Clean up now.
+Archiving needs the `drive.file` permission — press "Reconnect Google Drive" in Settings once if prompted.
+Posts are marked published from the post's detail panel (**Mark as published**) until auto-publishing is wired up.

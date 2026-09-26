@@ -80,6 +80,7 @@
   @keyframes cf-fade-in{from{opacity:0;} to{opacity:1;}}
   body.cf-immersive .cf-toasts{top:calc(16px + env(safe-area-inset-top, 0px)); bottom:auto !important; left:16px; right:16px !important; margin:0 auto;}
   @media (max-width:700px){ .cf-hide-narrow{display:none !important;} }
+  .cf-clickcard{transition:border-color .12s, box-shadow .12s, transform .12s;} .cf-clickcard:hover{border-color:var(--ink-mute) !important; box-shadow:var(--shadow-md) !important;} .cf-clickcard:active{transform:scale(.99);}
   .cf-noscrollbar{scrollbar-width:none;} .cf-noscrollbar::-webkit-scrollbar{display:none;}
   @keyframes cf-spin{to{transform:rotate(360deg);}}
   @keyframes cf-pop-in{from{opacity:0; transform:translateY(14px) scale(.97);} to{opacity:1; transform:translateY(0) scale(1);}}
@@ -689,7 +690,9 @@ function Select({value, onChange, options, placeholder, style}){
 }
 
 function Card({children, style, onClick}){
-  return <div onClick={onClick} style={{background:"var(--surface)", border:"1px solid var(--border)", borderRadius:"var(--radius)", boxShadow:"var(--shadow-sm)", ...style}}>{children}</div>;
+  return <div onClick={onClick} className={onClick? "cf-clickcard" : undefined} role={onClick? "button" : undefined} tabIndex={onClick? 0 : undefined}
+    onKeyDown={onClick? (e=>{ if(e.key==="Enter"||e.key===" "){ e.preventDefault(); onClick(e); } }) : undefined}
+    style={{background:"var(--surface)", border:"1px solid var(--border)", borderRadius:"var(--radius)", boxShadow:"var(--shadow-sm)", ...style}}>{children}</div>;
 }
 
 function SectionTitle({children, action}){
@@ -938,7 +941,8 @@ function reducer(state, action){
     case "TEAM_LOADED": { applyTeam(action.members); return {...state, team: action.members, teamRev:(state.teamRev||0)+1}; }
     case "SET_ME": return {...state, me: action.me, lock: action.lock || null, ...(action.me && action.me.member ? {currentUserId: action.me.member.id} : {})};
     case "SET_BRAND": return {...state, currentBrandId: action.id};
-    case "SET_ROUTE": return {...state, route: action.route, createPrefill: action.createPrefill || null, libraryQuery: action.libraryQuery || "", driveReturn: action.driveReturn || state.driveReturn || null};
+    case "SET_ROUTE": return {...state, route: action.route, createPrefill: action.createPrefill || null, libraryQuery: action.libraryQuery || "", driveReturn: action.driveReturn || state.driveReturn || null,
+      queueTab: action.queueTab || null, calendarPreset: action.calendarPreset || null};
     case "CLEAR_DRIVE_RETURN": return {...state, driveReturn: null};
     case "SET_THEME": return {...state, theme: action.theme};
     case "ADD_TOAST": return {...state, toasts:[...state.toasts, {id:uid("toast"), message:action.message, variant:action.variant||"ok"}]};
@@ -1053,6 +1057,23 @@ function reducer(state, action){
       return {...state, contentItems: items, activityLog:[log, ...state.activityLog],
         toasts:[...state.toasts, {id:uid("toast"), message: scheduledAt? "Scheduled for "+fmtDateTime(scheduledAt) : "Publish time cleared", variant:"ok"}]};
     }
+    case "REVISE_CONTENT": {
+      const {contentId, patch, resubmit, note} = action;
+      const item = state.contentItems.find(i=>i.id===contentId);
+      if(!item) return state;
+      const editor = (USERS.find(u=>u.id===state.currentUserId)||{}).name || "Someone";
+      const variants = {...item.variants};
+      Object.entries(patch.variants||{}).forEach(([p,v])=>{ if(variants[p]) variants[p] = {...variants[p], ...v, ...(resubmit? {status:"submitted"} : {})}; });
+      const nextVersion = resubmit ? item.currentVersion + 1 : item.currentVersion;
+      const versions = resubmit ? [...(item.versions||[]), {version:nextVersion, editor, date:new Date().toISOString(), changes: note || "Revised after feedback", decision:"—", feedback:null}] : item.versions;
+      const updated = {...item, ...(patch.title!=null? {title:patch.title} : {}), ...(patch.media? {media:{...item.media, ...patch.media}} : {}),
+        ...(patch.libraryRef!==undefined? {libraryRef:patch.libraryRef} : {}), variants, versions, currentVersion:nextVersion,
+        ...(resubmit? {status:"submitted"} : {})};
+      const log = {id:uid("act"), at:new Date().toISOString(), contentId, contentTitle:updated.title, user:state.currentUserId, version:nextVersion,
+        type: resubmit? "submitted" : "edited", detail: resubmit? "Resubmitted as v"+nextVersion+" after "+(item.status==="rejected"? "rejection" : "feedback") : "Edited", comment: note || null};
+      return {...state, contentItems: state.contentItems.map(i=> i.id===contentId? updated : i), activityLog:[log, ...state.activityLog],
+        toasts:[...state.toasts, {id:uid("toast"), message: resubmit? "Resubmitted for approval — "+updated.title : "Changes saved", variant:"ok"}]};
+    }
     case "UNDO_DECISION": {
       if(state.decisionHistory.length===0) return state;
       const last = state.decisionHistory[state.decisionHistory.length-1];
@@ -1072,7 +1093,7 @@ function useApp(){ return React.useContext(AppCtx); }
 const NAV_ITEMS = [
   {id:"dashboard", label:"Dashboard", icon:"dashboard"},
   {id:"calendar", label:"Content Calendar", icon:"calendar"},
-  {id:"queue", label:"Approval Queue", icon:"queue", roleGate:"approve"},
+  {id:"queue", label:"Approval Queue", icon:"queue"},
   {id:"chat", label:"Team Chat", icon:"chat"},
   {id:"create", label:"Create Content", icon:"create", roleGate:"create"},
   {id:"library", label:"Content Library", icon:"grid"},
@@ -1088,7 +1109,8 @@ function Sidebar({open, onClose}){
   const [brandMenu, setBrandMenu] = useState(false);
   const user = USERS.find(u=>u.id===state.currentUserId);
   const perms = PERMS[user.role];
-  const pendingCount = state.contentItems.filter(i=>i.status==="submitted").length;
+  const pendingCount = perms.approve ? state.contentItems.filter(i=>i.status==="submitted").length
+    : state.contentItems.filter(i=>i.status==="changes_requested" && i.creator===user.id).length;
   const brand = state.currentBrandId==="all" ? {name:"All Brands"} : BRANDS.find(b=>b.id===state.currentBrandId);
 
   return (
@@ -2253,8 +2275,220 @@ function SwipeCard({entry, onDecision, onOpenDetails, isTop, narrow, paused, onI
   );
 }
 
+/* Approval Queue has three tabs: To review (approvers), Needs changes and Rejected (where creators fix and resubmit). */
+function QueueTabs({tab, setTab, canReview}){
+  const {state} = useApp();
+  const count = st => state.contentItems.filter(i=>i.status===st).length;
+  const tabs = [...(canReview? [["review","To review","submitted"]] : []), ["changes","Needs changes","changes_requested"], ["rejected","Rejected","rejected"]];
+  return (
+    <div className="cf-noscrollbar" style={{display:"flex", gap:4, borderBottom:"1px solid var(--border)", marginBottom:16, overflowX:"auto"}}>
+      {tabs.map(([k,l,st])=>{
+        const n = count(st), active = tab===k;
+        return <button key={k} onClick={()=>setTab(k)} style={{padding:"9px 14px", border:"none", borderBottom:"2px solid "+(active? "var(--accent)":"transparent"), marginBottom:-1, background:"transparent", color: active? "var(--ink)":"var(--ink-soft)", fontWeight: active? 600:500, fontSize:13.5, cursor:"pointer", display:"flex", alignItems:"center", gap:7, whiteSpace:"nowrap"}}>
+          {l}<span className="num" style={{fontSize:11, fontWeight:600, padding:"1px 7px", borderRadius:99, background: n? (k==="review"? "var(--blue-soft)" : k==="changes"? "var(--amber-soft)" : "var(--red-soft)") : "var(--surface-2)", color: n? (k==="review"? "var(--blue)" : k==="changes"? "var(--amber)" : "var(--red)") : "var(--ink-mute)"}}>{n}</span>
+        </button>;
+      })}
+    </div>
+  );
+}
+
+function FeedbackBox({item}){
+  const fb = item.lastFeedback;
+  if(!fb) return <div style={{fontSize:12.5, color:"var(--ink-mute)"}}>No written feedback was left.</div>;
+  const by = USERS.find(u=>u.id===fb.by);
+  const tone = item.status==="rejected" ? ["var(--red-soft)","var(--red)"] : ["var(--amber-soft)","var(--amber)"];
+  return (
+    <div style={{background:tone[0], borderLeft:"3px solid "+tone[1], borderRadius:8, padding:"10px 12px"}}>
+      <div style={{fontSize:12, color:"var(--ink-soft)", marginBottom:6, display:"flex", alignItems:"center", gap:6, flexWrap:"wrap"}}>
+        {by && <Avatar user={by} size={18}/>}<strong style={{color:"var(--ink)"}}>{by? by.name : "Approver"}</strong>
+        {item.status==="rejected"? "rejected this" : "asked for changes"}{fb.at? " · "+fmtDateTime(fb.at) : ""}
+      </div>
+      {fb.tags && fb.tags.length>0 && <div style={{display:"flex", gap:5, flexWrap:"wrap", marginBottom:6}}>{fb.tags.map(t=><span key={t} style={{fontSize:11, fontWeight:600, padding:"2px 7px", borderRadius:5, background:"var(--surface)", border:"1px solid var(--border)"}}>{t}</span>)}</div>}
+      {fb.text ? <div style={{fontSize:13.5, lineHeight:1.5, whiteSpace:"pre-wrap"}}>{fb.text}</div> : <div style={{fontSize:12.5, color:"var(--ink-mute)"}}>No comment added.</div>}
+    </div>
+  );
+}
+
+function ReworkList({status}){
+  const {state, openDetails} = useApp();
+  const me = USERS.find(u=>u.id===state.currentUserId);
+  const perms = PERMS[me.role];
+  const [mineOnly, setMineOnly] = useState(!perms.approve);
+  const [editing, setEditing] = useState(null);
+  let items = state.contentItems.filter(i=>i.status===status);
+  if(mineOnly) items = items.filter(i=>i.creator===me.id);
+  items.sort((a,b)=> new Date((b.lastFeedback||{}).at||b.createdAt||0) - new Date((a.lastFeedback||{}).at||a.createdAt||0));
+  const canEdit = perms.edit || perms.approve;
+  return (
+    <div>
+      <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", gap:10, flexWrap:"wrap", marginBottom:12}}>
+        <div style={{fontSize:13, color:"var(--ink-soft)"}}>{status==="rejected" ? "Posts the approver turned down. You can rework one and send it back, or leave it." : "Posts the approver sent back. Read the feedback, make the changes, then resubmit."}</div>
+        <label style={{display:"flex", alignItems:"center", gap:6, fontSize:12.5, fontWeight:600, color:"var(--ink-soft)", cursor:"pointer"}}><input type="checkbox" checked={mineOnly} onChange={e=>setMineOnly(e.target.checked)}/> Only mine</label>
+      </div>
+      {items.length===0 ? <Card><EmptyState icon="check" title={status==="rejected"? "Nothing rejected" : "Nothing needs changes"} subtitle={mineOnly? "None of your posts are waiting on you. Untick “Only mine” to see the whole team's." : "All clear — nothing is waiting on a fix."}/></Card> :
+      <div style={{display:"flex", flexDirection:"column", gap:12}}>
+        {items.map(it=>{
+          const creator = USERS.find(u=>u.id===it.creator);
+          return (
+            <Card key={it.id} style={{padding:14}}>
+              <div className="cf-rework" style={{display:"grid", gridTemplateColumns:"72px 1fr minmax(260px,1.1fr)", gap:14, alignItems:"start"}}>
+                <div style={{width:72, height:72, borderRadius:8, overflow:"hidden", cursor:"pointer"}} onClick={()=>openDetails(it)}><Thumb item={it} radius={8} iconSize={18}/></div>
+                <div style={{minWidth:0}}>
+                  <div style={{fontSize:14.5, fontWeight:600, marginBottom:4, cursor:"pointer"}} onClick={()=>openDetails(it)}>{it.title}</div>
+                  <div style={{display:"flex", gap:6, alignItems:"center", flexWrap:"wrap", fontSize:12, color:"var(--ink-mute)", marginBottom:8}}>
+                    <StatusBadge status={it.status}/><span>v{it.currentVersion}</span><span>·</span>{creator && <><Avatar user={creator} size={16}/>{creator.name}</>}
+                  </div>
+                  <div style={{display:"flex", gap:4}}>{it.platforms.map(p=><PlatformIcon key={p} platform={p} size={11}/>)}</div>
+                </div>
+                <div>
+                  <FeedbackBox item={it}/>
+                  <div style={{display:"flex", gap:8, marginTop:10, flexWrap:"wrap"}}>
+                    {canEdit && <Button variant="primary" size="sm" icon="edit" onClick={()=>setEditing(it)}>{status==="rejected"? "Rework & resubmit" : "Edit & resubmit"}</Button>}
+                    <Button variant="ghost" size="sm" onClick={()=>openDetails(it)}>Open details</Button>
+                  </div>
+                </div>
+              </div>
+            </Card>
+          );
+        })}
+      </div>}
+      <RevisionEditor item={editing && state.contentItems.find(i=>i.id===editing.id)} onClose={()=>setEditing(null)}/>
+      <style>{`@media (max-width:760px){ .cf-rework{ grid-template-columns:64px 1fr !important; } .cf-rework > div:last-child{ grid-column:1 / -1; } }`}</style>
+    </div>
+  );
+}
+
+/* Edit everything the approver may have asked about — title, captions per platform, dates, the file — then save or resubmit. */
+function RevisionEditor({item, onClose}){
+  const {state, dispatch, chat} = useApp();
+  const [f, setF] = useState(null);
+  const [tab, setTab] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [notify, setNotify] = useState(true);
+  useEffect(()=>{
+    if(!item){ setF(null); return; }
+    const variants = {};
+    Object.entries(item.variants||{}).forEach(([p,v])=>{ variants[p] = {caption:v.caption||"", hashtags:(v.hashtags||[]).join(" "), title:v.title||"", description:v.description||"", cta:v.cta||"", scheduledAt: v.scheduledAt ? isoToLocalInput(v.scheduledAt) : ""}; });
+    setF({title:item.title, variants, media:null, libraryRef:undefined, note:"", mediaStatus:""});
+    setTab(item.platforms[0]);
+    setNotify(true);
+  }, [item && item.id]);
+  if(!item || !f) return null;
+  const approver = USERS.find(u=>u.id===item.approver);
+  const setV = (p, patch) => setF(x=>({...x, variants:{...x.variants, [p]:{...x.variants[p], ...patch}}}));
+  const input = {width:"100%", padding:"9px 11px", borderRadius:8, border:"1px solid var(--border)", fontSize:13.5, background:"var(--surface)", color:"var(--ink)", fontFamily:"inherit"};
+  const label = {display:"block", fontSize:12.5, fontWeight:600, marginBottom:6, marginTop:14};
+
+  async function pickFromLibrary(file, connected){
+    setF(x=>({...x, mediaStatus:"Copying "+(file.barcode||"file")+" from Google Drive…", libraryRef: libraryRefOf(file)}));
+    if(!connected){ setF(x=>({...x, mediaStatus:"Linked to "+(file.barcode||"the library file")+" — Google Drive isn't connected, so the file wasn't copied."})); return; }
+    try{
+      const r = await fetch("/api/library/import", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({id:file.id})});
+      const d = await r.json().catch(()=>({}));
+      if(!r.ok) throw new Error(d.error || "Couldn't copy the file");
+      const isVideo = (d.mime||"").startsWith("video/");
+      const info = await readMediaInfo(d.url, isVideo);
+      setF(x=>({...x, mediaStatus:"New file ready — "+(file.barcode||file.name), media:{type:isVideo?"video":"image", fileUrl:d.url, previewUrl: isVideo? libThumbUrl(file, true) : d.url,
+        ...(info? {aspectRatio: nearestAspect(info.w, info.h) || item.media.aspectRatio, duration: isVideo && isFinite(info.duration)? Math.round(info.duration) : null} : {})}}));
+    }catch(e){ setF(x=>({...x, mediaStatus:e.message})); }
+  }
+  async function upload(file){
+    const isVideo = file.type.startsWith("video/");
+    setF(x=>({...x, mediaStatus:"Uploading "+file.name+"…", libraryRef:null}));
+    try{
+      const [up, preview, info] = await Promise.all([uploadMediaFile(file), (isVideo? videoFileToPoster(file, 480, 0.72) : imageFileToPreview(file, 480, 0.78)).catch(()=>null), readMediaInfo(file, isVideo)]);
+      setF(x=>({...x, mediaStatus:"New file ready — "+file.name, media:{type:isVideo?"video":"image", fileUrl:up.url, previewUrl:preview, ...(info? {aspectRatio: nearestAspect(info.w, info.h) || item.media.aspectRatio, duration: isVideo && isFinite(info.duration)? Math.round(info.duration) : null} : {})}}));
+    }catch(e){ setF(x=>({...x, mediaStatus:"Upload failed — "+e.message})); }
+  }
+  function patchFromForm(){
+    const variants = {};
+    Object.entries(f.variants).forEach(([p,v])=>{
+      variants[p] = {caption:v.caption, hashtags: v.hashtags.split(/[\s,]+/).filter(Boolean).map(t=> t.startsWith("#")? t : "#"+t), title:v.title, description:v.description, cta:v.cta,
+        scheduledAt: v.scheduledAt ? new Date(v.scheduledAt).toISOString() : null};
+    });
+    return {title:f.title.trim() || item.title, variants, ...(f.media? {media:f.media} : {}), ...(f.libraryRef!==undefined? {libraryRef:f.libraryRef} : {})};
+  }
+  async function save(resubmit){
+    setBusy(true);
+    dispatch({type:"REVISE_CONTENT", contentId:item.id, patch:patchFromForm(), resubmit, note:f.note.trim()});
+    if(resubmit && notify && approver && approver.id!==state.currentUserId){
+      await chat.send("@"+approver.name+" I've made the changes to \""+(f.title.trim()||item.title)+"\" and resubmitted it for approval."+(f.note.trim()? "\n"+f.note.trim() : ""), item.id);
+    }
+    setBusy(false);
+    onClose();
+  }
+  const uploading = /Uploading|Copying/.test(f.mediaStatus);
+  const v = f.variants[tab] || {};
+  return (
+    <Drawer open={!!item} onClose={onClose} width={640}>
+      <div style={{position:"sticky", top:0, zIndex:3, background:"var(--surface)", borderBottom:"1px solid var(--border)", padding:"14px 18px", display:"flex", gap:10, alignItems:"flex-start"}}>
+        <div style={{flex:1, minWidth:0}}>
+          <div style={{fontSize:11.5, color:"var(--ink-mute)", fontWeight:600}}>{item.status==="rejected"? "Rework & resubmit" : "Edit & resubmit"} · currently v{item.currentVersion}</div>
+          <div style={{fontSize:16.5, fontWeight:600}}>{item.title}</div>
+        </div>
+        <IconButton icon="x" title="Close" onClick={onClose}/>
+      </div>
+      <div style={{padding:18}}>
+        <FeedbackBox item={item}/>
+        <label style={label}>Title</label>
+        <input value={f.title} onChange={e=>setF(x=>({...x, title:e.target.value}))} style={input}/>
+
+        <label style={label}>Photo / video</label>
+        <div style={{display:"flex", gap:12, alignItems:"center", marginBottom:8}}>
+          <div style={{width:64, height:64, borderRadius:8, overflow:"hidden", flexShrink:0}}><Thumb item={{...item, media:{...item.media, ...(f.media||{})}}} radius={8} iconSize={16}/></div>
+          <div style={{fontSize:12.5, color: /failed|isn't|Couldn't/.test(f.mediaStatus)? "var(--red)" : "var(--ink-soft)"}}>{f.mediaStatus || (f.media? "" : "Keeping the current file. Replace it below if the feedback was about the visual.")}</div>
+        </div>
+        <div style={{display:"grid", gridTemplateColumns:"1fr auto", gap:8, alignItems:"center"}}>
+          <LibraryPicker onPick={pickFromLibrary}/>
+          <label style={{display:"inline-flex", alignItems:"center", gap:6, padding:"8px 12px", borderRadius:8, border:"1px solid var(--border)", fontSize:13, fontWeight:500, cursor:"pointer", whiteSpace:"nowrap"}}>
+            <Icon name="upload" size={14}/>Upload
+            <input type="file" accept="image/*,video/*" style={{display:"none"}} onChange={e=>{ const file=e.target.files[0]; if(file) upload(file); e.target.value=""; }}/>
+          </label>
+        </div>
+
+        <label style={label}>Wording per platform</label>
+        <div className="cf-noscrollbar" style={{display:"flex", gap:6, overflowX:"auto", marginBottom:10}}>
+          {item.platforms.map(p=>(
+            <button key={p} onClick={()=>setTab(p)} style={{display:"flex", alignItems:"center", gap:6, padding:"6px 11px 6px 6px", borderRadius:99, border:"1px solid "+(tab===p? PLATFORM_HEX[p]:"var(--border)"), background: tab===p? PLATFORM_HEX[p]+"14":"var(--surface)", fontSize:12.5, fontWeight:600, cursor:"pointer", color:"var(--ink)", flexShrink:0}}>
+              <PlatformIcon platform={p} size={11}/>{PLATFORM_META[p].label}
+            </button>
+          ))}
+        </div>
+        {tab==="youtube" ? <>
+          <input value={v.title} onChange={e=>setV(tab,{title:e.target.value})} placeholder="YouTube Shorts title" style={{...input, marginBottom:8}}/>
+          <textarea value={v.description} onChange={e=>setV(tab,{description:e.target.value})} placeholder="Description" rows={3} style={{...input, resize:"vertical"}}/>
+        </> : <>
+          <textarea value={v.caption} onChange={e=>setV(tab,{caption:e.target.value})} placeholder="Caption" rows={4} style={{...input, resize:"vertical", marginBottom:8}}/>
+          {tab==="gbp"
+            ? <input value={v.cta} onChange={e=>setV(tab,{cta:e.target.value})} placeholder="Button text, e.g. Book" style={input}/>
+            : <input value={v.hashtags} onChange={e=>setV(tab,{hashtags:e.target.value})} placeholder="#Sanjugo #sushi" style={input}/>}
+        </>}
+        <div style={{display:"flex", gap:10, alignItems:"center", flexWrap:"wrap", marginTop:10}}>
+          <span style={{fontSize:12.5, fontWeight:600}}>Publish at</span>
+          <input type="datetime-local" value={v.scheduledAt||""} onChange={e=>setV(tab,{scheduledAt:e.target.value})} style={{...input, width:"auto"}}/>
+          {item.platforms.length>1 && <Button variant="text" size="sm" onClick={()=>item.platforms.forEach(p=>setV(p,{scheduledAt:v.scheduledAt}))}>Use for all platforms</Button>}
+        </div>
+
+        <label style={label}>Note to the approver <span style={{fontWeight:400, color:"var(--ink-mute)"}}>(what you changed)</span></label>
+        <textarea value={f.note} onChange={e=>setF(x=>({...x, note:e.target.value}))} rows={2} placeholder="e.g. Shortened the caption and swapped to the brighter shot (G731)." style={{...input, resize:"vertical"}}/>
+        {approver && approver.id!==state.currentUserId && <label style={{display:"flex", alignItems:"center", gap:7, fontSize:12.5, marginTop:10, color:"var(--ink-soft)", cursor:"pointer"}}>
+          <input type="checkbox" checked={notify} onChange={e=>setNotify(e.target.checked)}/> Tell {approver.name} in Team Chat when I resubmit
+        </label>}
+      </div>
+      <div style={{position:"sticky", bottom:0, background:"var(--surface)", borderTop:"1px solid var(--border)", padding:"12px 18px", display:"flex", justifyContent:"flex-end", gap:8, flexWrap:"wrap"}}>
+        <Button variant="ghost" onClick={onClose}>Cancel</Button>
+        <Button variant="ghost" onClick={()=>save(false)} disabled={busy||uploading}>Save changes</Button>
+        <Button variant="primary" icon="check" onClick={()=>save(true)} disabled={busy||uploading}>{uploading? "Waiting for file…" : "Resubmit for approval"}</Button>
+      </div>
+    </Drawer>
+  );
+}
+
 function ApprovalQueuePage(){
   const {state, dispatch, openDetails} = useApp();
+  const meQ = USERS.find(u=>u.id===state.currentUserId);
+  const canReview = PERMS[meQ.role].approve;
+  const [qtab, setQtab] = useState(()=>{ const t = state.queueTab; if(t==="review" && !canReview) return "changes"; return t || (canReview? "review" : "changes"); });
   const [mode, setMode] = useState("package");
   const [filters, setFilters] = useState({brand:"", creator:"", campaign:"", priority:"", platform:""});
   // Keys reviewed this session. Approved/rejected items drop out of the "submitted" pool on their own, so
@@ -2294,12 +2528,14 @@ function ApprovalQueuePage(){
 
   return (
     <div>
-      <PageHeader title="Approval Queue" subtitle="Swipe right to approve, left to reject, up to request edits." action={
+      <PageHeader title="Approval Queue" subtitle={qtab==="review" ? "Swipe right to approve, left to reject, up to request edits." : "Fix what the approver asked for, then resubmit."} action={qtab!=="review" ? null :
         <div style={{display:"flex", gap:8, alignItems:"center"}}>
           <Button variant="ghost" size="sm" icon="undo" onClick={undo} disabled={state.decisionHistory.length===0}>Undo Last Decision</Button>
         </div>
       }/>
 
+      <QueueTabs tab={qtab} setTab={setQtab} canReview={canReview}/>
+      {qtab!=="review" ? <ReworkList key={qtab} status={qtab==="changes"? "changes_requested" : "rejected"}/> : <>
       <Card style={{padding: narrow? 10:14, marginBottom: narrow? 14:18, display:"flex", flexWrap:"wrap", gap:10, alignItems:"center"}}>
         <div style={{display:"flex", background:"var(--surface-2)", borderRadius:9, padding:3, gap:2}}>
           <button onClick={()=>setMode("package")} style={{padding:"6px 12px", borderRadius:7, border:"none", fontWeight:700, fontSize:12.5, cursor:"pointer", background:mode==="package"?"var(--surface)":"transparent", boxShadow:mode==="package"?"var(--shadow-sm)":"none"}}>Full package</button>
@@ -2348,6 +2584,7 @@ function ApprovalQueuePage(){
           </div>
         </div>
       )}
+      </>}
       {immersive && current && <ImmersiveViewer key={current.key} entry={current} platform={immersivePlatform} onPlatform={setImmersive}
         onDecision={requestDecision} onClose={()=>setImmersive(null)} busy={!!pending}/>}
       <DecisionModal pending={pending} onCancel={()=>setPending(null)} onConfirm={confirmDecision}/>
@@ -2368,66 +2605,153 @@ function PageHeader({title, subtitle, action}){
 }
 
 /* ============================== DASHBOARD ============================== */
-function StatTile({label, value, sub, color, icon}){
+function StatTile({label, value, sub, color, icon, onClick, hint}){
   return (
-    <Card style={{padding:16, flex:1, minWidth:150}}>
+    <Card onClick={onClick} style={{padding:16, flex:1, minWidth:150, ...(onClick? {cursor:"pointer"} : {})}}>
       <div style={{display:"flex", alignItems:"center", gap:8, marginBottom:10}}>
         <div style={{width:28,height:28,borderRadius:7,background:"var(--surface-2)",border:"1px solid var(--border)",color:"var(--ink-soft)",display:"flex",alignItems:"center",justifyContent:"center"}}><Icon name={icon} size={14}/></div>
         <div style={{fontSize:12, fontWeight:700, color:"var(--ink-mute)"}}>{label}</div>
       </div>
       <div className="num font-display" style={{fontSize:26, fontWeight:600, letterSpacing:"-.02em"}}>{value}</div>
       {sub && <div style={{fontSize:12, color:"var(--ink-mute)", marginTop:3}}>{sub}</div>}
+      {onClick && <div style={{fontSize:11.5, color:"var(--accent)", fontWeight:600, marginTop:6, display:"flex", alignItems:"center", gap:3}}>{hint || "View"}<Icon name="chevronRight" size={12}/></div>}
     </Card>
   );
 }
 
-function SmartInsightsPanel({stats}){
-  const {caps} = useApp();
-  const [insight, setInsight] = useState(null);
+/* ---------- Smart insights ----------
+   One compact snapshot of the pipeline + performance feeds both Claude (via /api/insights) and the built-in
+   rules used when no Claude API key is set, so both always talk about the same numbers. */
+function insightsData(state){
+  const items = state.contentItems;
+  const count = st => items.filter(i=>i.status===st);
+  const now = new Date(TODAY);
+  const daysAgo = iso => Math.max(0, Math.round((now - new Date(iso))/86400000));
+  const all = [...state.publishedPosts, ...SAMPLE_HISTORY];
+  const since = d => { const x = new Date(now); x.setDate(x.getDate()-d); return x; };
+  const cur = all.filter(p=> new Date(p.publishedAt) > since(30) && new Date(p.publishedAt) <= now);
+  const prev = all.filter(p=> new Date(p.publishedAt) > since(60) && new Date(p.publishedAt) <= since(30));
+  const tc = metricTotals(cur), tp = metricTotals(prev);
+  const byPlatform = Object.keys(PLATFORM_META).map(pl=>({pl, t:metricTotals(cur.filter(p=>p.platform===pl))})).filter(r=>r.t.posts>0);
+  const pillars = PILLARS.map(pl=>{ const ps=cur.filter(p=>p.pillar===pl); const t=metricTotals(ps); return {pl, n:ps.length, avgViews: ps.length? t.views/ps.length : 0, er:t.engagementRate}; }).filter(r=>r.n>=2);
+  const BUCKETS = [["morning",5,11],["lunchtime",11,14],["afternoon",14,17],["evening",17,21],["late evening",21,29]];
+  const DAYS = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"];
+  let bestSlot = null;
+  DAYS.forEach((d,wd)=>BUCKETS.forEach(([b,a1,b1])=>{
+    const ps = all.filter(p=>{ const x=new Date(p.publishedAt); const h=x.getHours(); return (x.getDay()+6)%7===wd && ((h>=a1&&h<b1)||(h+24>=a1&&h+24<b1)); });
+    if(ps.length>=3){ const er = metricTotals(ps).engagementRate; if(!bestSlot || er>bestSlot.er) bestSlot = {day:d, bucket:b, er, n:ps.length}; }
+  }));
+  const top = [...cur].sort((a,b)=>b.views-a.views).slice(0,3);
+  const nextWeek = Array.from({length:7}).map((_,i)=>{ const d=new Date(now); d.setDate(d.getDate()+i); d.setHours(0,0,0,0); return d; });
+  const scheduled = nextWeek.map(d=>{ const e=new Date(d); e.setDate(e.getDate()+1);
+    const vs = items.flatMap(i=>Object.values(i.variants||{}).filter(v=>v.scheduledAt && v.publishStatus!=="published" && new Date(v.scheduledAt)>=d && new Date(v.scheduledAt)<e).map(v=>({title:i.title, platform:v.platform})));
+    return {date:d, vs}; });
+  const emptyDays = scheduled.filter(x=>x.vs.length===0).map(x=>x.date.toLocaleDateString("en-GB",{weekday:"short", day:"numeric"}));
+  return {
+    sample: all.some(p=>p.sample), tc, tp, byPlatform, pillars, bestSlot, top, scheduled, emptyDays,
+    awaiting: count("submitted").map(i=>({title:i.title, days:daysAgo(i.createdAt||now)})),
+    changes: count("changes_requested").map(i=>i.title), rejected: count("rejected").map(i=>i.title), failed: count("failed").map(i=>i.title),
+    approvedUnscheduled: items.filter(i=>i.status==="approved" && !Object.values(i.variants||{}).some(v=>v.scheduledAt)).map(i=>i.title),
+  };
+}
+function pctChange(a, b){ return b ? (a-b)/b*100 : 0; }
+function insightsSnapshot(d){
+  const L = [];
+  L.push("Sanjugo Creator Studio snapshot, "+fmtDate(TODAY.toISOString())+".");
+  if(d.sample) L.push("NOTE: performance figures below are SAMPLE data (real platform stats aren't connected yet). Pipeline figures are real.");
+  L.push("", "PIPELINE (real)");
+  L.push("- Awaiting approval: "+d.awaiting.length+(d.awaiting.length? " — "+d.awaiting.map(a=>`"${a.title}" (${a.days}d waiting)`).join("; ") : ""));
+  L.push("- Needs changes: "+d.changes.length+(d.changes.length? " — "+d.changes.map(t=>`"${t}"`).join("; ") : ""));
+  L.push("- Rejected: "+d.rejected.length+" · Failed to publish: "+d.failed.length+" · Approved but not scheduled: "+d.approvedUnscheduled.length);
+  L.push("- Next 7 days: "+d.scheduled.map(x=>x.date.toLocaleDateString("en-GB",{weekday:"short"})+" "+(x.vs.length? x.vs.map(v=>PLATFORM_META[v.platform].short).join("+") : "nothing")).join(", "));
+  L.push("", "PERFORMANCE, last 30 days vs previous 30");
+  L.push(`- ${d.tc.posts} posts · views ${fmtNum(d.tc.views)} (${pctChange(d.tc.views,d.tp.views).toFixed(0)}%) · engagement rate ${fmtPct(d.tc.engagementRate)} (prev ${fmtPct(d.tp.engagementRate)}) · followers gained ${d.tc.followsGained} (prev ${d.tp.followsGained})`);
+  L.push("- By platform: "+d.byPlatform.map(r=>`${PLATFORM_META[r.pl].label} ${r.t.posts} posts, ${fmtNum(r.t.views)} views, ${fmtPct(r.t.engagementRate)} ER, +${r.t.followsGained} followers`).join("; "));
+  if(d.pillars.length) L.push("- By content type (avg views, ER): "+d.pillars.map(r=>`${r.pl} ${fmtNum(Math.round(r.avgViews))}, ${fmtPct(r.er)}`).join("; "));
+  if(d.bestSlot) L.push(`- Best posting slot by engagement: ${d.bestSlot.day} ${d.bestSlot.bucket} (${fmtPct(d.bestSlot.er)} over ${d.bestSlot.n} posts)`);
+  if(d.top.length) L.push("- Top posts: "+d.top.map(p=>`"${p.contentTitle}" on ${PLATFORM_META[p.platform].label} (${fmtNum(p.views)} views, ${fmtPct(p.engagementRate)} ER)`).join("; "));
+  return L.join("\n");
+}
+function builtInInsights(d){
+  const out = [];
+  const byEr = [...d.byPlatform].sort((a,b)=>b.t.engagementRate-a.t.engagementRate);
+  const byViews = [...d.byPlatform].sort((a,b)=>b.t.views-a.t.views);
+  if(byEr.length>=2){
+    const best = byEr[0], low = byEr[byEr.length-1];
+    out.push({title:PLATFORM_META[best.pl].label+" engages best", detail:`${fmtPct(best.t.engagementRate)} engagement on ${PLATFORM_META[best.pl].label} vs ${fmtPct(low.t.engagementRate)} on ${PLATFORM_META[low.pl].label} over the last 30 days.`, action:`Add one extra ${PLATFORM_META[best.pl].label} post this week.`});
+  }
+  if(byViews.length && (!byEr.length || byViews[0].pl!==byEr[0].pl)) out.push({title:PLATFORM_META[byViews[0].pl].label+" brings the reach", detail:`${fmtNum(byViews[0].t.views)} views from ${byViews[0].t.posts} posts — the biggest audience of any platform.`, action:`Cut your strongest recent reel for ${PLATFORM_META[byViews[0].pl].label} first.`});
+  if(d.bestSlot) out.push({title:"Best time: "+d.bestSlot.day+" "+d.bestSlot.bucket, detail:`Posts in that slot average ${fmtPct(d.bestSlot.er)} engagement (${d.bestSlot.n} posts).`, action:`Schedule next week's best post for ${d.bestSlot.day} ${d.bestSlot.bucket}.`});
+  const pill = [...d.pillars].sort((a,b)=>b.avgViews-a.avgViews)[0];
+  if(pill) out.push({title:pill.pl+" content performs best", detail:`${pill.pl} posts average ${fmtNum(Math.round(pill.avgViews))} views at ${fmtPct(pill.er)} engagement.`, action:`Plan one more ${pill.pl} post from the content library.`});
+  const risks = [];
+  const oldest = [...d.awaiting].sort((a,b)=>b.days-a.days)[0];
+  if(d.failed.length) risks.push(`${d.failed.length} post${d.failed.length>1?"s":""} failed to publish — retry or fix before they go stale.`);
+  if(oldest && oldest.days>=2) risks.push(`"${oldest.title}" has waited ${oldest.days} days for approval.`);
+  if(d.changes.length) risks.push(`${d.changes.length} post${d.changes.length>1?"s":""} still need changes from the creator.`);
+  if(d.emptyDays.length>=3) risks.push(`Nothing is scheduled on ${d.emptyDays.slice(0,4).join(", ")}${d.emptyDays.length>4?"…":""}.`);
+  if(d.approvedUnscheduled.length) risks.push(`${d.approvedUnscheduled.length} approved post${d.approvedUnscheduled.length>1?"s have":" has"} no publish date yet.`);
+  const change = pctChange(d.tc.views, d.tp.views);
+  return {
+    headline: `Views ${change>=0? "up":"down"} ${Math.abs(change).toFixed(0)}% on the previous 30 days, at ${fmtPct(d.tc.engagementRate)} engagement${d.sample? " (sample figures)" : ""}.`,
+    insights: out.slice(0,4), risk: risks[0] || "No bottlenecks right now — the pipeline is moving.", generatedAt:new Date().toISOString(), source:"built-in",
+  };
+}
+
+function SmartInsightsPanel(){
+  const {state} = useApp();
+  const [result, setResult] = useState(null);
+  const [configured, setConfigured] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-
   useEffect(()=>{
-    if(!caps.db) return;
-    const ref = caps.db.doc("insights/latest");
-    const unsub = ref.onSnapshot(snap=>{ if(snap.exists) setInsight(snap.data()); }, ()=>{});
-    return unsub;
-  }, [caps.db]);
-
+    fetch("/api/insights", {cache:"no-store"}).then(r=>r.ok? r.json() : null).then(d=>{
+      if(!d) { setConfigured(false); return; }
+      setConfigured(!!d.configured);
+      if(d.latest) setResult(d.latest);
+    }).catch(()=>setConfigured(false));
+  }, []);
   async function generate(){
-    if(!caps.sample){ setError("AI insights need this artifact's `sample` capability, which isn't available in this view."); return; }
     setLoading(true); setError(null);
-    const prompt = `You are the marketing analyst for Sanjugo, a sushi restaurant brand, looking at its Creator Studio dashboard.
-Here is this week's snapshot (some figures are demo data pending real analytics being connected):
-- Awaiting approval: ${stats.awaiting}
-- Changes requested: ${stats.changes}
-- Scheduled this week: ${stats.scheduledWeek}
-- Published (all time, demo): ${stats.published}
-- Failed publications: ${stats.failed}
-- Total views (demo): ${stats.totalViews}
-- Engagement rate (demo): ${stats.engRate.toFixed(1)}%
-- Follower growth 30d (demo): +${stats.followerGrowth}
-
-In under 90 words: (1) summarize how content is trending, (2) flag the single biggest risk or bottleneck right now, (3) suggest one concrete next post idea or scheduling change for next week. Plain text, no headers, no markdown.`;
-    try{
-      const {text} = await caps.sample(prompt, {modelTier:"quick"});
-      const payload = {text, generatedAt:new Date().toISOString()};
-      setInsight(payload);
-      if(caps.db) caps.db.doc("insights/latest").set(payload).catch(()=>{});
-    }catch(e){
-      setError(e && e.code==="not_granted" ? "AI insights need your permission — try again and allow the request." : "Couldn't generate insights right now — try again shortly.");
-    }finally{ setLoading(false); }
+    const data = insightsData(state);
+    if(configured){
+      try{
+        const r = await fetch("/api/insights", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({snapshot: insightsSnapshot(data)})});
+        const d = await r.json().catch(()=>({}));
+        if(r.ok){ setResult(d); setLoading(false); return; }
+        setError((d.error && d.error!=="not_configured"? d.error : "Claude isn't set up yet")+" — showing built-in insights instead.");
+      }catch(e){ setError("Couldn't reach Claude — showing built-in insights instead."); }
+    }
+    setResult(builtInInsights(data));
+    setLoading(false);
   }
-
+  const fromClaude = result && result.source==="claude";
   return (
-    <Card style={{padding:18, marginBottom:18, background:"var(--accent-soft)", border:"1px solid var(--accent)"}}>
-      <div style={{display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:12, marginBottom:10}}>
-        <div style={{display:"flex", alignItems:"center", gap:8, color:"var(--accent-dark)", fontWeight:700, fontSize:13.5}}><Icon name="zap" size={16}/>Smart insights</div>
-        <Button size="sm" variant="primary" icon="refresh" onClick={generate} disabled={loading}>{loading?"Thinking…":insight?"Refresh":"Generate"}</Button>
+    <Card style={{padding:18, marginBottom:18, background:"var(--accent-soft)", border:"1px solid color-mix(in srgb, var(--accent) 45%, transparent)"}}>
+      <div style={{display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:12, marginBottom: result||error? 12:6}}>
+        <div>
+          <div style={{display:"flex", alignItems:"center", gap:8, color:"var(--accent-dark)", fontWeight:600, fontSize:14}}><Icon name="zap" size={16}/>Smart insights</div>
+          {result && <div style={{fontSize:11.5, color:"var(--ink-mute)", marginTop:3}}>{fromClaude? "By Claude" : "Built-in analysis"} · {fmtDateTime(result.generatedAt)}</div>}
+        </div>
+        <Button size="sm" variant="primary" icon="refresh" onClick={generate} disabled={loading}>{loading? (configured? "Claude is thinking…" : "Working…") : result? "Refresh" : "Generate"}</Button>
       </div>
-      {error && <div style={{fontSize:12.5, color:"var(--red)"}}>{error}</div>}
-      {!error && insight && <div style={{fontSize:13.5, lineHeight:1.6, color:"var(--ink)"}}>{insight.text}<div style={{fontSize:11, color:"var(--ink-mute)", marginTop:8}}>Generated {fmtDateTime(insight.generatedAt)} · uses your own Claude usage each time</div></div>}
-      {!error && !insight && !loading && <div style={{fontSize:12.5, color:"var(--ink-soft)"}}>Ask Claude to read this week's numbers and suggest what to do next.</div>}
+      {error && <div style={{fontSize:12, color:"var(--amber)", fontWeight:600, marginBottom:8}}>{error}</div>}
+      {!result && !loading && <div style={{fontSize:13, color:"var(--ink-soft)"}}>{configured? "Ask Claude to read this month's numbers and the approval pipeline and suggest what to do next." : "Get a quick read on what's working, the best time to post, and what's holding things up."}</div>}
+      {result && <div>
+        {result.headline && <div style={{fontSize:15, fontWeight:600, lineHeight:1.4, marginBottom:12}}>{result.headline}</div>}
+        {result.insights && result.insights.length>0 && <div className="cf-insights" style={{display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(220px, 1fr))", gap:10, marginBottom:10}}>
+          {result.insights.map((it,i)=>(
+            <div key={i} style={{background:"var(--surface)", border:"1px solid var(--border)", borderRadius:9, padding:"10px 12px"}}>
+              <div style={{fontSize:13, fontWeight:600, marginBottom:4}}>{it.title}</div>
+              <div style={{fontSize:12.5, color:"var(--ink-soft)", lineHeight:1.5, marginBottom:6}}>{it.detail}</div>
+              {it.action && <div style={{fontSize:12.5, lineHeight:1.45, display:"flex", gap:6}}><Icon name="chevronRight" size={13} style={{color:"var(--accent)", marginTop:2}}/><span><strong>Do:</strong> {it.action}</span></div>}
+            </div>
+          ))}
+        </div>}
+        {result.text && !result.insights?.length && <div style={{fontSize:13.5, lineHeight:1.6, whiteSpace:"pre-wrap", marginBottom:8}}>{result.text}</div>}
+        {result.risk && <div style={{display:"flex", gap:8, alignItems:"flex-start", fontSize:13, background:"var(--surface)", border:"1px solid var(--border)", borderRadius:9, padding:"9px 12px"}}><Icon name="warn" size={15} style={{color:"var(--amber)", marginTop:1}}/><span><strong>Watch out:</strong> {result.risk}</span></div>}
+        {!configured && <div style={{fontSize:11.5, color:"var(--ink-mute)", marginTop:10}}>Add a Claude API key (Settings → Smart insights) for deeper, written analysis by Claude.</div>}
+      </div>}
     </Card>
   );
 }
@@ -2441,7 +2765,8 @@ function DashboardPage(){
 
   const awaiting = items.filter(i=>i.status==="submitted").length;
   const changes = items.filter(i=>i.status==="changes_requested").length;
-  const scheduledWeek = items.filter(i=> i.status==="scheduled" && (new Date(i.due)-TODAY)/86400000 <= 7 && (new Date(i.due)-TODAY) >= -1).length;
+  const weekEnd = new Date(TODAY); weekEnd.setDate(weekEnd.getDate()+7);
+  const scheduledWeek = items.filter(i=> i.status!=="published" && i.status!=="rejected" && Object.values(i.variants||{}).some(v=> v.scheduledAt && v.publishStatus!=="published" && new Date(v.scheduledAt)>=TODAY && new Date(v.scheduledAt)<=weekEnd)).length;
   const published = items.filter(i=>i.status==="published").length;
   const failed = items.filter(i=>i.status==="failed").length;
   const totalViews = posts.reduce((s,p)=>s+p.views,0);
@@ -2477,16 +2802,16 @@ function DashboardPage(){
       }/>
 
       <div style={{display:"flex", gap:14, flexWrap:"wrap", marginBottom:18}}>
-        <StatTile label="Awaiting approval" value={awaiting} icon="queue" color="var(--blue)"/>
-        <StatTile label="Changes requested" value={changes} icon="edit" color="var(--amber)"/>
-        <StatTile label="Scheduled this week" value={scheduledWeek} icon="calendar" color="var(--violet)"/>
-        <StatTile label="Published" value={published} icon="published" color="var(--emerald)"/>
-        <StatTile label="Failed publications" value={failed} icon="warn" color="var(--red)"/>
+        <StatTile label="Awaiting approval" value={awaiting} icon="queue" color="var(--blue)" hint="Review" onClick={()=>dispatch({type:"SET_ROUTE", route:"queue", queueTab:"review"})}/>
+        <StatTile label="Changes requested" value={changes} icon="edit" color="var(--amber)" hint="Fix & resubmit" onClick={()=>dispatch({type:"SET_ROUTE", route:"queue", queueTab:"changes"})}/>
+        <StatTile label="Scheduled this week" value={scheduledWeek} icon="calendar" color="var(--violet)" hint="Open calendar" onClick={()=>dispatch({type:"SET_ROUTE", route:"calendar", calendarPreset:{view:"week"}})}/>
+        <StatTile label="Published" value={published} icon="published" color="var(--emerald)" hint="See posts" onClick={()=>dispatch({type:"SET_ROUTE", route:"published"})}/>
+        <StatTile label="Failed publications" value={failed} icon="warn" color="var(--red)" hint="See failed" onClick={()=>dispatch({type:"SET_ROUTE", route:"calendar", calendarPreset:{view:"list", status:"failed"}})}/>
       </div>
       <div style={{display:"flex", gap:14, flexWrap:"wrap", marginBottom:22}}>
-        <StatTile label="Total views (published)" value={fmtNum(totalViews)} icon="trend" sub="Demonstration data" color="var(--accent)"/>
-        <StatTile label="Engagement rate" value={fmtPct(engRate)} icon="heart" sub="Demonstration data" color="var(--accent)"/>
-        <StatTile label="Follower growth (30d)" value={"+"+followerGrowth} icon="team" sub="Demonstration data" color="var(--accent)"/>
+        <StatTile label="Total views (published)" value={fmtNum(totalViews)} icon="trend" sub="Demonstration data" color="var(--accent)" hint="Analytics" onClick={()=>dispatch({type:"SET_ROUTE", route:"analytics"})}/>
+        <StatTile label="Engagement rate" value={fmtPct(engRate)} icon="heart" sub="Demonstration data" color="var(--accent)" hint="Analytics" onClick={()=>dispatch({type:"SET_ROUTE", route:"analytics"})}/>
+        <StatTile label="Follower growth (30d)" value={"+"+followerGrowth} icon="team" sub="Demonstration data" color="var(--accent)" hint="Forecast growth" onClick={()=>dispatch({type:"SET_ROUTE", route:"analytics"})}/>
       </div>
 
       {warnings.length>0 && (
@@ -2501,7 +2826,7 @@ function DashboardPage(){
         </Card>
       )}
 
-      <SmartInsightsPanel stats={{awaiting, changes, scheduledWeek, published, failed, totalViews, engRate, followerGrowth}}/>
+      <SmartInsightsPanel/>
 
       <div className="cf-dash-grid" style={{display:"grid", gridTemplateColumns:"1.3fr 1fr", gap:16, marginBottom:16}}>
         <Card style={{padding:18}}>
@@ -2660,9 +2985,9 @@ function ContentCalendarPage(){
   const {state, openDetails} = useApp();
   const narrow = useIsNarrow(700);
   const [selectedDay, setSelectedDay] = useState(null);
-  const [view, setView] = useState("month");
+  const [view, setView] = useState((state.calendarPreset && state.calendarPreset.view) || "month");
   const [cursor, setCursor] = useState(new Date(TODAY));
-  const [filters, setFilters] = useState({brand:"", platform:"", campaign:"", creator:"", status:""});
+  const [filters, setFilters] = useState({brand:"", platform:"", campaign:"", creator:"", status:(state.calendarPreset && state.calendarPreset.status) || ""});
   const entries = useMemo(()=>calendarEntries(state.contentItems, filters), [state.contentItems, filters]);
   const creators = [...new Set(state.contentItems.map(i=>i.creator))].map(id=>USERS.find(u=>u.id===id));
   const unscheduled = state.contentItems.filter(i=> (i.status==="approved"||i.status==="draft"||i.status==="submitted") && !Object.values(i.variants).some(v=>v.scheduledAt));
@@ -3287,6 +3612,30 @@ function DriveSettings(){
         <li>Reload this page and press <strong>Connect Google Drive</strong>.</li>
       </ol>
       <Button variant="ghost" size="sm" icon="refresh" onClick={()=>window.location.reload()}>Check again</Button>
+    </div>
+  );
+}
+
+function InsightsSettings(){
+  const [cfg, setCfg] = useState(null);
+  useEffect(()=>{ fetch("/api/insights", {cache:"no-store"}).then(r=>r.ok? r.json() : {configured:false}).catch(()=>({configured:false})).then(setCfg); }, []);
+  if(!cfg) return <Skeleton h={60}/>;
+  const code = {fontFamily:'ui-monospace, Menlo, monospace', fontSize:12, background:"var(--surface-2)", border:"1px solid var(--border)", borderRadius:5, padding:"1px 5px"};
+  return cfg.configured ? (
+    <div style={{fontSize:12.5, color:"var(--ink-soft)", lineHeight:1.6}}>
+      <div style={{display:"flex", alignItems:"center", gap:8, fontSize:13.5, fontWeight:600, color:"var(--ink)", marginBottom:4}}><span style={{width:8, height:8, borderRadius:99, background:"var(--green)"}}/>Claude connected</div>
+      The Dashboard's <strong>Generate</strong> button asks Claude (Opus 5) to read the pipeline and last 30 days of performance. Each click is one short request billed to your Anthropic account (typically a few pence).
+      {cfg.latest && <> Last run {fmtDateTime(cfg.latest.generatedAt)}.</>}
+    </div>
+  ) : (
+    <div style={{fontSize:12.5, color:"var(--ink-soft)", lineHeight:1.7}}>
+      <div style={{display:"flex", alignItems:"center", gap:8, fontSize:13.5, fontWeight:600, color:"var(--ink)", marginBottom:4}}><span style={{width:8, height:8, borderRadius:99, background:"var(--amber)"}}/>Using built-in insights</div>
+      Insights work now using built-in rules. To have Claude write them instead:
+      <ol style={{margin:"6px 0 0", paddingLeft:20}}>
+        <li>Sign in at <strong>console.anthropic.com</strong>, add a payment method, and create an <strong>API key</strong>.</li>
+        <li>In Terminal, in the contentflow-app folder, run <span style={code}>wrangler secret put ANTHROPIC_API_KEY</span> and paste the key.</li>
+        <li>Reload this page — the Dashboard's Generate button will use Claude.</li>
+      </ol>
     </div>
   );
 }
@@ -4895,6 +5244,8 @@ function SettingsPage(){
       <Card style={{padding:18, marginBottom:26}}><DriveSettings/></Card>
       <SectionTitle>Storage</SectionTitle>
       <Card style={{padding:18, marginBottom:26}}><StorageSettings/></Card>
+      <SectionTitle>Smart insights</SectionTitle>
+      <Card style={{padding:18, marginBottom:26}}><InsightsSettings/></Card>
       <SectionTitle>Campaigns</SectionTitle>
       <Card style={{padding:18, marginBottom:26}}><CampaignManager/></Card>
       <SectionTitle>Integrations</SectionTitle>
@@ -5120,7 +5471,6 @@ function App(){
   const ctx = useMemo(()=>({state, dispatch, openDetails: setDetailItem, caps, viewerIsRealAdmin, chat}), [state, caps, viewerIsRealAdmin, chat]);
 
   useEffect(()=>{
-    if(state.route==="queue" && !perms.approve) dispatch({type:"SET_ROUTE", route:"dashboard"});
     if(state.route==="create" && !perms.create) dispatch({type:"SET_ROUTE", route:"dashboard"});
   }, [state.route, user.role]);
 

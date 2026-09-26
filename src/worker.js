@@ -1,3 +1,5 @@
+import Anthropic from "@anthropic-ai/sdk";
+
 // ContentFlow's server. This project was created in Cloudflare as a "Worker" (not classic Pages),
 // so unlike Pages there's no automatic routing from a functions/ folder — this one script handles
 // the API routes itself and hands everything else off to the static files in public/ via ASSETS.
@@ -33,6 +35,15 @@ export default {
         (url.pathname === "/api/google/connect") || (url.pathname === "/api/library/refresh");
       if (adminOnly) {
         try { requireAdmin(viewer); } catch (e) { return json({ error: e.message }, e.status || 403); }
+      }
+    }
+
+    if (url.pathname === "/api/insights") {
+      try {
+        if (request.method === "GET") return json({ configured: !!env.ANTHROPIC_API_KEY, latest: await kvGet(env, "insights_latest") });
+        if (request.method === "POST") return await generateInsights(request, env);
+      } catch (e) {
+        return json({ error: e.message || "Insights error" }, e.status || 500);
       }
     }
 
@@ -944,4 +955,67 @@ function meResponse(viewer, request) {
     member: viewer.member,
     logoutUrl: viewer.accessEnabled ? new URL("/cdn-cgi/access/logout", request.url).toString() : null,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Smart insights — Claude reads a compact snapshot of the pipeline and performance and suggests what to do
+// next. Needs the ANTHROPIC_API_KEY secret; without it the app shows its own built-in insights instead.
+// ---------------------------------------------------------------------------
+
+const INSIGHTS_SYSTEM = `You are the social media strategist for Sanjugo, a Japanese restaurant group in London (branches: Shoreditch, Angel, Victoria). The team posts food, behind-the-scenes and offer content to Instagram, TikTok, Facebook, YouTube Shorts and Google Business, and plans it in their own tool, Sanjugo Creator Studio.
+
+You will get a snapshot from that tool. Write for a small, busy team: be specific to the numbers in the snapshot, suggest things they can do this week, and don't give generic marketing advice or invent numbers that aren't there. If the snapshot says some figures are sample data, still work with them, and say once, briefly, that they are sample figures.
+
+Reply with only a JSON object and nothing else, in exactly this shape:
+{"headline": "one sentence, at most 20 words", "insights": [{"title": "at most 8 words", "detail": "1-2 sentences that cite the numbers", "action": "one concrete thing to do this week"}], "risk": "the single biggest bottleneck or risk right now, in one sentence"}
+Give 3 or 4 insights.`;
+
+async function generateInsights(request, env) {
+  if (!env.ANTHROPIC_API_KEY) return json({ error: "not_configured" }, 503);
+  const body = await request.json().catch(() => ({}));
+  const snapshot = String(body.snapshot || "").slice(0, 16000);
+  if (!snapshot) return json({ error: "Missing snapshot" }, 400);
+  // Light throttle so repeated taps don't each cost a request: reuse anything from the last 30 seconds.
+  const last = await kvGet(env, "insights_latest");
+  if (last && Date.now() - Date.parse(last.generatedAt) < 30e3) return json(last);
+
+  const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
+  let response;
+  try {
+    response = await client.beta.messages.create({
+      model: "claude-opus-5",
+      max_tokens: 16000,
+      output_config: { effort: "medium" },
+      // If a safety classifier ever declines, the API retries on its recommended fallback model instead of failing.
+      betas: ["server-side-fallback-2026-07-01"],
+      fallbacks: "default",
+      system: INSIGHTS_SYSTEM,
+      messages: [{ role: "user", content: snapshot }],
+    });
+  } catch (e) {
+    if (e instanceof Anthropic.AuthenticationError) return json({ error: "The Claude API key was rejected — check the ANTHROPIC_API_KEY secret." }, 502);
+    if (e instanceof Anthropic.PermissionDeniedError) return json({ error: "The Claude API key isn't allowed to use this model — check the Anthropic Console." }, 502);
+    if (e instanceof Anthropic.RateLimitError) return json({ error: "Claude is busy right now — try again in a minute." }, 429);
+    if (e instanceof Anthropic.APIError) return json({ error: "Claude API error (" + e.status + ") — try again shortly." }, 502);
+    return json({ error: "Couldn't reach Claude — try again shortly." }, 502);
+  }
+  if (response.stop_reason === "refusal") return json({ error: "Claude declined to analyse this snapshot." }, 502);
+  const text = response.content.filter((b) => b.type === "text").map((b) => b.text).join("");
+  let parsed;
+  try {
+    parsed = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1));
+  } catch (e) {
+    parsed = { headline: "", insights: [], risk: "", text };
+  }
+  const result = {
+    headline: String(parsed.headline || ""),
+    insights: (Array.isArray(parsed.insights) ? parsed.insights : []).slice(0, 5).map((i) => ({ title: String(i.title || ""), detail: String(i.detail || ""), action: String(i.action || "") })),
+    risk: String(parsed.risk || ""),
+    text: parsed.text || null,
+    generatedAt: new Date().toISOString(),
+    model: response.model,
+    source: "claude",
+  };
+  await kvSet(env, "insights_latest", result);
+  return json(result);
 }

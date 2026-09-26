@@ -1,0 +1,9 @@
+{
+  "name": "sanjugo-creator-studio",
+  "private": true,
+  "type": "module",
+  "description": "Sanjugo Creator Studio \u2014 Cloudflare Worker + static app",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.128.0"
+  }
+}

@@ -10,7 +10,7 @@ binding = "ASSETS"
 [[d1_databases]]
 binding = "DB"
 database_name = "contentflow-db"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_id = "32fd6952-121c-4f8f-8676-aaaa76c6dc55"
 
 [[r2_buckets]]
 binding = "MEDIA"

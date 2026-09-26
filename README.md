@@ -97,3 +97,30 @@ Each of Cyrus, Yan Yan, and AI Dev can do this on their own phone/laptop — it'
 app either way, so everyone stays in sync in real time, just like opening the Instagram app.
 
 Tell me once you've deployed (or if any step errors) and I'll help from there.
+
+## Connecting the Google Drive content library
+
+ContentFlow's **Content Library** page lists every file in the "Sanjugo Marketing Contents Final" Drive folder
+(searchable by barcode, dish, category, branch). Until Drive is connected it uses a bundled snapshot
+(`public/library.json`) and can't copy files out of Drive. To connect it (one time, ~15 minutes):
+
+1. Go to https://console.cloud.google.com → create a project (e.g. "ContentFlow").
+2. APIs & Services → Library → search **Google Drive API** → Enable.
+3. IAM & Admin → Service Accounts → **Create service account** (any name, e.g. `contentflow-drive`).
+   No roles needed — skip those steps.
+4. Open the new service account → **Keys** → Add key → Create new key → **JSON**. A `.json` file downloads.
+   Treat it like a password.
+5. In Google Drive, right-click **Sanjugo Marketing Contents Final** → Share → paste the service account's
+   email (looks like `contentflow-drive@your-project.iam.gserviceaccount.com`) → **Viewer** → Share.
+6. In Terminal:
+   ```
+   cd ~/Documents/"Sanjugo Content Engine"/contentflow-app
+   wrangler secret put GOOGLE_SERVICE_ACCOUNT
+   ```
+   When it asks for the value, paste the **entire contents** of the downloaded JSON file and press Enter.
+   Then delete the JSON file from your Downloads.
+7. Open ContentFlow → Settings → Google Drive content library → **Check again**, then **Refresh library now**.
+
+ContentFlow only ever *reads* the folder. Files you use in a post are copied into ContentFlow's own storage
+(R2) so they preview and play like uploads; camera RAW photos come in as Drive's full-size JPEG.
+The folder ID lives in `wrangler.toml` (`LIBRARY_FOLDER_ID`).

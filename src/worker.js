@@ -593,7 +593,7 @@ async function googleCallback(request, env) {
   await ensureGoogleAuthTable(env);
   const existing = await env.DB.prepare("SELECT refresh_token FROM google_auth WHERE id = 1").first();
   const refresh = data.refresh_token || (existing && existing.refresh_token);
-  if (!refresh) return backToSettings(request, { drive: "error", msg: "Google didn't return long-term access — disconnect ContentFlow in your Google account's third-party access page and connect again." });
+  if (!refresh) return backToSettings(request, { drive: "error", msg: "Google didn't return long-term access — disconnect Creator Studio in your Google account's third-party access page and connect again." });
   await env.DB.prepare(
     `INSERT INTO google_auth (id, email, refresh_token, connected_at, scopes) VALUES (1, ?1, ?2, ?3, ?4)
      ON CONFLICT(id) DO UPDATE SET email = excluded.email, refresh_token = excluded.refresh_token, connected_at = excluded.connected_at, scopes = excluded.scopes`
@@ -744,10 +744,10 @@ async function archiveFolderId(env, token) {
   const r = await fetch("https://www.googleapis.com/drive/v3/files?fields=id", {
     method: "POST",
     headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
-    body: JSON.stringify({ name: "ContentFlow Archive", mimeType: DRIVE_FOLDER, description: "Published post media moved out of ContentFlow's storage. Managed by ContentFlow." }),
+    body: JSON.stringify({ name: "Creator Studio Archive", mimeType: DRIVE_FOLDER, description: "Published post media moved out of Creator Studio's storage. Managed by Sanjugo Creator Studio." }),
   });
   const d = await r.json().catch(() => ({}));
-  if (!r.ok || !d.id) throw new HttpError(502, "Couldn't create the ContentFlow Archive folder in Drive: " + ((d.error && d.error.message) || r.status));
+  if (!r.ok || !d.id) throw new HttpError(502, "Couldn't create the Creator Studio Archive folder in Drive: " + ((d.error && d.error.message) || r.status));
   await kvSet(env, "archive_folder_id", d.id);
   return d.id;
 }
@@ -758,11 +758,11 @@ async function archiveToDrive(env, token, folderId, action) {
   const type = (obj.httpMetadata && obj.httpMetadata.contentType) || "application/octet-stream";
   const ext = action.key.includes(".") ? "." + action.key.split(".").pop() : "";
   const date = new Date().toISOString().slice(0, 10);
-  const title = ((action.titles && action.titles[0]) || "ContentFlow media").replace(/[\\/:*?"<>|]+/g, " ").slice(0, 80);
+  const title = ((action.titles && action.titles[0]) || "Creator Studio media").replace(/[\\/:*?"<>|]+/g, " ").slice(0, 80);
   const init = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id", {
     method: "POST",
     headers: { Authorization: "Bearer " + token, "Content-Type": "application/json; charset=UTF-8", "X-Upload-Content-Type": type, "X-Upload-Content-Length": String(obj.size) },
-    body: JSON.stringify({ name: `${date} ${title}${ext}`, parents: [folderId], description: "Archived by ContentFlow from /api/media/" + action.key }),
+    body: JSON.stringify({ name: `${date} ${title}${ext}`, parents: [folderId], description: "Archived by Creator Studio from /api/media/" + action.key }),
   });
   const session = init.headers.get("location");
   if (!init.ok || !session) { obj.body.cancel(); throw new Error("Drive upload couldn't start (" + init.status + ")"); }
@@ -931,7 +931,7 @@ async function identify(request, env) {
       .bind("u_" + crypto.randomUUID().slice(0, 8), email.split("@")[0], email, new Date().toISOString()).run();
     row = await env.DB.prepare("SELECT * FROM team_members WHERE email = ?1").bind(email).first();
   }
-  if (!row || !row.active) { const e = new HttpError(403, email + " isn't on the ContentFlow team. Ask an admin to add you in Settings → Team & access."); e.code = "not_member"; throw e; }
+  if (!row || !row.active) { const e = new HttpError(403, email + " isn't on the Creator Studio team. Ask an admin to add you in Settings → Team & access."); e.code = "not_member"; throw e; }
   if (!row.last_seen || Date.now() - Date.parse(row.last_seen) > 3600e3) {
     await env.DB.prepare("UPDATE team_members SET last_seen = ?2 WHERE id = ?1").bind(row.id, new Date().toISOString()).run();
   }

@@ -1,13 +1,13 @@
 <!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>ContentFlow</title>
-<meta name="description" content="Content approval, calendar and analytics dashboard for Sanjugo's social media.">
+<title>Sanjugo Creator Studio</title>
+<meta name="description" content="Sanjugo Creator Studio — plan, approve and publish Sanjugo's social media content.">
 <link rel="manifest" href="/manifest.json">
 <meta name="theme-color" content="#FFFFFF">
 <link rel="icon" href="/icon-192.png">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="ContentFlow">
+<meta name="apple-mobile-web-app-title" content="Creator Studio">
 <style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#faf9f5;color:#141413}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
 <style>
@@ -837,6 +837,8 @@ function ToastHost({toasts, remove}){
 <script type="text/babel" data-presets="react">
 /* ============================== STATE ============================== */
 const LS_KEY = "contentflow_state_v1";
+const WELCOME_KEY = "contentflow_signed_in_as";
+function readWelcome(){ try{ return localStorage.getItem(WELCOME_KEY); }catch(e){ return null; } }
 function loadPersisted(){
   try{
     const raw = localStorage.getItem(LS_KEY);
@@ -901,6 +903,7 @@ function initState(){
     campaigns: (persisted && Array.isArray(persisted.campaigns)) ? persisted.campaigns : CAMPAIGNS,
     toasts: [],
     route: "dashboard",
+    signedInAs: readWelcome(),
   };
 }
 
@@ -923,6 +926,15 @@ function reducer(state, action){
       };
     }
     case "SET_USER": return {...state, currentUserId: action.id};
+    case "WELCOME_SIGN_IN": {
+      try{ localStorage.setItem(WELCOME_KEY, action.id); }catch(e){}
+      return {...state, currentUserId: action.id, signedInAs: action.id};
+    }
+    case "BOOT_DONE": return {...state, bootDone:true};
+    case "WELCOME_SIGN_OUT": {
+      try{ localStorage.removeItem(WELCOME_KEY); }catch(e){}
+      return {...state, signedInAs: null};
+    }
     case "TEAM_LOADED": { applyTeam(action.members); return {...state, team: action.members, teamRev:(state.teamRev||0)+1}; }
     case "SET_ME": return {...state, me: action.me, lock: action.lock || null, ...(action.me && action.me.member ? {currentUserId: action.me.member.id} : {})};
     case "SET_BRAND": return {...state, currentBrandId: action.id};
@@ -1006,7 +1018,7 @@ function reducer(state, action){
     case "SET_TEMPLATE": return {...state, calendarTemplate: action.template};
     case "MARK_PUBLISHED": {
       // Until auto-publishing is wired up, someone records when a post actually went live. Once every platform
-      // is published the post counts as Published, and 7 days later its file moves out of ContentFlow storage.
+      // is published the post counts as Published, and 7 days later its file moves out of Creator Studio storage.
       const {contentId, platforms, publishedAt, urls} = action;
       const item = state.contentItems.find(i=>i.id===contentId);
       if(!item) return state;
@@ -1086,8 +1098,8 @@ function Sidebar({open, onClose}){
       <div style={{padding:"18px 16px 14px", display:"flex", alignItems:"center", gap:10, borderBottom:"1px solid var(--sidebar-line)"}}>
         <img src={LOGO_SANJUGO} alt="Sanjugo" style={{width:34, height:34, borderRadius:99, flexShrink:0, background:"#fff", objectFit:"cover"}}/>
         <div>
-          <div className="font-display" style={{color:"var(--sidebar-title)", fontWeight:600, fontSize:15.5}}>ContentFlow</div>
-          <div style={{fontSize:10.5, color:"var(--sidebar-text-dim)", fontWeight:600, letterSpacing:".4px", textTransform:"uppercase"}}>Sanjugo Content Ops</div>
+          <div className="font-display" style={{color:"var(--sidebar-title)", fontWeight:600, fontSize:15.5}}>Creator Studio</div>
+          <div style={{fontSize:10.5, color:"var(--sidebar-text-dim)", fontWeight:600, letterSpacing:".4px", textTransform:"uppercase"}}>Sanjugo</div>
         </div>
       </div>
 
@@ -1137,9 +1149,12 @@ function Sidebar({open, onClose}){
         </button>
         {userMenu && (
           <div style={{position:"absolute", left:12, right:12, bottom:"100%", marginBottom:6, background:"var(--sidebar)", border:"1px solid var(--sidebar-line)", borderRadius:10, boxShadow:"var(--shadow-lg)", zIndex:50, overflow:"hidden", maxHeight:300, overflowY:"auto"}}>
-            <div style={{padding:"8px 12px 4px", fontSize:10.5, fontWeight:700, color:"var(--sidebar-text-dim)", textTransform:"uppercase", letterSpacing:".4px"}}>Switch user (demo)</div>
+            <button onClick={()=>{ setUserMenu(false); dispatch({type:"WELCOME_SIGN_OUT"}); }} style={{width:"100%", display:"flex", alignItems:"center", gap:9, padding:"10px 12px", background:"transparent", border:"none", borderBottom:"1px solid var(--sidebar-line)", cursor:"pointer", textAlign:"left", color:"var(--sidebar-title)", fontSize:12.5, fontWeight:600}}>
+              <Icon name="external" size={14}/>Sign out
+            </button>
+            <div style={{padding:"8px 12px 4px", fontSize:10.5, fontWeight:700, color:"var(--sidebar-text-dim)", textTransform:"uppercase", letterSpacing:".4px"}}>Switch to</div>
             {activeUsers().map(u=>(
-              <button key={u.id} onClick={()=>{dispatch({type:"SET_USER", id:u.id}); setUserMenu(false); dispatch({type:"ADD_TOAST", message:"Signed in as "+u.name+" · "+ROLE_META[u.role].label});}}
+              <button key={u.id} onClick={()=>{dispatch({type:"WELCOME_SIGN_IN", id:u.id}); setUserMenu(false); dispatch({type:"ADD_TOAST", message:"Signed in as "+u.name+" · "+ROLE_META[u.role].label});}}
                 style={{width:"100%", display:"flex", alignItems:"center", gap:9, padding:"8px 12px", background: u.id===user.id?"var(--sidebar-2)":"transparent", border:"none", cursor:"pointer", textAlign:"left"}}>
                 <Avatar user={u} size={26}/>
                 <div style={{flex:1}}>
@@ -1247,7 +1262,7 @@ function MarkPublishedModal({item, open, onClose}){
     <Modal open={open} onClose={onClose} width={460}>
       <div style={{padding:20}}>
         <div style={{fontSize:16, fontWeight:600, marginBottom:4}}>Mark as published</div>
-        <div style={{fontSize:12.5, color:"var(--ink-soft)", lineHeight:1.5, marginBottom:14}}>Record where this post went live. Links are optional but make it easy to find later. {item.libraryRef ? "The file stays viewable from the Drive library." : "7 days after every platform is published, the file moves to the ContentFlow Archive folder in Google Drive to free up storage — links keep working."}</div>
+        <div style={{fontSize:12.5, color:"var(--ink-soft)", lineHeight:1.5, marginBottom:14}}>Record where this post went live. Links are optional but make it easy to find later. {item.libraryRef ? "The file stays viewable from the Drive library." : "7 days after every platform is published, the file moves to the Creator Studio Archive folder in Google Drive to free up storage — links keep working."}</div>
         {pending.length===0 ? <div style={{fontSize:13, color:"var(--ink-mute)", marginBottom:14}}>Every platform is already marked as published.</div> :
         pending.map(p=>(
           <div key={p} style={{border:"1px solid var(--border)", borderRadius:9, padding:10, marginBottom:8}}>
@@ -1318,7 +1333,7 @@ function ContentDetailDrawer({item, onClose}){
             )}
             {!item.libraryRef && item.media.fileUrl && item.status==="published" && (
               <div style={{display:"flex", alignItems:"center", gap:8, flexWrap:"wrap", padding:"9px 11px", borderRadius:8, border:"1px solid var(--border)", fontSize:12.5, color:"var(--ink-soft)"}}>
-                <span>Published — the file moves to the <strong>ContentFlow Archive</strong> in Google Drive 7 days after publishing.</span>
+                <span>Published — the file moves to the <strong>Creator Studio Archive</strong> in Google Drive 7 days after publishing.</span>
                 <a href={item.media.fileUrl+"?view=drive"} target="_blank" rel="noopener noreferrer" style={{marginLeft:"auto", color:"var(--accent)", fontWeight:600, textDecoration:"none"}}>Open Drive copy</a>
               </div>
             )}
@@ -2382,7 +2397,7 @@ function SmartInsightsPanel({stats}){
   async function generate(){
     if(!caps.sample){ setError("AI insights need this artifact's `sample` capability, which isn't available in this view."); return; }
     setLoading(true); setError(null);
-    const prompt = `You are the marketing analyst for Sanjugo, a sushi restaurant brand, looking at its ContentFlow dashboard.
+    const prompt = `You are the marketing analyst for Sanjugo, a sushi restaurant brand, looking at its Creator Studio dashboard.
 Here is this week's snapshot (some figures are demo data pending real analytics being connected):
 - Awaiting approval: ${stats.awaiting}
 - Changes requested: ${stats.changes}
@@ -2807,7 +2822,7 @@ const LIB_DISH_GROUPS = [
   ["Sides", {GH:"Gohan (Plain Rice)", HR:"Hijiki Rice", MC:"Marinated Chilli Chicken", VC:"Vegetable Croquette"}],
 ];
 const LIB_DISH = Object.assign({}, ...LIB_DISH_GROUPS.map(g=>g[1]));
-// How library codes map onto ContentFlow's own fields when a file is turned into a post.
+// How library codes map onto Creator Studio's own fields when a file is turned into a post.
 const LIB_PILLAR = {FC:"Product", AV:"Behind the Scenes", CH:"Education", CM:"UGC", PO:"Promotion"};
 const LIB_PLATFORMS = {IS:["instagram"], IV:["instagram"], TK:["tiktok"], YT:["youtube"], AL:["instagram","tiktok","facebook"]};
 const LIB_NAME_RE = /^(\d{8})_([A-Z]{2})_([A-Z]{2})(?:_([A-Z0-9]{2}))?_([A-Z]{3})_v[\w]+?_([A-Z]\d{3})/;
@@ -2851,7 +2866,7 @@ function suggestedTitle(f){
   const dish = LIB_DISH[m.dish], cat = LIB_CATEGORY[m.category];
   return (dish || cat || f.label) + (f.kind==="video" ? " — Reel" : "") + (f.barcode ? " ("+f.barcode+")" : "");
 }
-/* Where a library file has been used: every ContentFlow post that links to it, with each platform's post type
+/* Where a library file has been used: every Creator Studio post that links to it, with each platform's post type
    and publish date — so the team can see "G730 went out as an Instagram Reel on 20 Sept" before reusing it. */
 function libraryUsageMap(items){
   const m = {};
@@ -3005,7 +3020,7 @@ function LibraryPage(){
 
       {!connected && <div style={{display:"flex", gap:10, alignItems:"flex-start", padding:"10px 14px", borderRadius:10, border:"1px solid var(--border)", background:"var(--surface)", marginBottom:14, fontSize:12.5, color:"var(--ink-soft)", lineHeight:1.5}}>
         <span style={{flexShrink:0, marginTop:1, fontSize:10.5, fontWeight:700, letterSpacing:".4px", padding:"2px 7px", borderRadius:5, background:"var(--amber-soft)", color:"var(--amber)"}}>NOT CONNECTED</span>
-        <span>You can search and plan with every file, but ContentFlow can't copy files out of Drive yet — thumbnails only show if this browser is signed in to Google. {perms.manageSettings ? <a href="#" onClick={e=>{e.preventDefault(); dispatch({type:"SET_ROUTE", route:"settings"});}} style={{color:"var(--accent)", fontWeight:600}}>Connect Google Drive in Settings</a> : "Ask an admin to connect Google Drive in Settings."}</span>
+        <span>You can search and plan with every file, but Creator Studio can't copy files out of Drive yet — thumbnails only show if this browser is signed in to Google. {perms.manageSettings ? <a href="#" onClick={e=>{e.preventDefault(); dispatch({type:"SET_ROUTE", route:"settings"});}} style={{color:"var(--accent)", fontWeight:600}}>Connect Google Drive in Settings</a> : "Ask an admin to connect Google Drive in Settings."}</span>
       </div>}
 
       <Card style={{padding:12, marginBottom:14}}>
@@ -3142,7 +3157,7 @@ function LibraryFileDrawer({file, connected, usedBy, canCreate, onCreate, onClos
         {usedBy && usedBy.length>0 && <div style={{padding:"10px 12px", borderRadius:8, background:"var(--amber-soft)", color:"var(--ink)", fontSize:12.5, marginBottom:14, lineHeight:1.5}}>
           <strong>Already used</strong> — {variantUseLine(Object.values(usedBy[0].variants||{})[0]||{platform:"instagram"})} in "{usedBy[0].title}"{usedBy.length>1? " and "+(usedBy.length-1)+" more":""}. See usage history below.
         </div>}
-        {file.kind==="raw" && <div style={{fontSize:12, color:"var(--ink-soft)", background:"var(--surface-2)", borderRadius:8, padding:"8px 10px", marginBottom:14, lineHeight:1.5}}>This is a camera RAW file. When you use it in a post, ContentFlow brings in Drive's full-size JPEG version, since browsers and social apps can't show RAW.</div>}
+        {file.kind==="raw" && <div style={{fontSize:12, color:"var(--ink-soft)", background:"var(--surface-2)", borderRadius:8, padding:"8px 10px", marginBottom:14, lineHeight:1.5}}>This is a camera RAW file. When you use it in a post, Creator Studio brings in Drive's full-size JPEG version, since browsers and social apps can't show RAW.</div>}
         <div style={{display:"grid", gridTemplateColumns:"auto 1fr", gap:"9px 16px", fontSize:13, marginBottom:18}}>
           {rows.map(([k,v])=><React.Fragment key={k}><span style={{color:"var(--ink-mute)"}}>{k}</span><span style={{fontWeight:500, wordBreak:"break-word"}}>{v}</span></React.Fragment>)}
           {file.note && <><span style={{color:"var(--ink-mute)"}}>Note</span><span>{file.note}</span></>}
@@ -3226,7 +3241,6 @@ function DriveSettings(){
     else if(r.drive==="error") dispatch({type:"ADD_TOAST", message:r.msg || "Couldn't connect Google Drive", variant:"danger"});
   }, [state.driveReturn]);
   async function disconnect(){
-    if(!confirm("Disconnect Google Drive? The library will fall back to the snapshot and files can't be pulled in until someone connects again.")) return;
     setBusy(true);
     await fetch("/api/google/disconnect", {method:"POST"}).catch(()=>{});
     LIBRARY_CACHE = null;
@@ -3246,10 +3260,10 @@ function DriveSettings(){
       <div style={{display:"flex", gap:8, flexWrap:"wrap"}}>
         <Button variant="primary" icon="refresh" onClick={()=>refresh()} disabled={busy}>{busy? "Working…" : "Refresh library now"}</Button>
         {st.rootFolderId && <a href={driveFolderUrl(st.rootFolderId)} target="_blank" rel="noopener noreferrer" style={{textDecoration:"none"}}><Button variant="ghost" icon="external">Open library folder</Button></a>}
-        {st.method==="google_signin" && <Button variant="ghost" onClick={disconnect} disabled={busy} style={{color:"var(--red)"}}>Disconnect</Button>}
+        {st.method==="google_signin" && <ConfirmButton size="md" disabled={busy} confirmLabel="Yes, disconnect Drive" onConfirm={disconnect}>Disconnect</ConfirmButton>}
       </div>
       {st.method==="google_signin" && !st.canArchive && <div style={{marginTop:12, padding:"10px 12px", borderRadius:8, background:"var(--amber-soft)", fontSize:12.5, lineHeight:1.5, display:"flex", gap:10, alignItems:"center", flexWrap:"wrap"}}>
-        <span style={{flex:1, minWidth:220}}><strong>One more permission needed</strong> so ContentFlow can move published uploads into a "ContentFlow Archive" folder in Drive (it can only touch files it creates).</span>
+        <span style={{flex:1, minWidth:220}}><strong>One more permission needed</strong> so Creator Studio can move published uploads into a "Creator Studio Archive" folder in Drive (it can only touch files it creates).</span>
         <a href="/api/google/connect" style={{textDecoration:"none"}}><Button variant="primary" size="sm">Reconnect Google Drive</Button></a>
       </div>}
     </div>
@@ -3264,9 +3278,9 @@ function DriveSettings(){
   return (
     <div>
       <div style={{display:"flex", alignItems:"center", gap:8, fontSize:13.5, fontWeight:600, marginBottom:6}}><span style={{width:8, height:8, borderRadius:99, background:"var(--amber)"}}/>Not set up{st.offline? " (server not reachable here)":""}</div>
-      <div style={{fontSize:12.5, color:"var(--ink-soft)", lineHeight:1.6, marginBottom:10}}>One-time setup so an admin can connect Google Drive with a single sign-in. Your files stay private — ContentFlow only gets view access.</div>
+      <div style={{fontSize:12.5, color:"var(--ink-soft)", lineHeight:1.6, marginBottom:10}}>One-time setup so an admin can connect Google Drive with a single sign-in. Your files stay private — Creator Studio only gets view access.</div>
       <ol style={{fontSize:12.5, color:"var(--ink-soft)", lineHeight:1.7, margin:"0 0 10px", paddingLeft:20}}>
-        <li>In Google Cloud (project <strong>ContentFlow</strong>), enable the <strong>Google Drive API</strong>.</li>
+        <li>In Google Cloud (project <strong>Creator Studio</strong>), enable the <strong>Google Drive API</strong>.</li>
         <li>Google Auth Platform → set up the consent screen with audience <strong>Internal</strong>.</li>
         <li>Clients → Create client → <strong>Web application</strong>, with redirect URI <span style={code}>{origin}/api/google/callback</span></li>
         <li>In Terminal, in the contentflow-app folder: <span style={code}>wrangler secret put GOOGLE_CLIENT_ID</span> and <span style={code}>wrangler secret put GOOGLE_CLIENT_SECRET</span></li>
@@ -3320,7 +3334,7 @@ function StorageSettings(){
         {cats.map(([k,l,c])=><span key={k} style={{display:"flex", alignItems:"center", gap:6}}><span style={{width:8, height:8, borderRadius:2, background:c}}/>{l}: <strong className="num">{fmtBytes(rep.byCategory[k].bytes)}</strong> ({rep.byCategory[k].count})</span>)}
       </div>
       <div style={{fontSize:12.5, color:"var(--ink-soft)", lineHeight:1.6, background:"var(--surface-2)", borderRadius:8, padding:"10px 12px", marginBottom:12}}>
-        <strong>How storage is kept free:</strong> a post's video/photo stays here while it's being reviewed, scheduled or if it's rejected. <strong>{rep.policy.publishedGraceDays} days after it's published</strong> on every platform, it leaves ContentFlow storage — library files point back to the Drive library, and uploads are moved to the <strong>ContentFlow Archive</strong> folder in Drive. Uploads never used in a post are removed after {rep.policy.orphanGraceHours} hours. Links keep working either way. This runs automatically every night.
+        <strong>How storage is kept free:</strong> a post's video/photo stays here while it's being reviewed, scheduled or if it's rejected. <strong>{rep.policy.publishedGraceDays} days after it's published</strong> on every platform, it leaves Creator Studio storage — library files point back to the Drive library, and uploads are moved to the <strong>Creator Studio Archive</strong> folder in Drive. Uploads never used in a post are removed after {rep.policy.orphanGraceHours} hours. Links keep working either way. This runs automatically every night.
       </div>
       <div style={{display:"flex", gap:10, flexWrap:"wrap", alignItems:"center", fontSize:12.5, marginBottom:6}}>
         <span><strong className="num">{rep.readyNow.count}</strong> file{rep.readyNow.count===1?"":"s"} ready to clear now ({fmtBytes(rep.readyNow.bytes)})</span>
@@ -3339,6 +3353,16 @@ function StorageSettings(){
       </div>}
     </div>
   );
+}
+
+/* Two-step button: first tap arms it ("Confirm remove?"), second tap does it; resets after a few seconds.
+   Used instead of window.confirm(), which some browsers and iPhone home-screen apps silently block. */
+function ConfirmButton({children, confirmLabel, onConfirm, disabled, size="sm", style}){
+  const [armed, setArmed] = useState(false);
+  useEffect(()=>{ if(!armed) return; const t = setTimeout(()=>setArmed(false), 4000); return ()=>clearTimeout(t); }, [armed]);
+  return armed
+    ? <Button variant="danger" size={size} disabled={disabled} onClick={()=>{ setArmed(false); onConfirm(); }} style={style}>{confirmLabel || "Confirm"}</Button>
+    : <Button variant="ghost" size={size} disabled={disabled} onClick={()=>setArmed(true)} style={{color:"var(--red)", ...style}}>{children}</Button>;
 }
 
 /* Settings → Team & access: add a new hire by email, change roles, remove people. With sign-in on, the list is
@@ -3382,8 +3406,8 @@ function TeamAccessSettings(){
       <div style={{display:"flex", gap:10, alignItems:"flex-start", padding:"10px 12px", borderRadius:8, background: accessOn? "var(--green-soft)" : "var(--amber-soft)", fontSize:12.5, lineHeight:1.55, marginBottom:14}}>
         <span style={{width:8, height:8, borderRadius:99, marginTop:6, flexShrink:0, background: accessOn? "var(--green)" : "var(--amber)"}}/>
         {accessOn
-          ? <span><strong>Sign-in is on.</strong> Only the active people below can open ContentFlow. They sign in with their email and a one-time code sent to it. Signed in as <strong>{state.me.member && state.me.member.email}</strong>.</span>
-          : <span><strong>Sign-in is off — anyone with the link can open ContentFlow.</strong> You can build the team list now; once sign-in is switched on, only these emails get in. {missingEmail>0 && <>Add an email for the {missingEmail} {missingEmail===1? "person":"people"} below without one first.</>}</span>}
+          ? <span><strong>Sign-in is on.</strong> Only the active people below can open Creator Studio. They sign in with their email and a one-time code sent to it. Signed in as <strong>{state.me.member && state.me.member.email}</strong>.</span>
+          : <span><strong>Sign-in is off — anyone with the link can open Creator Studio.</strong> You can build the team list now; once sign-in is switched on, only these emails get in. {missingEmail>0 && <>Add an email for the {missingEmail} {missingEmail===1? "person":"people"} below without one first.</>}</span>}
       </div>
 
       <div style={{border:"1px solid var(--border)", borderRadius:10, overflow:"hidden", marginBottom:12}}>
@@ -3395,7 +3419,7 @@ function TeamAccessSettings(){
             <div style={{display:"flex", gap:6, alignItems:"center", justifyContent:"flex-end"}}>
               <span style={{fontSize:11, color:"var(--ink-mute)", whiteSpace:"nowrap"}} className="cf-hide-narrow">{m.lastSeen? "seen "+fmtDate(m.lastSeen,{day:"numeric",month:"short"}) : accessOn? "not signed in yet" : ""}</span>
               {m.active
-                ? <Button variant="ghost" size="sm" disabled={busy} onClick={()=>{ if(confirm("Remove "+m.name+" from the team? They won't be able to open ContentFlow. Their past posts stay.")) save({...m, active:false}); }} style={{color:"var(--red)"}}>Remove</Button>
+                ? <ConfirmButton disabled={busy} confirmLabel={"Remove "+m.name+"?"} onConfirm={()=>save({...m, active:false})}>Remove</ConfirmButton>
                 : <Button variant="ghost" size="sm" disabled={busy} onClick={()=>save({...m, active:true})}>Restore</Button>}
             </div>
           </div>
@@ -3424,8 +3448,8 @@ function TeamAccessSettings(){
           <li>Make sure every active person above has their email filled in (admin@sanjugo.co.uk can always get in).</li>
           <li>Cloudflare dashboard → <strong>Zero Trust</strong> (choose the Free plan if asked) → <strong>Access → Applications → Add an application → Self-hosted</strong>.</li>
           <li>Application domain: <span style={code}>{window.location.host}</span>. Session duration: 1 month.</li>
-          <li>Policy: action <strong>Allow</strong>, include <strong>Everyone</strong>; login method <strong>One-time PIN</strong>. (ContentFlow's own team list decides who's really let in — so you never touch Cloudflare again to add people.)</li>
-          <li>Save, then copy the application's <strong>Audience (AUD) tag</strong> and your team domain (<span style={code}>yourteam.cloudflareaccess.com</span>) and send them to whoever maintains ContentFlow to switch it on.</li>
+          <li>Policy: action <strong>Allow</strong>, include <strong>Everyone</strong>; login method <strong>One-time PIN</strong>. (Creator Studio's own team list decides who's really let in — so you never touch Cloudflare again to add people.)</li>
+          <li>Save, then copy the application's <strong>Audience (AUD) tag</strong> and your team domain (<span style={code}>yourteam.cloudflareaccess.com</span>) and send them to whoever maintains Creator Studio to switch it on.</li>
         </ol>
       </details>}
       <style>{`@media (max-width:760px){ .cf-team-row, .cf-team-add{ grid-template-columns:1fr 1fr !important; } }`}</style>
@@ -3559,7 +3583,7 @@ function CreateContentPage(){
   function set(patch){ setForm(f=>({...f, ...patch})); }
 
   // Pull a file from the Drive content library into this post: fill in what the filename tells us,
-  // then (when Drive is connected) copy the file into ContentFlow so it previews and plays like an upload.
+  // then (when Drive is connected) copy the file into Creator Studio so it previews and plays like an upload.
   async function pickLibrary(file, connected){
     const m = file.meta || {};
     const patch = {
@@ -4933,7 +4957,7 @@ function SettingsPage(){
         <TemplateEditor template={state.calendarTemplate} onChange={t=>saveConfig({calendarTemplate:t})}/>
       </Card>
 
-      <SectionTitle>Team &amp; access <span style={{fontWeight:500, color:"var(--ink-mute)", fontSize:12}}>(who can open ContentFlow)</span></SectionTitle>
+      <SectionTitle>Team &amp; access <span style={{fontWeight:500, color:"var(--ink-mute)", fontSize:12}}>(who can open Creator Studio)</span></SectionTitle>
       <Card style={{padding:18, marginBottom:6}}><TeamAccessSettings/></Card>
     </div>
   );
@@ -5020,8 +5044,10 @@ function App(){
         const t = await fetch("/api/team", {cache:"no-store"});
         if(t.ok && !cancelled){ const td = await t.json(); if(Array.isArray(td.members) && td.members.length) dispatch({type:"TEAM_LOADED", members:td.members}); }
       }catch(e){ /* offline or no server: keep the built-in team */ }
+      if(!cancelled) dispatch({type:"BOOT_DONE"});
     })();
-    return ()=>{ cancelled = true; };
+    const fallback = setTimeout(()=>dispatch({type:"BOOT_DONE"}), 3000); // never wait forever on a slow network
+    return ()=>{ cancelled = true; clearTimeout(fallback); };
   }, []);
 
   // Deep links from outside the app (e.g. the Drive content library page): #/library?q=G219, #/create?barcode=G219
@@ -5106,6 +5132,10 @@ function App(){
   const titles = {dashboard:"Dashboard", calendar:"Calendar", queue:"Approval Queue", create:"Create Content", published:"Published", analytics:"Analytics", team:"Team", settings:"Settings", chat:"Team Chat", library:"Content Library"};
 
   if(state.lock) return <LockScreen lock={state.lock}/>;
+  const accessOn = !!(state.me && state.me.accessEnabled);
+  const chosen = state.signedInAs && USERS.find(u=>u.id===state.signedInAs && u.active!==false);
+  if(!state.bootDone && !chosen) return <div style={{minHeight:"100vh", background:"var(--bg)"}}/>;
+  if(!accessOn && !chosen) return <WelcomeScreen dispatch={dispatch} teamRev={state.teamRev}/>;
 
   return (
     <AppCtx.Provider value={ctx}>
@@ -5126,6 +5156,37 @@ function App(){
   );
 }
 
+function WelcomeScreen({dispatch}){
+  const people = activeUsers();
+  const [pick, setPick] = useState(()=> (people.find(u=>u.id===readWelcome()) || {}).id || "");
+  const who = people.find(u=>u.id===pick);
+  return (
+    <div style={{minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center", padding:"calc(24px + env(safe-area-inset-top, 0px)) 20px calc(24px + env(safe-area-inset-bottom, 0px))", background:"var(--bg)"}}>
+      <div style={{maxWidth:400, width:"100%", textAlign:"center"}}>
+        <img src={LOGO_SANJUGO} alt="Sanjugo" style={{width:84, height:84, borderRadius:99, marginBottom:18, boxShadow:"0 0 0 6px var(--surface), var(--shadow-md)"}}/>
+        <div style={{fontSize:13, fontWeight:600, letterSpacing:".8px", textTransform:"uppercase", color:"var(--accent)", marginBottom:6}}>Sanjugo</div>
+        <h1 style={{fontSize:28, margin:"0 0 8px", fontWeight:600}}>Welcome to Creator Studio</h1>
+        <div style={{fontSize:14.5, color:"var(--ink-soft)", lineHeight:1.55, marginBottom:28}}>Plan, approve and publish Sanjugo's content — all in one place.</div>
+        <div style={{background:"var(--surface)", border:"1px solid var(--border)", borderRadius:14, padding:20, textAlign:"left", boxShadow:"var(--shadow-sm)"}}>
+          <label htmlFor="cf-who" style={{display:"block", fontSize:13, fontWeight:600, marginBottom:8}}>Who's signing in?</label>
+          <div style={{position:"relative", marginBottom:14}}>
+            <select id="cf-who" value={pick} onChange={e=>setPick(e.target.value)}
+              style={{appearance:"none", width:"100%", padding:"12px 36px 12px 14px", borderRadius:10, border:"1px solid var(--border)", background:"var(--surface)", color: pick? "var(--ink)" : "var(--ink-mute)", fontSize:15, fontWeight:500, cursor:"pointer"}}>
+              <option value="">Select your name</option>
+              {people.map(u=><option key={u.id} value={u.id}>{u.name} — {ROLE_META[u.role].label}</option>)}
+            </select>
+            <Icon name="chevronDown" size={16} style={{position:"absolute", right:12, top:14, color:"var(--ink-mute)", pointerEvents:"none"}}/>
+          </div>
+          <Button variant="primary" size="lg" disabled={!pick} onClick={()=>dispatch({type:"WELCOME_SIGN_IN", id:pick})} style={{width:"100%", justifyContent:"center"}}>
+            {who ? "Continue as "+who.name : "Continue"}
+          </Button>
+        </div>
+        <div style={{fontSize:12, color:"var(--ink-mute)", marginTop:16, lineHeight:1.5}}>Not on the list? Ask an admin to add you in Settings → Team &amp; access.</div>
+      </div>
+    </div>
+  );
+}
+
 function LockScreen({lock}){
   const signedOut = lock.code==="signed_out";
   return (
@@ -5133,7 +5194,7 @@ function LockScreen({lock}){
       <div style={{maxWidth:420, width:"100%", background:"var(--surface)", border:"1px solid var(--border)", borderRadius:12, padding:28, textAlign:"center", boxShadow:"var(--shadow-md)"}}>
         <img src={LOGO_SANJUGO} alt="Sanjugo" style={{width:48, height:48, borderRadius:99, marginBottom:14}}/>
         <div style={{fontSize:18, fontWeight:600, marginBottom:8}}>{signedOut ? "Please sign in again" : "You don't have access yet"}</div>
-        <div style={{fontSize:13.5, color:"var(--ink-soft)", lineHeight:1.6, marginBottom:20}}>{lock.message || "Ask a ContentFlow admin to add your email in Settings → Team & access."}</div>
+        <div style={{fontSize:13.5, color:"var(--ink-soft)", lineHeight:1.6, marginBottom:20}}>{lock.message || "Ask a Creator Studio admin to add your email in Settings → Team & access."}</div>
         <div style={{display:"flex", gap:8, justifyContent:"center", flexWrap:"wrap"}}>
           <Button variant="primary" onClick={()=>window.location.reload()}>Try again</Button>
           <a href="/cdn-cgi/access/logout" style={{textDecoration:"none"}}><Button variant="ghost">Use a different email</Button></a>
@@ -5148,7 +5209,7 @@ root.render(<App/>);
 </script>
 
 <script>
-  // Registers the service worker so ContentFlow can be installed as an app (home-screen icon,
+  // Registers the service worker so Creator Studio can be installed as an app (home-screen icon,
   // full-screen, no browser bar) instead of only living as a browser tab.
   if("serviceWorker" in navigator){
     window.addEventListener("load", ()=>{

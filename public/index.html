@@ -873,6 +873,7 @@ function pushServerState(state){
   const payload = {
     contentItems: state.contentItems, activityLog: state.activityLog, decisionHistory: state.decisionHistory,
     calendarTemplate: state.calendarTemplate, adminEmails: state.adminEmails, theme: state.theme, campaigns: state.campaigns,
+    chatUpdates: state.chatUpdates !== false,
   };
   fetch("/api/state", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload)}).catch(()=>{
     /* offline or /api not available — localStorage cache above still has this device covered */
@@ -897,13 +898,15 @@ function initState(){
     contentItems: persistedItemsValid ? persisted.contentItems : CONTENT_ITEMS,
     activityLog: persistedItemsValid && Array.isArray(persisted.activityLog) ? persisted.activityLog : ACTIVITY_LOG,
     publishedPosts: PUBLISHED_POSTS,
-    currentUserId: (persisted && userIds.has(persisted.currentUserId) && persisted.currentUserId) || "u_cyrus",
+    // Whoever picked their name on the welcome page is the current user on this device.
+    currentUserId: (userIds.has(readWelcome()) && readWelcome()) || (persisted && userIds.has(persisted.currentUserId) && persisted.currentUserId) || "u_cyrus",
     currentBrandId: "sanjugo",
     decisionHistory: persistedItemsValid && Array.isArray(persisted.decisionHistory) ? persisted.decisionHistory : [],
     theme: (persisted && persisted.theme) || "system",
     calendarTemplate: DEFAULT_CALENDAR_TEMPLATE,
     adminEmails: [DEFAULT_ADMIN_EMAIL],
     campaigns: (persisted && Array.isArray(persisted.campaigns)) ? persisted.campaigns : CAMPAIGNS,
+    chatUpdates: true,
     toasts: [],
     route: "dashboard",
     signedInAs: readWelcome(),
@@ -924,6 +927,7 @@ function reducer(state, action){
         calendarTemplate: Array.isArray(s.calendarTemplate) ? s.calendarTemplate : state.calendarTemplate,
         adminEmails: Array.isArray(s.adminEmails) ? s.adminEmails : state.adminEmails,
         campaigns: Array.isArray(s.campaigns) ? s.campaigns : state.campaigns,
+        chatUpdates: s.chatUpdates !== false,
         theme: s.theme || state.theme,
         serverLoaded: true,
       };
@@ -938,7 +942,12 @@ function reducer(state, action){
       try{ localStorage.removeItem(WELCOME_KEY); }catch(e){}
       return {...state, signedInAs: null};
     }
-    case "TEAM_LOADED": { applyTeam(action.members); return {...state, team: action.members, teamRev:(state.teamRev||0)+1}; }
+    case "TEAM_LOADED": {
+      applyTeam(action.members);
+      // A welcome-page pick of someone added later than the built-in team only resolves once the list arrives.
+      const picked = !(state.me && state.me.accessEnabled) && state.signedInAs && action.members.some(m=>m.id===state.signedInAs && m.active!==false);
+      return {...state, team: action.members, teamRev:(state.teamRev||0)+1, ...(picked? {currentUserId: state.signedInAs} : {})};
+    }
     case "SET_ME": return {...state, me: action.me, lock: action.lock || null, ...(action.me && action.me.member ? {currentUserId: action.me.member.id} : {})};
     case "SET_BRAND": return {...state, currentBrandId: action.id};
     case "SET_ROUTE": return {...state, route: action.route, createPrefill: action.createPrefill || null, libraryQuery: action.libraryQuery || "", driveReturn: action.driveReturn || state.driveReturn || null,
@@ -1036,6 +1045,7 @@ function reducer(state, action){
         toasts:[...state.toasts, {id:uid("toast"), message: all? "Published — "+item.title : "Marked "+platforms.length+" platform"+(platforms.length>1?"s":"")+" as published", variant:"ok"}]};
     }
     case "SET_ADMIN_EMAILS": return {...state, adminEmails: action.emails};
+    case "SET_CHAT_UPDATES": return {...state, chatUpdates: !!action.on};
     case "ADD_CAMPAIGN": return {...state, campaigns:[...state.campaigns, action.campaign]};
     case "UPDATE_CAMPAIGN": return {...state, campaigns: state.campaigns.map(c=> c.id===action.id? {...c, ...action.patch} : c)};
     case "DELETE_CAMPAIGN": {
@@ -4919,7 +4929,8 @@ function useChat(currentUserId, dispatch){
     if(loadedOnce.current){
       incoming.filter(m=>m.author!==userRef.current && (m.mentions||[]).includes(userRef.current)).forEach(m=>{
         const who = USERS.find(u=>u.id===m.author);
-        dispatch({type:"ADD_TOAST", message:(who? who.name : "Someone")+" mentioned you in Team Chat: “"+m.text.slice(0,60)+(m.text.length>60?"…":"")+"”"});
+        const short = m.text.replace(/\s@[^\n]*$/, "").split("\n")[0];
+        dispatch({type:"ADD_TOAST", message: m.author==="system" ? short.slice(0,110) : (who? who.name : "Someone")+" mentioned you in Team Chat: “"+m.text.slice(0,60)+(m.text.length>60?"…":"")+"”"});
       });
     }
   }, [dispatch]);
@@ -5007,7 +5018,8 @@ function ChatPage(){
   const [text, setText] = useState("");
   const [linkId, setLinkId] = useState("");
   const [linkOpen, setLinkOpen] = useState(false);
-  const [onlyMentions, setOnlyMentions] = useState(false);
+  const [view, setView] = useState("all"); // all | mentions | updates
+  const onlyMentions = view==="mentions";
   const [sending, setSending] = useState(false);
   const [mention, setMention] = useState(null); // {query, start} while typing "@…"
   const [mIndex, setMIndex] = useState(0);
@@ -5016,11 +5028,12 @@ function ChatPage(){
   const firstUnread = useRef(chat.seen);
 
   useEffect(()=>{ chat.markSeen(); }, [chat.messages.length, me]);
-  const shown = onlyMentions ? chat.messages.filter(m=>(m.mentions||[]).includes(me)) : chat.messages;
+  const shown = view==="mentions" ? chat.messages.filter(m=>(m.mentions||[]).includes(me))
+    : view==="updates" ? chat.messages.filter(m=>m.author==="system") : chat.messages;
   useEffect(()=>{
     const el = listRef.current; if(!el) return;
     el.scrollTop = el.scrollHeight;
-  }, [shown.length, onlyMentions]);
+  }, [shown.length, view]);
 
   const candidates = mention ? [...activeUsers().filter(u=>u.id!==me).map(u=>({key:u.id, label:u.name, sub:ROLE_META[u.role].label, user:u})), {key:"everyone", label:"everyone", sub:"Notify the whole team"}]
       .filter(c=>c.label.toLowerCase().startsWith(mention.query.toLowerCase())) : [];
@@ -5068,8 +5081,8 @@ function ChatPage(){
       }/>
       <Card style={{padding:0, display:"flex", flexDirection:"column", height: narrow? "calc(100dvh - 200px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px))" : "calc(100dvh - 190px)", minHeight:380, overflow:"hidden"}}>
         <div style={{display:"flex", alignItems:"center", gap:6, padding:"10px 14px", borderBottom:"1px solid var(--border)"}}>
-          {[["All messages", false], ["Mentions of me", true]].map(([label, v])=>(
-            <button key={label} onClick={()=>setOnlyMentions(v)} style={{padding:"6px 11px", borderRadius:7, border:"1px solid "+(onlyMentions===v?"var(--ink)":"var(--border)"), background: onlyMentions===v? "var(--ink)":"var(--surface)", color: onlyMentions===v? "var(--surface)":"var(--ink-soft)", fontSize:12.5, fontWeight:600, cursor:"pointer"}}>{label}</button>
+          {[["All", "all"], ["Mentions of me", "mentions"], ["Updates", "updates"]].map(([label, v])=>(
+            <button key={v} onClick={()=>setView(v)} style={{padding:"6px 11px", borderRadius:7, border:"1px solid "+(view===v?"var(--ink)":"var(--border)"), background: view===v? "var(--ink)":"var(--surface)", color: view===v? "var(--surface)":"var(--ink-soft)", fontSize:12.5, fontWeight:600, cursor:"pointer", whiteSpace:"nowrap"}}>{label}</button>
           ))}
           <span style={{flex:1}}/>
           <span style={{display:"flex", alignItems:"center", gap:6, fontSize:12, color:"var(--ink-mute)"}}>
@@ -5081,9 +5094,10 @@ function ChatPage(){
 
         <div ref={listRef} style={{flex:1, minHeight:0, overflowY:"auto", padding:"8px 0 12px"}}>
           {shown.length===0 ? (
-            <EmptyState icon="chat" title={onlyMentions? "No mentions yet" : "No messages yet"} subtitle={onlyMentions? "When someone @mentions you, it shows up here." : "Say hello — e.g. “@Cyrus I've made the changes, ready for approval.”"}/>
+            <EmptyState icon="chat" title={view==="mentions"? "No mentions yet" : view==="updates"? "No updates yet" : "No messages yet"} subtitle={view==="mentions"? "When someone @mentions you, it shows up here." : view==="updates"? "Creator Studio posts here when something is sent for approval, approved, sent back or published." : "Say hello — e.g. “@Cyrus I've made the changes, ready for approval.”"}/>
           ) : shown.map(m=>{
-            const author = USERS.find(u=>u.id===m.author) || {name:"Unknown", avatarColor:"#888", id:m.author};
+            const isUpdate = m.author==="system";
+            const author = isUpdate ? {id:"system", name:"Creator Studio"} : (USERS.find(u=>u.id===m.author) || {name:"Unknown", avatarColor:"#888", id:m.author});
             const day = dayLabel(m.createdAt);
             const showDay = day!==lastDay; lastDay = day;
             const grouped = !showDay && prev && prev.author===m.author && (new Date(m.createdAt)-new Date(prev.createdAt) < 5*60000);
@@ -5096,10 +5110,10 @@ function ChatPage(){
                 {showDay && <div style={{display:"flex", alignItems:"center", gap:10, padding:"12px 16px 6px", fontSize:11.5, fontWeight:600, color:"var(--ink-mute)"}}><span style={{flex:1, height:1, background:"var(--border)"}}/>{day}<span style={{flex:1, height:1, background:"var(--border)"}}/></div>}
                 {showUnreadLine && <div style={{display:"flex", alignItems:"center", gap:10, padding:"4px 16px", fontSize:11, fontWeight:700, color:"var(--red)"}}><span style={{flex:1, height:1, background:"var(--red)", opacity:.4}}/>New</div>}
                 <div style={{display:"flex", gap:10, padding: grouped? "1px 16px" : "8px 16px 1px", background: mentionsMe? "var(--accent-soft)" : "transparent", borderLeft: mentionsMe? "3px solid var(--accent)" : "3px solid transparent"}}>
-                  <div style={{width:32, flexShrink:0}}>{!grouped && <Avatar user={author} size={32}/>}</div>
+                  <div style={{width:32, flexShrink:0}}>{!grouped && (isUpdate ? <img src={LOGO_SANJUGO} alt="" style={{width:32, height:32, borderRadius:99}}/> : <Avatar user={author} size={32}/>)}</div>
                   <div style={{flex:1, minWidth:0}}>
                     {!grouped && <div style={{display:"flex", alignItems:"baseline", gap:8, marginBottom:1}}>
-                      <span style={{fontSize:13.5, fontWeight:700}}>{author.name}</span>
+                      <span style={{fontSize:13.5, fontWeight:700}}>{author.name}</span>{isUpdate && <span style={{fontSize:10, fontWeight:700, letterSpacing:".4px", padding:"1px 6px", borderRadius:4, background:"var(--surface-2)", color:"var(--ink-mute)"}}>UPDATE</span>}
                       <span style={{fontSize:11.5, color:"var(--ink-mute)"}}>{new Date(m.createdAt).toLocaleTimeString("en-GB",{hour:"2-digit", minute:"2-digit"})}</span>
                     </div>}
                     <div style={{fontSize:13.5, lineHeight:1.5, whiteSpace:"pre-wrap", wordBreak:"break-word", color:"var(--ink)"}}><ChatText text={m.text} me={me}/></div>
@@ -5308,6 +5322,13 @@ function SettingsPage(){
         <TemplateEditor template={state.calendarTemplate} onChange={t=>saveConfig({calendarTemplate:t})}/>
       </Card>
 
+      <SectionTitle>Notifications</SectionTitle>
+      <Card style={{padding:18, marginBottom:26}}>
+        <label style={{display:"flex", gap:10, alignItems:"flex-start", cursor:"pointer"}}>
+          <input type="checkbox" checked={state.chatUpdates!==false} onChange={e=>dispatch({type:"SET_CHAT_UPDATES", on:e.target.checked})} style={{marginTop:3}}/>
+          <span style={{fontSize:13, lineHeight:1.55}}><strong>Post workflow updates in Team Chat</strong><br/><span style={{color:"var(--ink-soft)"}}>Creator Studio posts when a post is sent for approval, resubmitted, approved, sent back, rejected or published, and @mentions whoever needs to act — so they get the badge and a pop-up.</span></span>
+        </label>
+      </Card>
       <SectionTitle>Team &amp; access <span style={{fontWeight:500, color:"var(--ink-mute)", fontSize:12}}>(who can open Creator Studio)</span></SectionTitle>
       <Card style={{padding:18, marginBottom:6}}><TeamAccessSettings/></Card>
     </div>
@@ -5436,7 +5457,7 @@ function App(){
     if(pushTimer.current) clearTimeout(pushTimer.current);
     pushTimer.current = setTimeout(()=> pushServerState(state), 700);
     return ()=>clearTimeout(pushTimer.current);
-  }, [state.contentItems, state.activityLog, state.decisionHistory, state.calendarTemplate, state.adminEmails, state.theme, state.campaigns, state.serverLoaded]);
+  }, [state.contentItems, state.activityLog, state.decisionHistory, state.calendarTemplate, state.adminEmails, state.theme, state.campaigns, state.chatUpdates, state.serverLoaded]);
 
   useEffect(()=>{
     if(state.toasts.length===0) return;

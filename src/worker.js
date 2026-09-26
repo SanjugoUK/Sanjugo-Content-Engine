@@ -58,7 +58,7 @@ export default {
 
     if (url.pathname === "/api/state") {
       if (request.method === "GET") return getState(env);
-      if (request.method === "POST") return postState(request, env);
+      if (request.method === "POST") return postState(request, env, ctx);
     }
 
     if (url.pathname === "/api/upload" && request.method === "POST") {
@@ -119,7 +119,7 @@ async function getState(env) {
   });
 }
 
-async function postState(request, env) {
+async function postState(request, env, ctx) {
   let body;
   try {
     body = await request.json();
@@ -131,6 +131,8 @@ async function postState(request, env) {
     `INSERT INTO app_state (id, data, updated_at) VALUES (1, ?1, datetime('now'))
      ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at`
   ).bind(json).run();
+  // Turn new workflow events (sent for approval, approved, ...) into Team Chat updates, after replying.
+  if (ctx && body.chatUpdates !== false) ctx.waitUntil(postWorkflowUpdates(env, body).catch((e) => console.error("chat updates", e)));
   return new Response(JSON.stringify({ ok: true }), {
     headers: { "Content-Type": "application/json" },
   });
@@ -238,6 +240,9 @@ async function ensureChatTable(env) {
        created_at TEXT NOT NULL
      )`
   ).run();
+  // Workflow updates carry the activity id they came from, so each event is posted exactly once.
+  try { await env.DB.prepare("ALTER TABLE chat_messages ADD COLUMN event_id TEXT").run(); } catch (e) { /* already there */ }
+  await env.DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS chat_messages_event ON chat_messages(event_id)").run();
   chatTableReady = true;
 }
 
@@ -1018,4 +1023,68 @@ async function generateInsights(request, env) {
   };
   await kvSet(env, "insights_latest", result);
   return json(result);
+}
+
+// ---------------------------------------------------------------------------
+// Workflow updates in Team Chat. When the shared state is saved, any new activity (a post sent for approval,
+// approved, sent back, rejected, resubmitted, published) becomes a message from "Creator Studio" that
+// @mentions whoever needs to act. Only events from the last 15 minutes are posted (no backfill), and the
+// unique event_id means the same event is never posted twice, however many devices save the state.
+// ---------------------------------------------------------------------------
+
+const UPDATE_WINDOW_MS = 15 * 60 * 1000;
+
+async function postWorkflowUpdates(env, body) {
+  const log = Array.isArray(body.activityLog) ? body.activityLog : [];
+  const now = Date.now();
+  const fresh = log.filter((a) => a && a.id && a.at && now - Date.parse(a.at) < UPDATE_WINDOW_MS).slice(0, 25);
+  if (!fresh.length) return;
+  const items = new Map((Array.isArray(body.contentItems) ? body.contentItems : []).map((i) => [i.id, i]));
+  const { members } = await listTeam(env);
+  const byId = new Map(members.map((m) => [m.id, m]));
+  const nameOf = (id) => (byId.get(id) || {}).name || "Someone";
+  const reviewers = members.filter((m) => m.active && (m.role === "approver" || m.role === "admin"));
+  await ensureChatTable(env);
+
+  for (const a of fresh) {
+    const item = items.get(a.contentId);
+    if (!item) continue;
+    const actor = nameOf(a.user);
+    const title = item.title || a.contentTitle || "a post";
+    const platforms = (item.platforms || []).map((p) => ({ instagram: "Instagram", tiktok: "TikTok", facebook: "Facebook", youtube: "YouTube Shorts", gbp: "Google Business" }[p] || p)).join(", ");
+    const note = a.comment ? `\n“${String(a.comment).slice(0, 300)}”` : "";
+    // Who needs to act: the approver for anything waiting on review, the creator for decisions on their post.
+    let text = null, notify = [];
+    const approverOrReviewers = () => {
+      const ap = byId.get(item.approver);
+      if (ap && ap.active && ap.id !== a.user) return [ap.id];
+      return reviewers.filter((r) => r.id !== a.user).map((r) => r.id);
+    };
+    const creator = item.creator && item.creator !== a.user ? [item.creator] : [];
+    if (a.type === "created" && /submitted/i.test(a.detail || "")) {
+      notify = approverOrReviewers();
+      text = `🔔 ${actor} sent “${title}” for approval (${platforms}).`;
+    } else if (a.type === "submitted") {
+      notify = approverOrReviewers();
+      text = `🔁 ${actor} resubmitted “${title}”${a.version ? " as v" + a.version : ""} after changes.${note}`;
+    } else if (a.type === "approved") {
+      notify = creator;
+      text = `✅ ${actor} approved “${title}”.`;
+    } else if (a.type === "changes_requested") {
+      notify = creator;
+      text = `✏️ ${actor} asked for changes on “${title}”.${note}`;
+    } else if (a.type === "rejected") {
+      notify = creator;
+      text = `⛔ ${actor} rejected “${title}”.${note}`;
+    } else if (a.type === "published") {
+      notify = creator;
+      text = `🚀 “${title}” is live on ${platforms} — marked by ${actor}.`;
+    }
+    if (!text) continue;
+    const mentions = [...new Set(notify)];
+    if (mentions.length) text += " " + mentions.map((id) => "@" + nameOf(id)).join(" ");
+    await env.DB.prepare(
+      "INSERT OR IGNORE INTO chat_messages (author, text, mentions, content_id, created_at, event_id) VALUES ('system', ?1, ?2, ?3, ?4, ?5)"
+    ).bind(text, JSON.stringify(mentions), item.id, new Date().toISOString(), a.id).run();
+  }
 }

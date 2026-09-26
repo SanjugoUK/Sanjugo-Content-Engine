@@ -69,6 +69,9 @@
   @keyframes cf-toast-in{from{opacity:0; transform:translateY(8px);} to{opacity:1; transform:translateY(0);}}
   @keyframes cf-card-in{from{opacity:0; transform:translateY(10px) scale(.98);} to{opacity:1; transform:translateY(0) scale(1);}}
   @keyframes cf-fade-in{from{opacity:0;} to{opacity:1;}}
+  body.cf-immersive .cf-toasts{top:calc(16px + env(safe-area-inset-top, 0px)); bottom:auto !important; left:16px; right:16px !important; margin:0 auto;}
+  .cf-noscrollbar{scrollbar-width:none;} .cf-noscrollbar::-webkit-scrollbar{display:none;}
+  @keyframes cf-spin{to{transform:rotate(360deg);}}
   @keyframes cf-pop-in{from{opacity:0; transform:translateY(14px) scale(.97);} to{opacity:1; transform:translateY(0) scale(1);}}
 </style>
 <div id="cf-root"></div>
@@ -206,6 +209,33 @@ function imageFileToPreview(file, maxDim, quality){
     img.onerror = (e)=>{ URL.revokeObjectURL(url); reject(e); };
     img.src = url;
   });
+}
+/* Read an uploaded file's real shape and length, so aspect ratio + duration fill themselves in. */
+function readMediaInfo(file, isVideo){
+  return new Promise(resolve=>{
+    const url = URL.createObjectURL(file);
+    let settled = false;
+    const done = info=>{ if(settled) return; settled = true; URL.revokeObjectURL(url); resolve(info); };
+    if(isVideo){
+      const v = document.createElement("video");
+      v.preload = "metadata"; v.muted = true;
+      v.onloadedmetadata = ()=>done({w:v.videoWidth, h:v.videoHeight, duration:v.duration});
+      v.onerror = ()=>done(null);
+      v.src = url;
+    } else {
+      const img = new Image();
+      img.onload = ()=>done({w:img.naturalWidth, h:img.naturalHeight});
+      img.onerror = ()=>done(null);
+      img.src = url;
+    }
+    setTimeout(()=>done(null), 8000);
+  });
+}
+function nearestAspect(w, h){
+  if(!w || !h) return null;
+  const r = w/h;
+  const opts = [["9:16",9/16],["4:5",4/5],["1:1",1],["16:9",16/9]];
+  return opts.reduce((a,b)=> Math.abs(Math.log(r/b[1])) < Math.abs(Math.log(r/a[1])) ? b : a)[0];
 }
 /* Grab a real frame from an uploaded video as a poster-image preview (we don't store the
    whole video — just a still from partway through it, so the card shows the actual clip). */
@@ -549,7 +579,7 @@ function Avatar({user, size=30}){
   return <span style={{width:size,height:size,borderRadius:99,background:user.avatarColor,color:"#fff",display:"inline-flex",alignItems:"center",justifyContent:"center",fontWeight:700,fontSize:size*0.4,flexShrink:0}}>{initials}</span>;
 }
 
-function Thumb({item, radius=12, iconSize=22}){
+function Thumb({item, radius=12, iconSize=22, bare}){
   const [c1,c2] = item.gradient;
   const fromDrive = !!item.driveSource;
   const previewUrl = item.media && item.media.previewUrl;
@@ -561,8 +591,8 @@ function Thumb({item, radius=12, iconSize=22}){
       {previewUrl && item.media.type==="video" && <div style={{position:"absolute", inset:0, background:"rgba(0,0,0,.18)"}}/>}
       {fromDrive && <div style={{position:"absolute", inset:0, backgroundImage:"repeating-linear-gradient(135deg, rgba(255,255,255,.09) 0 10px, transparent 10px 20px)"}}/>}
       {(!previewUrl || item.media.type==="video") && <Icon name={item.media.type==="video"?"play":"image"} size={iconSize} style={{color:"rgba(255,255,255,.85)", position: previewUrl?"relative":"static", zIndex:1}}/>}
-      {item.media.type==="video" && item.media.duration ? <span style={{position:"absolute", bottom:6, right:7, fontSize:10.5, fontWeight:700, color:"#fff", background:"rgba(0,0,0,.4)", borderRadius:5, padding:"1px 5px"}}>{item.media.duration}s</span> : null}
-      {fromDrive && <span style={{position:"absolute", bottom:6, left:7, display:"flex", alignItems:"center", gap:4, fontSize:9.5, fontWeight:700, color:"#fff", background:"rgba(0,0,0,.45)", borderRadius:5, padding:"2px 6px 2px 5px", letterSpacing:".2px"}}><Icon name="file" size={9} style={{color:"#fff"}}/>{item.driveSource}</span>}
+      {!bare && item.media.type==="video" && item.media.duration ? <span style={{position:"absolute", bottom:6, right:7, fontSize:10.5, fontWeight:700, color:"#fff", background:"rgba(0,0,0,.4)", borderRadius:5, padding:"1px 5px"}}>{item.media.duration}s</span> : null}
+      {!bare && fromDrive && <span style={{position:"absolute", bottom:6, left:7, display:"flex", alignItems:"center", gap:4, fontSize:9.5, fontWeight:700, color:"#fff", background:"rgba(0,0,0,.45)", borderRadius:5, padding:"2px 6px 2px 5px", letterSpacing:".2px"}}><Icon name="file" size={9} style={{color:"#fff"}}/>{item.driveSource}</span>}
     </div>
   );
 }
@@ -743,7 +773,7 @@ function FunnelChart({stages}){
 /* ============================== TOASTS ============================== */
 function ToastHost({toasts, remove}){
   return (
-    <div style={{position:"fixed", bottom:20, right:20, display:"flex", flexDirection:"column", gap:10, zIndex:200, maxWidth:340}}>
+    <div className="cf-toasts" style={{position:"fixed", bottom:20, right:20, display:"flex", flexDirection:"column", gap:10, zIndex:200, maxWidth:340}}>
       {toasts.map(t=>(
         <div key={t.id} style={{background:"var(--ink)", color:"var(--surface)", padding:"12px 14px", borderRadius:11, boxShadow:"var(--shadow-lg)", display:"flex", alignItems:"flex-start", gap:10, animation:"cf-toast-in .25s ease"}}>
           <div style={{width:22, height:22, borderRadius:99, background: t.variant==="danger"?"var(--red)": t.variant==="warn"?"var(--amber)":"var(--green)", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0, marginTop:1}}>
@@ -1040,7 +1070,7 @@ function Sidebar({open, onClose}){
       @media (min-width: 901px){ .cf-scrim{display:none !important;} }
       .cf-sidebar{ transition: transform .25s ease; }
       @media (max-width: 900px){
-        .cf-sidebar{ position:fixed; inset:0 auto 0 0; transform:translateX(-100%); z-index:41; }
+        .cf-sidebar{ position:fixed !important; inset:0 auto 0 0; transform:translateX(-100%); z-index:41 !important; }
         .cf-sidebar-open{ transform:translateX(0); box-shadow:var(--shadow-lg); }
       }
     `}</style>
@@ -1349,7 +1379,7 @@ function buildQueue(items, mode, filters){
   return flat;
 }
 
-/* -------- authentic per-platform post mockups -------- */
+/* -------- phone-accurate per-platform previews: what the approver sees is what gets published -------- */
 function seedNum(str, min, max){
   let h=0; for(const c of str) h=(h*131+c.charCodeAt(0))>>>0;
   return min + (h%(max-min));
@@ -1363,173 +1393,566 @@ function BrandGlyph({brand, size=32, radius=99}){
   const [c1,c2] = grad(brand.id);
   return <span style={{width:size, height:size, borderRadius:radius, flexShrink:0, background:`linear-gradient(135deg, ${c1}, ${c2})`, display:"flex", alignItems:"center", justifyContent:"center", color:"#fff", fontWeight:800, fontSize:size*0.36}}>{initials(brand.name)}</span>;
 }
-function PreviewRibbon(){
-  return <span style={{position:"absolute", top:9, left:9, zIndex:2, background:"rgba(20,22,38,.72)", color:"#fff", fontSize:9.5, fontWeight:700, padding:"3px 8px", borderRadius:99, letterSpacing:".4px"}}>PREVIEW · NOT PUBLISHED</span>;
-}
 function aspectFor(item){ return item.media.aspectRatio==="9:16" ? "9/16" : item.media.aspectRatio==="16:9" ? "16/9" : item.media.aspectRatio==="1:1" ? "1/1" : "4/5"; }
 
-function ReelFrame({item, railItems, footer, topRight}){
+function useIsNarrow(maxWidth=900){
+  const q = "(max-width:"+maxWidth+"px)";
+  const [narrow, setNarrow] = useState(()=> !!(window.matchMedia && window.matchMedia(q).matches));
+  useEffect(()=>{
+    if(!window.matchMedia) return;
+    const mq = window.matchMedia(q);
+    const on = ()=>setNarrow(mq.matches);
+    on();
+    mq.addEventListener ? mq.addEventListener("change", on) : mq.addListener(on);
+    return ()=>{ mq.removeEventListener ? mq.removeEventListener("change", on) : mq.removeListener(on); };
+  }, [q]);
+  return narrow;
+}
+
+/* Everything inside the phone is sized in iPhone points (390pt-wide screen) and scales with the frame. */
+const pt = n => `calc(${n} * 100cqw / 390)`;
+const PHONE_FONT = '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Roboto, Arial, sans-serif';
+const PHONE_W = "min(100cqw, calc(100cqh * 9 / 19.5))";
+function handleOf(s){ return (s||"").replace(/^@/,"").toLowerCase().replace(/[^a-z0-9._]/g,""); }
+function fullCaption(v){ return [v.caption, (v.hashtags||[]).join(" ")].filter(Boolean).join(" "); }
+function withTags(text, tagStyle){
+  return (text||"").split(/(#[\p{L}\p{N}_]+)/u).map((part,i)=> part.startsWith("#") ? <span key={i} style={tagStyle}>{part}</span> : part);
+}
+
+function AppGlyph({name, size, color="#fff", fill=false, sw=1.9}){
+  const o = {fill:"none", stroke:color, strokeWidth:sw, strokeLinecap:"round", strokeLinejoin:"round"};
+  const s = fill ? {fill:color, stroke:color, strokeWidth:sw*0.6, strokeLinejoin:"round"} : o;
+  const paths = {
+    heart: <path d="M12 20.5s-7.5-4.6-9.6-9.3C.9 7.6 3 4 6.6 3.6c2.1-.2 4 .9 5.4 2.8 1.4-1.9 3.3-3 5.4-2.8C21 4 23.1 7.6 21.6 11.2 19.5 15.9 12 20.5 12 20.5z" {...s}/>,
+    comment: <path d="M20.7 16.5A9 9 0 1 0 17 20.3l4.5 1.2z" {...o}/>,
+    repost: <><path d="M4 11V9a3 3 0 0 1 3-3h12M16 3l3 3-3 3" {...o}/><path d="M20 13v2a3 3 0 0 1-3 3H5M8 21l-3-3 3-3" {...o}/></>,
+    send: <><path d="M21.5 3 3 9.5l7.4 3.2z" {...o}/><path d="M21.5 3 14.5 21l-4.1-8.3" {...o}/></>,
+    home: <path d="M3.5 10.5 12 3.5l8.5 7V20a1 1 0 0 1-1 1h-5v-6h-5v6h-5a1 1 0 0 1-1-1z" {...s}/>,
+    reels: <><rect x="3" y="3" width="18" height="18" rx="5" {...o}/><path d="M3 8.5h18M9 3l3 5.5M14.5 3l3 5.5" {...o}/><path d="M10 12v5l4.5-2.5z" fill={color} stroke="none"/></>,
+    search: <><circle cx="10.5" cy="10.5" r="7" {...o}/><path d="m20.5 20.5-4.8-4.8" {...o}/></>,
+    plusBox: <><rect x="3" y="3" width="18" height="18" rx="5" {...o}/><path d="M12 8v8M8 12h8" {...o}/></>,
+    plus: <path d="M12 5v14M5 12h14" {...o}/>,
+    menu: <path d="M5 8h14M9 15h10" {...o}/>,
+    dots: <><circle cx="12" cy="5" r="1.8" fill={color}/><circle cx="12" cy="12" r="1.8" fill={color}/><circle cx="12" cy="19" r="1.8" fill={color}/></>,
+    dotsH: <><circle cx="5" cy="12" r="1.8" fill={color}/><circle cx="12" cy="12" r="1.8" fill={color}/><circle cx="19" cy="12" r="1.8" fill={color}/></>,
+    close: <path d="M6 6l12 12M18 6 6 18" {...o}/>,
+    ttComment: <path d="M12 3.5c5.2 0 9.5 3.4 9.5 7.7 0 4.2-4.3 7.6-9.5 7.6-.9 0-1.8-.1-2.6-.3L5 20.5l.9-3.6C3.8 15.5 2.5 13.5 2.5 11.2c0-4.3 4.3-7.7 9.5-7.7z" fill={color}/>,
+    bookmark: <path d="M6.5 3h11a1 1 0 0 1 1 1v17l-6.5-4.5L5.5 21V4a1 1 0 0 1 1-1z" {...s}/>,
+    shareArrow: <path d="M13.5 4.5 22 12l-8.5 7.5V15c-6 0-9.5 1.8-11.5 5.5.6-6.3 3.9-10.4 11.5-11z" {...s}/>,
+    thumbUp: <path d="M7 21H4a1 1 0 0 1-1-1v-8a1 1 0 0 1 1-1h3m0 10V11m0 10h10.2a2 2 0 0 0 2-1.6l1.3-6.5A2 2 0 0 0 18.5 10H14l.9-4.6a1.9 1.9 0 0 0-3.3-1.6L7 11" {...s}/>,
+    thumbDown: <path d="M17 3h3a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1h-3m0-10v10m0-10H6.8a2 2 0 0 0-2 1.6l-1.3 6.5A2 2 0 0 0 5.5 14H10l-.9 4.6a1.9 1.9 0 0 0 3.3 1.6L17 13" {...o}/>,
+    ytComment: <><path d="M4 4.5h16a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H9l-4 3v-3H4a1 1 0 0 1-1-1v-11a1 1 0 0 1 1-1z" {...o}/><path d="M7.5 9h9M7.5 13h6" {...o}/></>,
+    ytShare: <path d="M13.5 5 21 12l-7.5 7v-4c-5.5 0-8.5 1.5-10.5 5 .5-5.5 3.5-9.5 10.5-10z" {...o}/>,
+    remix: <><path d="M17 4.5a8.5 8.5 0 1 0 3.2 9.5" {...o}/><path d="M20.5 3.5v5h-5" {...o}/><path d="M12 9v6M9 12h6" {...o}/></>,
+    shorts: <><path d="M16.6 2.9c1.8 1 2.5 3.3 1.5 5.1-.4.7-1 1.2-1.6 1.6l.7.4c1.8 1 2.4 3.3 1.4 5.1-.5.9-1.3 1.5-2.3 1.7L9 19.8c-1.8 1-4.1.4-5.1-1.4-1-1.8-.4-4.1 1.4-5.1l.8-.4-.7-.4C3.6 11.5 2.9 9.2 3.9 7.4c.5-.9 1.3-1.5 2.3-1.7L11.5 3c1.7-.9 3.6-.9 5.1-.1z" fill={color}/><path d="M10 9v6l5-3z" fill="#0f0f0f"/></>,
+    subs: <><rect x="3" y="7" width="18" height="13" rx="2" {...o}/><path d="M6 4h12M10 11v6l5-3z" {...o}/></>,
+    shop: <><path d="M4.5 8h15l-1 12.5h-13z" {...o}/><path d="M8.5 10V6.5a3.5 3.5 0 0 1 7 0V10" {...o}/></>,
+    inbox: <><path d="M4 5h16a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1h-9l-4.5 3.5V17H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z" {...o}/><path d="M8 11h8" {...o}/></>,
+    user: <><circle cx="12" cy="8" r="4" {...o}/><path d="M4 21c.5-4.2 3.6-6.5 8-6.5s7.5 2.3 8 6.5" {...o}/></>,
+    video: <><rect x="3" y="5" width="18" height="14" rx="3" {...o}/><path d="M10 9.5v5l4.5-2.5z" fill={color} stroke="none"/></>,
+    friends: <><circle cx="9" cy="8" r="3.3" {...o}/><path d="M2.5 20c.4-3.7 3-5.8 6.5-5.8s6.1 2.1 6.5 5.8" {...o}/><path d="M16 4.8a3.3 3.3 0 0 1 0 6.4M21.5 20c-.3-2.8-1.9-4.8-4.5-5.5" {...o}/></>,
+    market: <><path d="M4 9.5 5.5 4h13L20 9.5M4 9.5h16M4 9.5a2.7 2.7 0 0 0 5.3 0 2.7 2.7 0 0 0 5.4 0 2.7 2.7 0 0 0 5.3 0" {...o}/><path d="M5.5 12v8h13v-8" {...o}/></>,
+    bell: <><path d="M6 9a6 6 0 1 1 12 0c0 4.5 1.5 6 2 7H4c.5-1 2-2.5 2-7z" {...o}/><path d="M10 20a2 2 0 0 0 4 0" {...o}/></>,
+    fbComment: <path d="M12 3.5c5 0 9 3.6 9 8s-4 8-9 8c-1.1 0-2.2-.2-3.2-.5L4 20.5l1.3-3.8C3.8 15.3 3 13.5 3 11.5c0-4.4 4-8 9-8z" {...o}/>,
+    globe: <><circle cx="12" cy="12" r="9" {...o}/><path d="M3 12h18M12 3c2.5 2.6 3.7 5.6 3.7 9s-1.2 6.4-3.7 9c-2.5-2.6-3.7-5.6-3.7-9S9.5 5.6 12 3z" {...o}/></>,
+    messenger: <path d="M12 3C7 3 3 6.8 3 11.6c0 2.5 1.1 4.8 3 6.3V21l2.9-1.6c1 .3 2 .4 3.1.4 5 0 9-3.8 9-8.6S17 3 12 3zm1 11.5-2.3-2.4-4.5 2.4 5-5.3 2.3 2.4 4.4-2.4z" {...o}/>,
+    star: <path d="m12 3 2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1-4.4-4.3 6.1-.9z" fill={color}/>,
+  };
+  return <svg viewBox="0 0 24 24" style={{width:size, height:size, display:"block", flexShrink:0, overflow:"visible"}}>{paths[name]||null}</svg>;
+}
+
+function BrandAvatar({brand, size, radius="50%", ring}){
+  const [c1,c2] = grad(brand.id);
   return (
-    <div style={{position:"relative", width:"100%", height:"100%", minHeight:280, borderRadius:16, overflow:"hidden", background:"#0b0b12"}}>
-      <div style={{position:"absolute", inset:0}}><Thumb item={item} radius={0} iconSize={38}/></div>
-      <div style={{position:"absolute", inset:0, background:"linear-gradient(180deg, rgba(0,0,0,.4) 0%, transparent 20%, transparent 52%, rgba(0,0,0,.8) 100%)"}}/>
-      <PreviewRibbon/>
-      {topRight && <span style={{position:"absolute", top:9, right:10, zIndex:2, color:"#fff", fontWeight:800, fontSize:12.5, textShadow:"0 1px 3px rgba(0,0,0,.5)"}}>{topRight}</span>}
-      <div style={{position:"absolute", right:9, bottom:70, display:"flex", flexDirection:"column", alignItems:"center", gap:14, zIndex:2}}>
-        {railItems.map((r,i)=>(
-          <div key={i} style={{display:"flex", flexDirection:"column", alignItems:"center", gap:3, color:"#fff"}}>
-            <div style={{width:34,height:34,borderRadius:99, background:"rgba(255,255,255,.16)", display:"flex", alignItems:"center", justifyContent:"center"}}><Icon name={r.icon} size={17} style={{color:"#fff"}}/></div>
-            {r.count!=null && <span style={{fontSize:10, fontWeight:700, textShadow:"0 1px 3px rgba(0,0,0,.6)"}}>{fmtNum(r.count)}</span>}
-          </div>
-        ))}
-      </div>
-      <div style={{position:"absolute", left:12, right:60, bottom:11, color:"#fff", zIndex:2}}>{footer}</div>
-    </div>
+    <span style={{width:size, height:size, borderRadius:radius, flexShrink:0, overflow:"hidden", display:"inline-flex", alignItems:"center", justifyContent:"center", background: brand.logo? "#fff" : `linear-gradient(135deg, ${c1}, ${c2})`, boxShadow: ring||"none", color:"#fff", fontWeight:800, fontSize:`calc(${size} * .36)`}}>
+      {brand.logo ? <img src={LOGO_SANJUGO} alt="" draggable={false} style={{width:"100%", height:"100%", objectFit:"cover"}}/> : initials(brand.name)}
+    </span>
   );
 }
 
-function InstagramPost({item, variant, brand}){
-  const account = brand.accounts.instagram;
-  const likes = seedNum(item.id+"iglk", 420, 9200);
-  const comments = seedNum(item.id+"igcm", 6, 260);
-  const caption = variant.caption || "";
-  if(item.media.aspectRatio==="9:16"){
-    return <ReelFrame item={item} topRight="Reels" railItems={[{icon:"heart",count:likes},{icon:"comment",count:comments},{icon:"paperplane",count:null},{icon:"save",count:null}]}
-      footer={<div><div style={{fontWeight:800, fontSize:13.5, marginBottom:4}}>{account}</div><div style={{fontSize:12, lineHeight:1.4}}>{caption}{variant.hashtags && variant.hashtags.length>0 ? " "+variant.hashtags.join(" "):""}</div></div>}/>;
-  }
+/* Shared by everything inside one phone screen: playback state, real progress, and whether we draw
+   the fake iPhone chrome (status bar etc. — hidden in full-screen mode, where the real phone has its own). */
+const PhoneCtx = React.createContext({chrome:true, playing:false, muted:true, paused:false, progress:null, setProgress:()=>{}, togglePause:()=>{}, onAutoMuted:()=>{}, canTap:()=>true});
+
+function ScreenBox({children, bg="#000", chrome=true, playing, muted, onAutoMuted, canTap, style}){
+  const [paused, setPaused] = useState(false);
+  const [progress, setProgress] = useState(null);
+  const ctx = {chrome, playing: !!playing, muted: !!muted, paused, progress, setProgress,
+    togglePause: ()=>setPaused(p=>!p), onAutoMuted: onAutoMuted||(()=>{}), canTap: canTap||(()=>true)};
   return (
-    <div style={{position:"relative", background:"#fff", color:"#262626", borderRadius:14, overflow:"hidden", border:"1px solid #dbdbdb", maxWidth:340, margin:"0 auto"}}>
-      <div style={{display:"flex", alignItems:"center", gap:9, padding:"10px 12px"}}>
-        <BrandGlyph brand={brand} size={30}/>
-        <div style={{fontWeight:700, fontSize:13, flex:1}}>{account}</div>
-        <Icon name="moreH" size={16} style={{color:"#8e8e8e"}}/>
+    <PhoneCtx.Provider value={ctx}>
+      <div style={{position:"relative", overflow:"hidden", background:bg, containerType:"size", fontFamily:PHONE_FONT, WebkitFontSmoothing:"antialiased", lineHeight:1.3, userSelect:"none", ...style}}>
+        {children}
+        {chrome && <div style={{position:"absolute", top:pt(11), left:"50%", transform:"translateX(-50%)", width:pt(122), height:pt(35), borderRadius:99, background:"#000", zIndex:9, pointerEvents:"none"}}/>}
       </div>
-      <div style={{position:"relative", width:"100%", aspectRatio:aspectFor(item)}}>
-        <PreviewRibbon/>
-        <Thumb item={item} radius={0} iconSize={32}/>
-      </div>
-      <div style={{display:"flex", alignItems:"center", gap:13, padding:"9px 12px 4px"}}>
-        <Icon name="heart" size={21}/><Icon name="comment" size={20}/><Icon name="paperplane" size={19}/>
-        <span style={{flex:1}}/><Icon name="save" size={19}/>
-      </div>
-      <div style={{padding:"2px 12px", fontWeight:700, fontSize:12.5}}>{fmtNum(likes)} likes</div>
-      <div style={{padding:"3px 12px", fontSize:12.5, lineHeight:1.45}}><strong>{account}</strong> {caption}</div>
-      {comments>0 && <div style={{padding:"3px 12px", fontSize:12, color:"#8e8e8e"}}>View all {comments} comments</div>}
-      <div style={{padding:"4px 12px 12px", fontSize:10.5, color:"#8e8e8e", textTransform:"uppercase", letterSpacing:".3px"}}>{variant.scheduledAt? "Scheduled for "+fmtDateTime(variant.scheduledAt) : "Not yet scheduled"}</div>
-    </div>
+    </PhoneCtx.Provider>
   );
 }
 
-function FacebookPost({item, variant, brand}){
-  const account = brand.accounts.facebook;
-  const likes = seedNum(item.id+"fblk", 90, 3200);
-  const comments = seedNum(item.id+"fbcm", 3, 180);
-  const shares = seedNum(item.id+"fbsh", 1, 90);
+function PhoneStatusBar({dark}){
+  const {chrome} = React.useContext(PhoneCtx);
+  if(!chrome) return null;
+  const c = dark? "#0c0c0c" : "#fff";
   return (
-    <div style={{position:"relative", background:"#fff", color:"#050505", borderRadius:14, overflow:"hidden", border:"1px solid #dadde1", maxWidth:360, margin:"0 auto"}}>
-      <div style={{display:"flex", alignItems:"center", gap:9, padding:"11px 12px 6px"}}>
-        <BrandGlyph brand={brand} size={34} radius={9}/>
-        <div style={{flex:1}}>
-          <div style={{fontWeight:700, fontSize:13.5}}>{account}</div>
-          <div style={{fontSize:11, color:"#65676b"}}>Just now · Public</div>
-        </div>
-        <Icon name="moreH" size={16} style={{color:"#65676b"}}/>
-      </div>
-      {variant.caption && <div style={{padding:"4px 12px 10px", fontSize:13, lineHeight:1.5}}>{variant.caption}</div>}
-      <div style={{position:"relative", width:"100%", aspectRatio: item.media.aspectRatio==="9:16"?"9/16":"1/1"}}>
-        <PreviewRibbon/>
-        <Thumb item={item} radius={0} iconSize={32}/>
-      </div>
-      <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", padding:"8px 12px", fontSize:11.5, color:"#65676b", borderBottom:"1px solid #eee"}}>
-        <span style={{display:"flex", alignItems:"center", gap:5}}><span style={{width:16,height:16,borderRadius:99,background:"#1877F2",display:"inline-flex",alignItems:"center",justifyContent:"center"}}><Icon name="thumbsUp" size={9} style={{color:"#fff"}}/></span>{fmtNum(likes)}</span>
-        <span>{comments} comments · {shares} shares</span>
-      </div>
-      <div style={{display:"flex", fontSize:12.5, fontWeight:700, color:"#65676b"}}>
-        {["Like","Comment","Share"].map(l=><div key={l} style={{flex:1, textAlign:"center", padding:"9px 0"}}>{l}</div>)}
-      </div>
+    <div style={{position:"absolute", top:0, left:0, right:0, height:pt(50), display:"flex", alignItems:"center", justifyContent:"space-between", padding:`${pt(6)} ${pt(28)} 0 ${pt(40)}`, color:c, zIndex:8, fontWeight:600, fontSize:pt(16), pointerEvents:"none"}}>
+      <span>9:41</span>
+      <span style={{display:"flex", alignItems:"center", gap:pt(6)}}>
+        <svg viewBox="0 0 18 12" style={{width:pt(18), height:pt(12)}}><rect x="0" y="8" width="3" height="4" rx="1" fill={c}/><rect x="5" y="5.5" width="3" height="6.5" rx="1" fill={c}/><rect x="10" y="3" width="3" height="9" rx="1" fill={c}/><rect x="15" y="0" width="3" height="12" rx="1" fill={c}/></svg>
+        <svg viewBox="0 0 16 12" style={{width:pt(16), height:pt(12)}}><path d="M8 11.5 5.6 9a3.4 3.4 0 0 1 4.8 0zM3.4 6.8a6.5 6.5 0 0 1 9.2 0l-1.4 1.4a4.5 4.5 0 0 0-6.4 0zM1 4.4a9.9 9.9 0 0 1 14 0l-1.4 1.4a7.9 7.9 0 0 0-11.2 0z" fill={c}/></svg>
+        <svg viewBox="0 0 27 13" style={{width:pt(26), height:pt(13)}}><rect x=".5" y=".5" width="23" height="12" rx="3.5" fill="none" stroke={c} opacity=".4"/><rect x="2" y="2" width="17" height="9" rx="2" fill={c}/><rect x="25" y="4.5" width="1.5" height="4" rx=".7" fill={c} opacity=".4"/></svg>
+      </span>
     </div>
   );
 }
-
-function TikTokPost({item, variant, brand}){
-  const account = brand.accounts.tiktok;
-  const likes = seedNum(item.id+"ttlk", 1200, 48000);
-  const comments = seedNum(item.id+"ttcm", 20, 900);
-  const saves = seedNum(item.id+"ttsv", 15, 700);
-  const shares = seedNum(item.id+"ttsh", 8, 500);
-  return <ReelFrame item={item} railItems={[
-      {icon:"heart",count:likes},{icon:"comment",count:comments},{icon:"save",count:saves},{icon:"share",count:shares},{icon:"musicNote",count:null},
-    ]}
-    footer={<div>
-      <div style={{fontWeight:800, fontSize:13.5, marginBottom:4}}>{account}</div>
-      <div style={{fontSize:12, lineHeight:1.4, marginBottom:5}}>{variant.caption}{variant.hashtags && variant.hashtags.length>0 ? " "+variant.hashtags.join(" "):""}</div>
-      <div style={{display:"flex", alignItems:"center", gap:5, fontSize:11, opacity:.9}}><Icon name="musicNote" size={11}/>original sound · {account}</div>
-    </div>}/>;
+function HomeIndicator({dark}){
+  if(!React.useContext(PhoneCtx).chrome) return null;
+  return <div style={{position:"absolute", left:"50%", bottom:pt(8), transform:"translateX(-50%)", width:pt(134), height:pt(5), borderRadius:99, background: dark? "#0c0c0c" : "#fff", zIndex:8, pointerEvents:"none"}}/>;
 }
 
-function YouTubeShortsPost({item, variant, brand}){
-  const account = brand.accounts.youtube;
-  const likes = seedNum(item.id+"ytlk", 300, 22000);
-  const comments = seedNum(item.id+"ytcm", 5, 650);
-  return <ReelFrame item={item} topRight="Shorts" railItems={[{icon:"thumbsUp",count:likes},{icon:"comment",count:comments},{icon:"share",count:null},{icon:"moreH",count:null}]}
-    footer={<div>
-      <div style={{display:"flex", alignItems:"center", gap:8, marginBottom:6}}>
-        <BrandGlyph brand={brand} size={24}/>
-        <div style={{fontWeight:700, fontSize:12.5, flex:1}}>{account}</div>
-        <span style={{border:"1px solid rgba(255,255,255,.55)", borderRadius:99, padding:"3px 10px", fontSize:10.5, fontWeight:700}}>Subscribe</span>
-      </div>
-      <div style={{fontSize:12.5, fontWeight:700, lineHeight:1.35}}>{variant.title}</div>
-      {variant.description && <div style={{fontSize:11, opacity:.85, marginTop:3, lineHeight:1.35}}>{variant.description}</div>}
-    </div>}/>;
-}
-
-function GBPPost({item, variant, brand}){
-  const cta = variant.cta || "Learn More";
+function PhoneFrame({children, screenBg="#000", ...playback}){
   return (
-    <div style={{position:"relative", background:"#fff", color:"#202124", borderRadius:14, overflow:"hidden", border:"1px solid #dadce0", maxWidth:340, margin:"0 auto", fontFamily:"Roboto, Arial, sans-serif"}}>
-      <div style={{display:"flex", alignItems:"center", gap:9, padding:"11px 12px"}}>
-        <span style={{width:30,height:30,borderRadius:8,background:"var(--gbp)",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><Icon name="pin" size={15} style={{color:"#fff"}}/></span>
-        <div>
-          <div style={{fontWeight:700, fontSize:13}}>{brand.name}</div>
-          <div style={{fontSize:10.5, color:"#5f6368"}}>Google Business Profile · Update</div>
-        </div>
-      </div>
-      <div style={{position:"relative", width:"100%", aspectRatio:"4/3"}}>
-        <PreviewRibbon/>
-        <Thumb item={item} radius={0} iconSize={30}/>
-      </div>
-      <div style={{padding:"10px 12px 4px", fontSize:12.5, lineHeight:1.5}}>{variant.caption}</div>
-      <div style={{padding:12}}>
-        <div style={{background:"var(--gbp)", color:"#fff", textAlign:"center", fontWeight:700, fontSize:12.5, borderRadius:8, padding:"9px 0"}}>{cta}</div>
+    <div style={{containerType:"size", width:"100%", height:"100%", display:"flex", alignItems:"center", justifyContent:"center"}}>
+      <div style={{width:PHONE_W, aspectRatio:"9 / 19.5", position:"relative", flexShrink:0, borderRadius:`calc(${PHONE_W} * .15)`, background:"#0d0d10", padding:`calc(${PHONE_W} * .024)`, boxShadow:"inset 0 0 0 1.5px #3a3a40, 0 18px 40px -14px rgba(0,0,0,.5)"}}>
+        <ScreenBox bg={screenBg} {...playback} style={{width:"100%", height:"100%", borderRadius:`calc(${PHONE_W} * .128)`}}>{children}</ScreenBox>
       </div>
     </div>
   );
 }
 
-function PlatformPostPreview({platform, item, variant, brand}){
-  if(!variant) return <div style={{display:"flex", alignItems:"center", justifyContent:"center", height:"100%", color:"var(--ink-mute)", fontSize:12.5}}>No variant for this platform.</div>;
-  const Comp = {instagram:InstagramPost, facebook:FacebookPost, tiktok:TikTokPost, youtube:YouTubeShortsPost, gbp:GBPPost}[platform];
-  return <Comp item={item} variant={variant} brand={brand}/>;
-}
-
-function SwipeCard({entry, onDecision, onOpenDetails, isTop}){
+/* The actual uploaded file when we have it (so approvers watch the real video), otherwise the poster / placeholder.
+   Tapping a real video pauses/plays it, like the apps do. */
+function ScreenMedia({item, fit="cover"}){
+  const m = item.media || {};
+  const ctx = React.useContext(PhoneCtx);
   const ref = useRef(null);
+  const [failed, setFailed] = useState(false);
+  const isVideo = !!(m.fileUrl && m.type==="video") && !failed;
+  const shouldPlay = ctx.playing && !ctx.paused;
+  useEffect(()=>{
+    const v = ref.current; if(!v) return;
+    v.muted = ctx.muted;
+    if(!shouldPlay){ v.pause(); return; }
+    const p = v.play();
+    if(p && p.catch) p.catch(()=>{
+      // Browsers can refuse to autoplay with sound — fall back to muted playback rather than a frozen frame.
+      if(!v.muted){ v.muted = true; ctx.onAutoMuted(); const p2 = v.play(); if(p2 && p2.catch) p2.catch(()=>{}); }
+    });
+  }, [shouldPlay, ctx.muted, m.fileUrl, isVideo]);
+  const fill = {width:"100%", height:"100%", objectFit:fit, background:"#000", display:"block"};
+  if(isVideo){
+    return (
+      <div style={{position:"absolute", inset:0, cursor:"pointer"}}
+        onClick={e=>{ e.stopPropagation(); if(ctx.canTap()) ctx.togglePause(); }}>
+        <video ref={ref} src={m.fileUrl} poster={m.previewUrl||undefined} muted loop playsInline preload={ctx.playing? "auto" : "metadata"} style={{...fill, pointerEvents:"none"}}
+          onTimeUpdate={e=>{ const v=e.currentTarget; if(v.duration) ctx.setProgress(v.currentTime/v.duration); }}
+          onError={()=>setFailed(true)}/>
+        {ctx.paused && <div style={{position:"absolute", inset:0, display:"flex", alignItems:"center", justifyContent:"center", pointerEvents:"none"}}>
+          <svg viewBox="0 0 24 24" style={{width:pt(64), height:pt(64), opacity:.8, filter:"drop-shadow(0 2px 6px rgba(0,0,0,.4))"}}><path d="M7 4.5v15l12.5-7.5z" fill="#fff"/></svg>
+        </div>}
+      </div>
+    );
+  }
+  const src = (m.type!=="video" && m.fileUrl) || m.previewUrl;
+  return (
+    <div style={{position:"absolute", inset:0, pointerEvents:"none"}}>
+      {src ? <img src={src} alt="" draggable={false} style={fill}/> : <Thumb item={item} radius={0} iconSize={38} bare/>}
+      {failed && <div style={{position:"absolute", left:pt(24), right:pt(24), top:"38%", background:"rgba(0,0,0,.72)", color:"#fff", borderRadius:pt(12), padding:pt(14), fontSize:pt(13.5), lineHeight:1.4, textAlign:"center"}}>
+        This browser can't play this video format (usually an iPhone HEVC .MOV). It plays on iPhone/Safari and Chrome on Mac — or export it as MP4 (H.264) to play everywhere.
+      </div>}
+    </div>
+  );
+}
+
+/* Tap to expand, like "…more" in the real apps. Stops the tap from opening the details drawer / starting a swipe. */
+function PhoneCaption({children, lines=1, style}){
+  const [open, setOpen] = useState(false);
+  const clamp = open ? {maxHeight:pt(260), overflowY:"auto"} : {display:"-webkit-box", WebkitLineClamp:lines, WebkitBoxOrient:"vertical", overflow:"hidden"};
+  return <div onPointerDown={e=>e.stopPropagation()} onClick={e=>{ e.stopPropagation(); setOpen(o=>!o); }} style={{cursor:"pointer", wordBreak:"break-word", ...clamp, ...style}}>{children}</div>;
+}
+
+function RailItem({icon, label, fill, size=30, gap=4, fontSize=13}){
+  return (
+    <div style={{display:"flex", flexDirection:"column", alignItems:"center", gap:pt(gap), filter:"drop-shadow(0 1px 2px rgba(0,0,0,.35))"}}>
+      <AppGlyph name={icon} size={pt(size)} fill={fill}/>
+      {label!=null && <span style={{fontSize:pt(fontSize), fontWeight:600}}>{label}</span>}
+    </div>
+  );
+}
+const shade = (top, bottom) => <div style={{position:"absolute", inset:0, pointerEvents:"none", background:`linear-gradient(180deg, rgba(0,0,0,${top}) 0%, transparent 16%, transparent 58%, rgba(0,0,0,${bottom}) 100%)`}}/>;
+function Progress({bottom, color="#fff", left=0, right=0}){
+  const {progress} = React.useContext(PhoneCtx);
+  return <div style={{position:"absolute", left, right, bottom, height:pt(2), background:"rgba(255,255,255,.28)", pointerEvents:"none"}}><div style={{width:(progress!=null? progress*100 : 16)+"%", height:"100%", background:color, transition:"width .25s linear"}}/></div>;
+}
+
+function IGReelScreen({item, variant, brand, playing, muted}){
+  const account = handleOf(brand.accounts.instagram) || handleOf(brand.name);
+  return (
+    <>
+      <ScreenMedia item={item}/>
+      {shade(.3, .7)}
+      <PhoneStatusBar/>
+      <div style={{position:"absolute", top:pt(58), left:pt(18), color:"#fff", fontSize:pt(22), fontWeight:700, textShadow:"0 1px 3px rgba(0,0,0,.4)"}}>Reels</div>
+      <div style={{position:"absolute", right:pt(12), bottom:pt(128), display:"flex", flexDirection:"column", alignItems:"center", gap:pt(18), color:"#fff"}}>
+        <RailItem icon="heart" label={fmtNum(seedNum(item.id+"iglk", 420, 12000))}/>
+        <RailItem icon="comment" label={fmtNum(seedNum(item.id+"igcm", 6, 260))}/>
+        <RailItem icon="repost" label={fmtNum(seedNum(item.id+"igrp", 8, 400))}/>
+        <RailItem icon="send" label={fmtNum(seedNum(item.id+"igsd", 20, 900))}/>
+        <RailItem icon="menu" size={26}/>
+        <BrandAvatar brand={brand} size={pt(32)} radius={pt(8)} ring={`0 0 0 ${pt(2)} #fff`}/>
+      </div>
+      <div style={{position:"absolute", left:pt(16), right:pt(76), bottom:pt(124), color:"#fff", textShadow:"0 1px 2px rgba(0,0,0,.35)"}}>
+        <div style={{display:"flex", alignItems:"center", gap:pt(10), marginBottom:pt(10)}}>
+          <BrandAvatar brand={brand} size={pt(34)}/>
+          <span style={{fontWeight:700, fontSize:pt(15), whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>{account}</span>
+          <span style={{border:"1px solid rgba(255,255,255,.75)", borderRadius:pt(8), padding:`${pt(4)} ${pt(11)}`, fontSize:pt(14), fontWeight:600, flexShrink:0}}>Follow</span>
+        </div>
+        <PhoneCaption lines={1} style={{fontSize:pt(14.5)}}>{fullCaption(variant) || <span style={{opacity:.6}}>No caption</span>}</PhoneCaption>
+      </div>
+      <Progress bottom={pt(108)} left={pt(16)} right={pt(16)}/>
+      <div style={{position:"absolute", left:pt(30), right:pt(30), bottom:pt(26), height:pt(62), borderRadius:pt(31), background:"rgba(30,30,32,.9)", border:"1px solid rgba(255,255,255,.1)", display:"flex", alignItems:"center", justifyContent:"space-around", padding:`0 ${pt(6)}`}}>
+        <AppGlyph name="home" size={pt(26)}/>
+        <span style={{background:"rgba(255,255,255,.15)", borderRadius:pt(24), padding:`${pt(10)} ${pt(20)}`}}><AppGlyph name="reels" size={pt(24)}/></span>
+        <AppGlyph name="send" size={pt(25)}/>
+        <AppGlyph name="search" size={pt(25)}/>
+        <BrandAvatar brand={brand} size={pt(27)}/>
+      </div>
+      <HomeIndicator/>
+    </>
+  );
+}
+
+function IGFeedScreen({item, variant, brand, playing, muted}){
+  const account = handleOf(brand.accounts.instagram) || handleOf(brand.name);
+  const likes = seedNum(item.id+"iglk", 420, 9200), comments = seedNum(item.id+"igcm", 6, 260);
+  const ink = "#0c0c0c";
+  return (
+    <div style={{position:"absolute", inset:0, background:"#fff", color:ink}}>
+      <PhoneStatusBar dark/>
+      <div style={{position:"absolute", top:pt(50), left:0, right:0, bottom:pt(84), overflow:"hidden"}}>
+        <div style={{display:"flex", alignItems:"center", justifyContent:"space-between", padding:`${pt(6)} ${pt(16)}`}}>
+          <span style={{fontFamily:'"Snell Roundhand","Brush Script MT","Segoe Script",cursive', fontSize:pt(29), fontWeight:700}}>Instagram</span>
+          <span style={{display:"flex", gap:pt(20)}}><AppGlyph name="heart" size={pt(25)} color={ink}/><AppGlyph name="messenger" size={pt(25)} color={ink}/></span>
+        </div>
+        <div style={{display:"flex", alignItems:"center", gap:pt(10), padding:`${pt(8)} ${pt(12)}`}}>
+          <BrandAvatar brand={brand} size={pt(32)} ring={`0 0 0 ${pt(2)} #fff, 0 0 0 ${pt(3.5)} #d62976`}/>
+          <span style={{flex:1, fontWeight:600, fontSize:pt(14)}}>{account}</span>
+          <AppGlyph name="dotsH" size={pt(20)} color={ink}/>
+        </div>
+        <div style={{position:"relative", width:"100%", aspectRatio:aspectFor(item), background:"#000"}}><ScreenMedia item={item}/></div>
+        <div style={{display:"flex", alignItems:"center", gap:pt(16), padding:`${pt(10)} ${pt(14)} ${pt(6)}`}}>
+          <AppGlyph name="heart" size={pt(25)} color={ink}/><AppGlyph name="comment" size={pt(24)} color={ink}/><AppGlyph name="repost" size={pt(24)} color={ink}/><AppGlyph name="send" size={pt(24)} color={ink}/>
+          <span style={{flex:1}}/><AppGlyph name="bookmark" size={pt(24)} color={ink}/>
+        </div>
+        <div style={{padding:`0 ${pt(14)}`, fontSize:pt(14), fontWeight:600}}>{fmtNum(likes)} likes</div>
+        <PhoneCaption lines={2} style={{padding:`${pt(4)} ${pt(14)}`, fontSize:pt(14)}}><strong>{account}</strong> {withTags(fullCaption(variant), {color:"#00376b"})}</PhoneCaption>
+        <div style={{padding:`${pt(2)} ${pt(14)}`, fontSize:pt(14), color:"#737373"}}>View all {comments} comments</div>
+        <div style={{padding:`${pt(4)} ${pt(14)}`, fontSize:pt(12), color:"#737373"}}>Just now</div>
+      </div>
+      <div style={{position:"absolute", left:0, right:0, bottom:0, height:pt(84), borderTop:"1px solid #efefef", background:"#fff", display:"flex", justifyContent:"space-around", paddingTop:pt(12)}}>
+        <AppGlyph name="home" size={pt(26)} color={ink} fill/><AppGlyph name="search" size={pt(26)} color={ink}/><AppGlyph name="plusBox" size={pt(26)} color={ink}/><AppGlyph name="reels" size={pt(26)} color={ink}/><BrandAvatar brand={brand} size={pt(27)}/>
+      </div>
+      <HomeIndicator dark/>
+    </div>
+  );
+}
+
+function TikTokScreen({item, variant, brand, playing, muted}){
+  const account = handleOf(brand.accounts.tiktok) || handleOf(brand.name);
+  const NAV = 84;
+  const navItem = (icon, label, fill) => (
+    <div style={{display:"flex", flexDirection:"column", alignItems:"center", gap:pt(3), width:pt(60)}}>
+      <AppGlyph name={icon} size={pt(26)} fill={fill}/><span style={{fontSize:pt(10.5), fontWeight: fill?700:500}}>{label}</span>
+    </div>
+  );
+  return (
+    <>
+      <div style={{position:"absolute", left:0, right:0, top:0, bottom:pt(NAV), background:"#000", overflow:"hidden"}}>
+        <ScreenMedia item={item} fit={item.media.aspectRatio==="9:16"?"cover":"contain"}/>
+        {shade(.35, .55)}
+        <Progress bottom={0}/>
+      </div>
+      <PhoneStatusBar/>
+      <div style={{position:"absolute", top:pt(56), left:pt(14), right:pt(14), display:"flex", alignItems:"center", justifyContent:"space-between", color:"#fff", textShadow:"0 1px 2px rgba(0,0,0,.35)"}}>
+        <span style={{fontSize:pt(11), fontWeight:800, border:`${pt(1.8)} solid #fff`, borderRadius:pt(5), padding:`${pt(1)} ${pt(4)}`}}>LIVE</span>
+        <span style={{display:"flex", gap:pt(16), fontSize:pt(16), fontWeight:600}}>
+          <span style={{opacity:.65}}>Following</span><span style={{opacity:.65}}>Friends</span>
+          <span style={{position:"relative"}}>For You<span style={{position:"absolute", left:"25%", right:"25%", bottom:`calc(-1 * ${pt(7)})`, height:pt(2.5), borderRadius:9, background:"#fff"}}/></span>
+        </span>
+        <AppGlyph name="search" size={pt(25)}/>
+      </div>
+      <div style={{position:"absolute", right:pt(8), bottom:pt(NAV+20), display:"flex", flexDirection:"column", alignItems:"center", gap:pt(15), color:"#fff"}}>
+        <div style={{position:"relative", marginBottom:pt(10)}}>
+          <BrandAvatar brand={brand} size={pt(48)} ring={`0 0 0 ${pt(1.5)} #fff`}/>
+          <span style={{position:"absolute", left:"50%", bottom:`calc(-1 * ${pt(9)})`, transform:"translateX(-50%)", width:pt(20), height:pt(20), borderRadius:99, background:"#FE2C55", display:"flex", alignItems:"center", justifyContent:"center"}}><AppGlyph name="plus" size={pt(12)} sw={3.2}/></span>
+        </div>
+        <RailItem icon="heart" fill size={34} fontSize={12.5} label={fmtNum(seedNum(item.id+"ttlk", 1200, 48000))}/>
+        <RailItem icon="ttComment" size={34} fontSize={12.5} label={fmtNum(seedNum(item.id+"ttcm", 20, 900))}/>
+        <RailItem icon="bookmark" fill size={32} fontSize={12.5} label={fmtNum(seedNum(item.id+"ttsv", 15, 700))}/>
+        <RailItem icon="shareArrow" fill size={32} fontSize={12.5} label={fmtNum(seedNum(item.id+"ttsh", 8, 500))}/>
+        <span style={{width:pt(44), height:pt(44), borderRadius:99, background:"radial-gradient(circle, #333 0 45%, #111 46% 100%)", display:"flex", alignItems:"center", justifyContent:"center", animation:"cf-spin 5s linear infinite"}}><BrandAvatar brand={brand} size={pt(24)}/></span>
+      </div>
+      <div style={{position:"absolute", left:pt(12), right:pt(78), bottom:pt(NAV+14), color:"#fff", textShadow:"0 1px 2px rgba(0,0,0,.4)"}}>
+        <div style={{fontWeight:700, fontSize:pt(16.5), marginBottom:pt(5)}}>{account}</div>
+        <PhoneCaption lines={2} style={{fontSize:pt(14.5), marginBottom:pt(7)}}>{withTags(fullCaption(variant), {fontWeight:700})}</PhoneCaption>
+        <div style={{display:"flex", alignItems:"center", gap:pt(6), fontSize:pt(13.5), whiteSpace:"nowrap", overflow:"hidden"}}>
+          <svg viewBox="0 0 24 24" style={{width:pt(13), height:pt(13), flexShrink:0}}><path d="M9 18V5.5L19 4v11.5" fill="none" stroke="#fff" strokeWidth="2"/><circle cx="6.5" cy="18" r="2.5" fill="#fff"/><circle cx="16.5" cy="16" r="2.5" fill="#fff"/></svg>
+          <span style={{overflow:"hidden", textOverflow:"ellipsis"}}>original sound - {account}</span>
+        </div>
+      </div>
+      <div style={{position:"absolute", left:0, right:0, bottom:0, height:pt(NAV), background:"#000", borderTop:"1px solid rgba(255,255,255,.08)", display:"flex", justifyContent:"space-around", alignItems:"flex-start", paddingTop:pt(8), color:"#fff"}}>
+        {navItem("home","Home",true)}
+        {navItem("shop","Shop")}
+        <div style={{width:pt(60), display:"flex", justifyContent:"center", paddingTop:pt(4)}}>
+          <span style={{position:"relative", width:pt(46), height:pt(30)}}>
+            <span style={{position:"absolute", inset:0, left:`calc(-1 * ${pt(4)})`, right:pt(4), borderRadius:pt(9), background:"#25F4EE"}}/>
+            <span style={{position:"absolute", inset:0, left:pt(4), right:`calc(-1 * ${pt(4)})`, borderRadius:pt(9), background:"#FE2C55"}}/>
+            <span style={{position:"absolute", inset:0, borderRadius:pt(9), background:"#fff", display:"flex", alignItems:"center", justifyContent:"center"}}><AppGlyph name="plus" size={pt(18)} color="#000" sw={3}/></span>
+          </span>
+        </div>
+        {navItem("inbox","Inbox")}
+        {navItem("user","Profile")}
+      </div>
+      <HomeIndicator/>
+    </>
+  );
+}
+
+function ShortsScreen({item, variant, brand, playing, muted}){
+  const handle = "@"+(handleOf(brand.accounts.youtube) || handleOf(brand.name));
+  const NAV = 84;
+  const title = variant.title || variant.caption || "";
+  const navItem = (icon, label, fill) => (
+    <div style={{display:"flex", flexDirection:"column", alignItems:"center", gap:pt(4), width:pt(70)}}>
+      {icon}<span style={{fontSize:pt(10.5), fontWeight: fill?600:400}}>{label}</span>
+    </div>
+  );
+  return (
+    <>
+      <div style={{position:"absolute", left:0, right:0, top:0, bottom:pt(NAV), background:"#000", overflow:"hidden"}}>
+        <ScreenMedia item={item} fit={item.media.aspectRatio==="9:16"?"cover":"contain"}/>
+        {shade(.3, .6)}
+        <Progress bottom={0} color="#FF0033"/>
+      </div>
+      <PhoneStatusBar/>
+      <div style={{position:"absolute", top:pt(58), right:pt(16), display:"flex", gap:pt(22), color:"#fff", filter:"drop-shadow(0 1px 2px rgba(0,0,0,.35))"}}>
+        <AppGlyph name="search" size={pt(26)}/><AppGlyph name="dots" size={pt(24)}/>
+      </div>
+      <div style={{position:"absolute", right:pt(10), bottom:pt(NAV+22), display:"flex", flexDirection:"column", alignItems:"center", gap:pt(18), color:"#fff"}}>
+        <RailItem icon="thumbUp" size={30} label={fmtNum(seedNum(item.id+"ytlk", 300, 22000))}/>
+        <RailItem icon="thumbDown" size={30} label="Dislike"/>
+        <RailItem icon="ytComment" size={30} label={fmtNum(seedNum(item.id+"ytcm", 5, 650))}/>
+        <RailItem icon="ytShare" size={30} label="Share"/>
+        <RailItem icon="remix" size={30} label="Remix"/>
+        <BrandAvatar brand={brand} size={pt(40)} radius={pt(8)} ring={`0 0 0 ${pt(2)} #fff`}/>
+      </div>
+      <div style={{position:"absolute", left:pt(14), right:pt(78), bottom:pt(NAV+22), color:"#fff", textShadow:"0 1px 2px rgba(0,0,0,.4)"}}>
+        <div style={{display:"flex", alignItems:"center", gap:pt(9), marginBottom:pt(10)}}>
+          <BrandAvatar brand={brand} size={pt(34)}/>
+          <span style={{fontWeight:600, fontSize:pt(15), whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>{handle}</span>
+          <span style={{background:"#fff", color:"#0f0f0f", borderRadius:99, padding:`${pt(7)} ${pt(14)}`, fontSize:pt(14), fontWeight:600, flexShrink:0, textShadow:"none"}}>Subscribe</span>
+        </div>
+        <PhoneCaption lines={1} style={{fontSize:pt(15)}}>{title || <span style={{opacity:.6}}>No title</span>}</PhoneCaption>
+      </div>
+      <div style={{position:"absolute", left:0, right:0, bottom:0, height:pt(NAV), background:"#0f0f0f", borderTop:"1px solid rgba(255,255,255,.1)", display:"flex", justifyContent:"space-around", alignItems:"flex-start", paddingTop:pt(8), color:"#fff"}}>
+        {navItem(<AppGlyph name="home" size={pt(26)}/>, "Home")}
+        {navItem(<AppGlyph name="shorts" size={pt(26)}/>, "Shorts", true)}
+        <div style={{width:pt(70), display:"flex", justifyContent:"center"}}><span style={{width:pt(42), height:pt(42), borderRadius:99, background:"rgba(255,255,255,.15)", display:"flex", alignItems:"center", justifyContent:"center"}}><AppGlyph name="plus" size={pt(24)}/></span></div>
+        {navItem(<AppGlyph name="subs" size={pt(26)}/>, "Subscriptions")}
+        {navItem(<BrandAvatar brand={brand} size={pt(26)}/>, "You")}
+      </div>
+      <HomeIndicator/>
+    </>
+  );
+}
+
+function FacebookScreen({item, variant, brand, playing, muted}){
+  const account = (brand.accounts.facebook) || brand.name;
+  const ink = "#E4E6EB", mute = "#B0B3B8";
+  const likes = seedNum(item.id+"fblk", 12, 3200), comments = seedNum(item.id+"fbcm", 1, 180), shares = seedNum(item.id+"fbsh", 1, 90);
+  const round = icon => <span style={{width:pt(36), height:pt(36), borderRadius:99, background:"#3A3B3C", display:"flex", alignItems:"center", justifyContent:"center"}}><AppGlyph name={icon} size={pt(20)} color={ink}/></span>;
+  const mediaAspect = item.media.aspectRatio==="9:16" ? "4/5" : aspectFor(item);
+  return (
+    <div style={{position:"absolute", inset:0, background:"#18191A", color:ink}}>
+      <PhoneStatusBar/>
+      <div style={{position:"absolute", top:pt(50), left:0, right:0, bottom:pt(84), overflow:"hidden"}}>
+        <div style={{display:"flex", alignItems:"center", justifyContent:"space-between", padding:`${pt(6)} ${pt(14)} ${pt(10)}`}}>
+          <span style={{fontSize:pt(28), fontWeight:800, letterSpacing:"-.5px", fontFamily:"Helvetica, Arial, sans-serif"}}>facebook</span>
+          <span style={{display:"flex", gap:pt(8)}}>{round("plus")}{round("search")}{round("messenger")}</span>
+        </div>
+        <div style={{height:pt(6), background:"#000"}}/>
+        <div style={{background:"#242526"}}>
+          <div style={{display:"flex", alignItems:"center", gap:pt(10), padding:`${pt(12)} ${pt(12)} ${pt(8)}`}}>
+            <BrandAvatar brand={brand} size={pt(40)}/>
+            <div style={{flex:1, minWidth:0}}>
+              <div style={{fontWeight:600, fontSize:pt(15), whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>{account}</div>
+              <div style={{display:"flex", alignItems:"center", gap:pt(4), fontSize:pt(13), color:mute}}>Just now · <AppGlyph name="globe" size={pt(12)} color={mute}/></div>
+            </div>
+            <AppGlyph name="dotsH" size={pt(20)} color={mute}/><span style={{width:pt(14)}}/><AppGlyph name="close" size={pt(20)} color={mute}/>
+          </div>
+          {variant.caption || (variant.hashtags||[]).length ? <PhoneCaption lines={3} style={{padding:`0 ${pt(12)} ${pt(10)}`, fontSize:pt(15)}}>{withTags(fullCaption(variant), {color:"#4599FF"})}</PhoneCaption> : null}
+          <div style={{position:"relative", width:"100%", aspectRatio:mediaAspect, background:"#000"}}><ScreenMedia item={item}/></div>
+          <div style={{display:"flex", alignItems:"center", gap:pt(22), padding:`${pt(12)} ${pt(14)}`, fontSize:pt(15), color:mute}}>
+            <span style={{display:"flex", alignItems:"center", gap:pt(6)}}><AppGlyph name="thumbUp" size={pt(22)} color={mute}/>{fmtNum(likes)}</span>
+            <span style={{display:"flex", alignItems:"center", gap:pt(6)}}><AppGlyph name="fbComment" size={pt(22)} color={mute}/>{comments}</span>
+            <span style={{display:"flex", alignItems:"center", gap:pt(6)}}><AppGlyph name="ytShare" size={pt(22)} color={mute}/>{shares}</span>
+            <span style={{flex:1}}/>
+            <span style={{display:"flex"}}>
+              <span style={{width:pt(20), height:pt(20), borderRadius:99, background:"#1877F2", display:"flex", alignItems:"center", justifyContent:"center", boxShadow:"0 0 0 2px #242526"}}><AppGlyph name="thumbUp" size={pt(11)} fill/></span>
+              <span style={{width:pt(20), height:pt(20), borderRadius:99, background:"#F33E58", display:"flex", alignItems:"center", justifyContent:"center", marginLeft:`calc(-1 * ${pt(4)})`, boxShadow:"0 0 0 2px #242526"}}><AppGlyph name="heart" size={pt(11)} fill/></span>
+            </span>
+          </div>
+        </div>
+      </div>
+      <div style={{position:"absolute", left:0, right:0, bottom:0, height:pt(84), background:"#242526", borderTop:"1px solid #3A3B3C", display:"flex", justifyContent:"space-around", alignItems:"flex-start", paddingTop:pt(12)}}>
+        <AppGlyph name="home" size={pt(26)} color="#2D88FF" fill/><AppGlyph name="video" size={pt(26)} color={mute}/><AppGlyph name="friends" size={pt(26)} color={mute}/><AppGlyph name="market" size={pt(26)} color={mute}/><AppGlyph name="bell" size={pt(26)} color={mute}/><BrandAvatar brand={brand} size={pt(27)}/>
+      </div>
+      <HomeIndicator/>
+    </div>
+  );
+}
+
+function GBPScreen({item, variant, brand, playing, muted}){
+  const ink = "#202124", mute = "#5f6368";
+  const rating = (4.5 + seedNum(brand.id+"rt", 0, 5)/10).toFixed(1);
+  return (
+    <div style={{position:"absolute", inset:0, background:"#fff", color:ink, fontFamily:'Roboto, "Google Sans", Arial, sans-serif'}}>
+      <PhoneStatusBar dark/>
+      <div style={{position:"absolute", top:pt(50), left:0, right:0, bottom:pt(30), overflow:"hidden"}}>
+        <div style={{margin:`${pt(8)} ${pt(14)} ${pt(12)}`, height:pt(46), borderRadius:99, background:"#f1f3f4", display:"flex", alignItems:"center", gap:pt(10), padding:`0 ${pt(16)}`, fontSize:pt(15), color:mute}}>
+          <AppGlyph name="search" size={pt(20)} color={mute}/>{brand.name}
+        </div>
+        <div style={{padding:`0 ${pt(16)}`}}>
+          <div style={{fontSize:pt(22)}}>{brand.name}</div>
+          <div style={{display:"flex", alignItems:"center", gap:pt(4), fontSize:pt(14), color:mute, margin:`${pt(3)} 0 ${pt(10)}`}}>
+            {rating} <span style={{display:"flex"}}>{[0,1,2,3,4].map(i=><AppGlyph key={i} name="star" size={pt(13)} color="#fbbc04"/>)}</span> ({seedNum(brand.id+"rv", 80, 900)})
+          </div>
+        </div>
+        <div style={{display:"flex", gap:pt(22), padding:`0 ${pt(16)}`, borderBottom:"1px solid #dadce0", fontSize:pt(14), fontWeight:500, color:mute}}>
+          {["Overview","Updates","Reviews","Photos"].map(t=><span key={t} style={{padding:`${pt(8)} 0`, color: t==="Updates"?"#1a73e8":mute, borderBottom: t==="Updates"? `${pt(3)} solid #1a73e8`:"none"}}>{t}</span>)}
+        </div>
+        <div style={{margin:pt(14), border:"1px solid #dadce0", borderRadius:pt(12), overflow:"hidden"}}>
+          <div style={{display:"flex", alignItems:"center", gap:pt(10), padding:pt(12)}}>
+            <BrandAvatar brand={brand} size={pt(34)}/>
+            <div><div style={{fontSize:pt(14), fontWeight:500}}>{brand.name}</div><div style={{fontSize:pt(12), color:mute}}>Just now</div></div>
+          </div>
+          <div style={{position:"relative", width:"100%", aspectRatio:"4/3", background:"#000"}}><ScreenMedia item={item}/></div>
+          <PhoneCaption lines={4} style={{padding:`${pt(10)} ${pt(12)} ${pt(4)}`, fontSize:pt(14), lineHeight:1.45}}>{variant.caption || <span style={{color:mute}}>No update text</span>}</PhoneCaption>
+          <div style={{padding:pt(12)}}><span style={{display:"inline-block", border:"1px solid #dadce0", color:"#1a73e8", borderRadius:99, padding:`${pt(8)} ${pt(18)}`, fontSize:pt(14), fontWeight:500}}>{variant.cta || "Learn more"}</span></div>
+        </div>
+      </div>
+      <HomeIndicator dark/>
+    </div>
+  );
+}
+
+function platformScreen(platform, item, variant, brand){
+  const p = {item, variant, brand};
+  if(!variant) return [<div style={{position:"absolute", inset:0, display:"flex", alignItems:"center", justifyContent:"center", color:"#aaa", fontSize:pt(15), padding:pt(30), textAlign:"center"}}>No {PLATFORM_META[platform].label} version of this post.</div>, "#111"];
+  return {
+    instagram: [item.media.aspectRatio==="9:16" ? <IGReelScreen {...p}/> : <IGFeedScreen {...p}/>, "#000"],
+    tiktok: [<TikTokScreen {...p}/>, "#000"],
+    youtube: [<ShortsScreen {...p}/>, "#000"],
+    facebook: [<FacebookScreen {...p}/>, "#18191A"],
+    gbp: [<GBPScreen {...p}/>, "#fff"],
+  }[platform];
+}
+function PhonePreview({platform, item, variant, brand, ...playback}){
+  const [screen, bg] = platformScreen(platform, item, variant, brand);
+  return <PhoneFrame key={platform} screenBg={bg} {...playback}>{screen}</PhoneFrame>;
+}
+
+/* Full-screen review: the post fills the approver's screen exactly like opening the app, with the decision
+   buttons underneath. Stays open and moves on to the next post after each decision. */
+function ImmersiveViewer({entry, platform, onPlatform, onDecision, onClose, busy}){
+  const item = entry.item;
+  const brand = BRANDS.find(b=>b.id===item.brand);
+  const platforms = entry.platform ? [entry.platform] : item.platforms;
+  const [muted, setMuted] = useState(false);
+  const hasVideo = item.media.type==="video" && !!item.media.fileUrl;
+  const [screen, bg] = platformScreen(platform, item, item.variants[platform], brand);
+  useEffect(()=>{
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    document.body.classList.add("cf-immersive");
+    return ()=>{ document.body.style.overflow = prev; document.body.classList.remove("cf-immersive"); };
+  }, []);
+  useEffect(()=>{
+    if(busy) return;
+    const onKey = e=>{
+      if(e.key==="Escape") onClose();
+      else if(e.key==="ArrowRight") onDecision("approve");
+      else if(e.key==="ArrowLeft") onDecision("reject");
+      else if(e.key==="ArrowUp") onDecision("edits");
+    };
+    window.addEventListener("keydown", onKey);
+    return ()=>window.removeEventListener("keydown", onKey);
+  }, [busy, onClose, onDecision]);
+  const round = {borderRadius:99, width:58, height:58, padding:0, justifyContent:"center"};
+  return ReactDOM.createPortal(
+    <div onPointerDown={e=>e.stopPropagation()} onClick={e=>e.stopPropagation()}
+      style={{position:"fixed", inset:0, zIndex:90, background:"#000", display:"flex", flexDirection:"column", animation:"cf-fade-in .18s ease"}}>
+      <div style={{flex:1, minHeight:0, containerType:"size", display:"flex", justifyContent:"center"}}>
+        <ScreenBox key={entry.key+platform} bg={bg} chrome={false} playing={!busy} muted={muted} onAutoMuted={()=>setMuted(true)}
+          style={{width:"min(100cqw, calc(100cqh * 9 / 16))", height:"100%"}}>{screen}</ScreenBox>
+      </div>
+      <div style={{flexShrink:0, background:"#111", borderTop:"1px solid #222", padding:"10px 14px calc(12px + env(safe-area-inset-bottom, 0px))", color:"#fff"}}>
+        <div className="cf-noscrollbar" style={{display:"flex", alignItems:"center", gap:6, overflowX:"auto", marginBottom:10}}>
+          <button onClick={onClose} title="Exit full screen (Esc)" style={{display:"flex", alignItems:"center", gap:5, padding:"6px 11px", borderRadius:99, border:"1px solid #333", background:"#1c1c1e", color:"#fff", fontSize:12, fontWeight:700, cursor:"pointer", flexShrink:0}}><Icon name="x" size={13}/>Exit</button>
+          {platforms.length>1 && platforms.map(p=>(
+            <button key={p} onClick={()=>onPlatform(p)} style={{display:"flex", alignItems:"center", gap:6, padding:"5px 11px 5px 5px", borderRadius:99, border:"1px solid "+(platform===p?PLATFORM_HEX[p]:"#333"), background: platform===p? PLATFORM_HEX[p]+"33":"#1c1c1e", color:"#fff", fontSize:12, fontWeight:700, cursor:"pointer", flexShrink:0}}>
+              <PlatformIcon platform={p} size={12}/>{PLATFORM_META[p].label}
+            </button>
+          ))}
+          <span style={{flex:1}}/>
+          {hasVideo && <button onClick={()=>setMuted(m=>!m)} style={{display:"flex", alignItems:"center", gap:5, padding:"6px 11px", borderRadius:99, border:"1px solid #333", background:"#1c1c1e", color:"#fff", fontSize:12, fontWeight:700, cursor:"pointer", flexShrink:0}}>
+            <svg viewBox="0 0 24 24" width="14" height="14"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z" fill="currentColor"/>{muted ? <path d="m16 9.5 5 5M21 9.5l-5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/> : <path d="M16 9a4.5 4.5 0 0 1 0 6M18.5 6.5a8 8 0 0 1 0 11" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round"/>}</svg>
+            {muted? "Sound off":"Sound on"}
+          </button>}
+        </div>
+        <div style={{display:"flex", alignItems:"center", justifyContent:"center", gap:14}}>
+          <Button variant="danger" size="lg" icon="x" onClick={()=>onDecision("reject")} style={round}/>
+          <Button variant="amber" size="lg" icon="edit" onClick={()=>onDecision("edits")} style={{borderRadius:99}}>Request Edits</Button>
+          <Button variant="success" size="lg" icon="check" onClick={()=>onDecision("approve")} style={round}/>
+        </div>
+      </div>
+    </div>,
+    document.body
+  );
+}
+
+function variantFields(platform, v){
+  if(!v) return [];
+  if(platform==="youtube") return [["Title", v.title], ["Description", v.description]];
+  if(platform==="gbp") return [["Update text", v.caption], ["Button", v.cta || "Learn more"]];
+  return [["Caption", v.caption], ["Hashtags", (v.hashtags||[]).join(" ")]];
+}
+
+function SwipeCard({entry, onDecision, onOpenDetails, isTop, narrow, paused, onImmersive}){
+  const ref = useRef(null);
+  const dragDist = useRef(0);
   const [drag, setDrag] = useState({x:0, y:0, active:false});
   const startRef = useRef({x:0,y:0});
   const item = entry.item;
   const brand = BRANDS.find(b=>b.id===item.brand);
-  const campaign = CAMPAIGNS.find(c=>c.id===item.campaign);
+  const campaign = CAMPAIGNS.find(c=>c.id===item.campaign) || {name:"—"};
   const creator = USERS.find(u=>u.id===item.creator);
   const platformList = entry.platform? [entry.platform] : item.platforms;
   const [activePlatform, setActivePlatform] = useState(entry.platform || item.platforms[0]);
+  const [muted, setMuted] = useState(true);
   const variant = item.variants[activePlatform];
   const caption = entry.platform? variant.caption||variant.description||variant.title : Object.values(item.variants).map(v=>v.caption||v.title||v.description).find(Boolean);
   const scheduledAt = entry.platform? variant.scheduledAt : (Object.values(item.variants).find(v=>v.scheduledAt)||{}).scheduledAt;
+  const hasVideo = item.media.type==="video" && !!item.media.fileUrl;
+  const warnings = [];
+  if(!caption) warnings.push("Missing caption/title");
+  if(item.media.duration && item.media.duration>60 && platformList.includes("tiktok")) warnings.push("Video exceeds TikTok's recommended length");
+  if(!scheduledAt) warnings.push("No publish time set");
 
   function onPointerDown(e){
     if(!isTop) return;
     ref.current.setPointerCapture && ref.current.setPointerCapture(e.pointerId);
     startRef.current = {x:e.clientX, y:e.clientY};
+    dragDist.current = 0;
     setDrag(d=>({...d, active:true}));
   }
   function onPointerMove(e){
@@ -1539,6 +1962,7 @@ function SwipeCard({entry, onDecision, onOpenDetails, isTop}){
   function onPointerUp(){
     if(!drag.active) return;
     const {x,y} = drag;
+    dragDist.current = Math.abs(x)+Math.abs(y);
     const TH = 110;
     if(Math.abs(x) > TH && Math.abs(x) > Math.abs(y)){
       onDecision(x>0? "approve":"reject");
@@ -1550,66 +1974,121 @@ function SwipeCard({entry, onDecision, onOpenDetails, isTop}){
       setDrag({x:0,y:0,active:false});
     }
   }
+  const canTap = ()=> dragDist.current < 8;
+  const openDetails = ()=>{ if(canTap()) onOpenDetails(item); };
+  const stop = e=>e.stopPropagation();
   const rotate = drag.x/22;
   const rightOp = Math.max(0, Math.min(1, drag.x/110));
   const leftOp = Math.max(0, Math.min(1, -drag.x/110));
   const upOp = Math.max(0, Math.min(1, -drag.y/110));
 
+  const tabs = !entry.platform && item.platforms.length>1 && item.platforms.map(p=>(
+    <button key={p} onPointerDown={stop} onClick={e=>{ stop(e); setActivePlatform(p); e.currentTarget.scrollIntoView && e.currentTarget.scrollIntoView({inline:"center", block:"nearest", behavior:"smooth"}); }}
+      style={{display:"flex", alignItems:"center", gap:6, padding:"6px 11px 6px 6px", borderRadius:99, border:"1px solid "+(activePlatform===p?PLATFORM_HEX[p]:"var(--border)"), background: activePlatform===p? PLATFORM_HEX[p]+"18":"var(--surface)", color: activePlatform===p? PLATFORM_HEX[p]:"var(--ink-soft)", fontSize:12, fontWeight:700, cursor:"pointer", flexShrink:0}}>
+      <PlatformIcon platform={p} size={12}/>{PLATFORM_META[p].label}
+    </button>
+  ));
+  const singlePlatform = (entry.platform || item.platforms.length===1) && (
+    <span style={{display:"flex", alignItems:"center", gap:6, fontSize:12, fontWeight:700, color:PLATFORM_HEX[activePlatform]}}><PlatformIcon platform={activePlatform} size={12}/>{PLATFORM_META[activePlatform].label}</span>
+  );
+  const soundBtn = hasVideo && (
+    <button onPointerDown={stop} onClick={e=>{ stop(e); setMuted(m=>!m); }} title={muted?"Turn sound on":"Mute"}
+      style={{display:"flex", alignItems:"center", gap:5, padding:"6px 10px", borderRadius:99, border:"1px solid var(--border)", background:"var(--surface)", color:"var(--ink-soft)", fontSize:12, fontWeight:700, cursor:"pointer", flexShrink:0}}>
+      <svg viewBox="0 0 24 24" width="14" height="14"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z" fill="currentColor"/>{muted ? <path d="m16 9.5 5 5M21 9.5l-5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/> : <path d="M16 9a4.5 4.5 0 0 1 0 6M18.5 6.5a8 8 0 0 1 0 11" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round"/>}</svg>
+      {muted? "Sound off":"Sound on"}
+    </button>
+  );
+  const phone = <PhonePreview platform={activePlatform} item={item} variant={variant} brand={brand} playing={isTop && !paused} muted={muted || !isTop} onAutoMuted={()=>setMuted(true)} canTap={canTap}/>;
+  const fullBtn = (
+    <button onPointerDown={stop} onClick={e=>{ stop(e); onImmersive(activePlatform); }} title="View full screen, exactly as it will appear"
+      style={{display:"flex", alignItems:"center", gap:5, padding:"6px 11px", borderRadius:99, border:"1px solid var(--accent)", background:"var(--accent)", color:"#fff", fontSize:12, fontWeight:700, cursor:"pointer", flexShrink:0}}>
+      <svg viewBox="0 0 24 24" width="13" height="13"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" stroke="currentColor" strokeWidth="2.2" fill="none" strokeLinecap="round" strokeLinejoin="round"/></svg>
+      Full screen
+    </button>
+  );
+  const warningList = warnings.length>0 && (
+    <div style={{display:"flex", flexDirection:"column", gap:4}}>
+      {warnings.map((w,i)=><div key={i} style={{display:"flex", gap:6, alignItems:"center", fontSize:11.5, color:"var(--amber)", fontWeight:600}}><Icon name="warn" size={12}/>{w}</div>)}
+    </div>
+  );
+  const stamps = (
+    <>
+      <div style={{position:"absolute", inset:0, background:"rgba(91,95,239,.94)", opacity:rightOp, display:"flex", alignItems:"center", justifyContent:"center", pointerEvents:"none", zIndex:20}}><span style={{color:"#fff", fontWeight:800, fontSize:26, border:"3px solid #fff", borderRadius:12, padding:"6px 22px", transform:"rotate(-8deg)"}}>APPROVE</span></div>
+      <div style={{position:"absolute", inset:0, background:"rgba(220,38,38,.9)", opacity:leftOp, display:"flex", alignItems:"center", justifyContent:"center", pointerEvents:"none", zIndex:20}}><span style={{color:"#fff", fontWeight:800, fontSize:26, border:"3px solid #fff", borderRadius:12, padding:"6px 22px", transform:"rotate(8deg)"}}>REJECT</span></div>
+      <div style={{position:"absolute", inset:0, background:"rgba(217,119,6,.92)", opacity:upOp, display:"flex", alignItems:"center", justifyContent:"center", pointerEvents:"none", zIndex:20}}><span style={{color:"#fff", fontWeight:800, fontSize:24, border:"3px solid #fff", borderRadius:12, padding:"6px 22px"}}>EDITS</span></div>
+    </>
+  );
+  const rootStyle = {
+    position:"absolute", inset:0, borderRadius:20, background:"var(--surface)", border:"1px solid var(--border)", boxShadow:"var(--shadow-lg)",
+    transform: `translate(${drag.x}px, ${drag.y}px) rotate(${rotate}deg)`,
+    transition: drag.active? "none":"transform .35s cubic-bezier(.2,.8,.2,1)",
+    touchAction:"none", cursor: isTop?"grab":"default", overflow:"hidden", display:"flex", flexDirection: narrow?"column":"row",
+    containerType:"size",
+  };
+  const handlers = {ref, onPointerDown, onPointerMove, onPointerUp, onPointerLeave:onPointerUp};
+
+  if(narrow){
+    return (
+      <div {...handlers} style={rootStyle}>
+        <div style={{display:"flex", alignItems:"center", gap:9, padding:"10px 12px 8px", flexShrink:0}} onClick={openDetails}>
+          <span style={{width:8,height:8,borderRadius:99,background:brand.color, flexShrink:0}}/>
+          <div style={{flex:1, minWidth:0}}>
+            <div style={{fontSize:13.5, fontWeight:700, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>{item.title}</div>
+            <div style={{fontSize:11, color:"var(--ink-mute)", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>{campaign.name} · {creator.name} · {scheduledAt? fmtDateTime(scheduledAt) : "Not scheduled"}</div>
+          </div>
+          <Badge label={PRIORITY_META[item.priority].label} color={PRIORITY_META[item.priority].color} soft="var(--surface-2)"/>
+        </div>
+        <div className="cf-noscrollbar" style={{display:"flex", alignItems:"center", gap:6, padding:"0 12px 8px", flexShrink:0, overflowX:"auto"}}>
+          {tabs || singlePlatform}
+        </div>
+        <div style={{flex:1, minHeight:0, padding:"0 12px"}} onClick={openDetails}>{phone}</div>
+        <div style={{display:"flex", alignItems:"center", gap:8, padding:"8px 12px 10px", flexShrink:0}}>
+          <div style={{flex:1, minWidth:0}} onClick={openDetails}>
+            {warningList || <div style={{fontSize:11, color:"var(--ink-mute)", lineHeight:1.35}}>{hasVideo? "Tap video to pause · ":""}tap title for details</div>}
+          </div>
+          {soundBtn}{fullBtn}
+        </div>
+        {stamps}
+      </div>
+    );
+  }
+
   return (
-    <div ref={ref}
-      onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerLeave={onPointerUp}
-      style={{
-        position:"absolute", inset:0, borderRadius:20, background:"var(--surface)", border:"1px solid var(--border)", boxShadow:"var(--shadow-lg)",
-        transform: `translate(${drag.x}px, ${drag.y}px) rotate(${rotate}deg)`,
-        transition: drag.active? "none":"transform .35s cubic-bezier(.2,.8,.2,1)",
-        touchAction:"none", cursor: isTop?"grab":"default", overflow:"hidden", display:"flex", flexDirection:"column",
-      }}>
-      <div style={{display:"flex", alignItems:"center", gap:9, padding:"11px 14px 9px", flexShrink:0, borderBottom:"1px solid var(--border)"}} onClick={()=>!drag.active && onOpenDetails(item)}>
-        <span style={{width:8,height:8,borderRadius:99,background:brand.color, flexShrink:0}}/>
-        <div style={{flex:1, minWidth:0}}>
-          <div style={{fontSize:13, fontWeight:700, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>{item.title}</div>
-          <div style={{fontSize:11, color:"var(--ink-mute)"}}>{brand.name} · {campaign.name}</div>
-        </div>
-        <Badge label={PRIORITY_META[item.priority].label} color={PRIORITY_META[item.priority].color} soft="var(--surface-2)"/>
-      </div>
-
-      {!entry.platform && item.platforms.length>1 && (
-        <div style={{display:"flex", gap:6, padding:"8px 14px", flexShrink:0, overflowX:"auto"}} onPointerDown={e=>e.stopPropagation()}>
-          {item.platforms.map(p=>(
-            <button key={p} onClick={(e)=>{ e.stopPropagation(); setActivePlatform(p); }}
-              style={{display:"flex", alignItems:"center", gap:6, padding:"5px 10px 5px 6px", borderRadius:99, border:"1px solid "+(activePlatform===p?PLATFORM_HEX[p]:"var(--border)"), background: activePlatform===p? PLATFORM_HEX[p]+"18":"var(--surface)", color: activePlatform===p? PLATFORM_HEX[p]:"var(--ink-soft)", fontSize:11.5, fontWeight:700, cursor:"pointer", flexShrink:0}}>
-              <PlatformIcon platform={p} size={12}/>{PLATFORM_META[p].label}
-            </button>
-          ))}
-        </div>
-      )}
-
-      <div style={{position:"relative", flex:1, minHeight:0, padding: (activePlatform==="instagram"&&item.media.aspectRatio!=="9:16")||activePlatform==="facebook"||activePlatform==="gbp" ? "12px 14px" : "10px 10px 0", overflowY:"auto"}} onClick={()=>!drag.active && onOpenDetails(item)}>
-        <PlatformPostPreview platform={activePlatform} item={item} variant={item.variants[activePlatform]} brand={brand}/>
-      </div>
-
-      <div style={{padding:"10px 14px 12px", flexShrink:0, borderTop:"1px solid var(--border)"}} onClick={()=>!drag.active && onOpenDetails(item)}>
-        <div style={{display:"flex", flexWrap:"wrap", gap:12, fontSize:11.5, color:"var(--ink-soft)", marginBottom:6}}>
-          <span style={{display:"flex", alignItems:"center", gap:5}}><Avatar user={creator} size={16}/>{creator.name}</span>
-          <span style={{display:"flex", alignItems:"center", gap:5}}><Icon name="clock" size={13}/>{scheduledAt? fmtDateTime(scheduledAt): "Not scheduled"}</span>
-          <span style={{display:"flex", alignItems:"center", gap:5}}><Icon name="file" size={13}/>v{item.currentVersion}</span>
-        </div>
-        {(() => {
-          const warnings = [];
-          if(!caption) warnings.push("Missing caption/title");
-          if(item.media.duration && item.media.duration>60 && platformList.includes("tiktok")) warnings.push("Video exceeds TikTok's recommended length");
-          if(!scheduledAt) warnings.push("No publish time set");
-          return warnings.length>0 && (
-            <div style={{display:"flex", flexDirection:"column", gap:4}}>
-              {warnings.map((w,i)=><div key={i} style={{display:"flex", gap:6, alignItems:"center", fontSize:11.5, color:"var(--amber)", fontWeight:600}}><Icon name="warn" size={12}/>{w}</div>)}
+    <div {...handlers} style={rootStyle}>
+      <div style={{width:"calc((100cqh - 36px) * 9 / 19.5 + 36px)", flexShrink:0, padding:18, background:"var(--surface-2)", borderRight:"1px solid var(--border)"}} onClick={openDetails}>{phone}</div>
+      <div style={{flex:1, minWidth:0, display:"flex", flexDirection:"column", padding:"20px 22px", overflowY:"auto", gap:16}}>
+        <div>
+          <div style={{display:"flex", alignItems:"flex-start", gap:10}}>
+            <div style={{flex:1, minWidth:0}}>
+              <div style={{fontFamily:"Sora, sans-serif", fontSize:18, fontWeight:700, lineHeight:1.25}}>{item.title}</div>
+              <div style={{fontSize:12.5, color:"var(--ink-mute)", marginTop:4}}>{brand.name} · {campaign.name}</div>
             </div>
-          );
-        })()}
+            <Badge label={PRIORITY_META[item.priority].label} color={PRIORITY_META[item.priority].color} soft="var(--surface-2)"/>
+          </div>
+        </div>
+        <div>
+          <div style={{fontSize:11, fontWeight:700, color:"var(--ink-mute)", textTransform:"uppercase", letterSpacing:".5px", marginBottom:8}}>Preview as it will appear on</div>
+          <div style={{display:"flex", flexWrap:"wrap", gap:6, alignItems:"center"}}>{tabs || singlePlatform}{soundBtn}{fullBtn}</div>
+        </div>
+        {variantFields(activePlatform, variant).map(([label, text])=>(
+          <div key={label}>
+            <div style={{fontSize:11, fontWeight:700, color:"var(--ink-mute)", textTransform:"uppercase", letterSpacing:".5px", marginBottom:6}}>{label}</div>
+            <div style={{fontSize:13.5, lineHeight:1.55, whiteSpace:"pre-wrap", wordBreak:"break-word", background:"var(--surface-2)", border:"1px solid var(--border)", borderRadius:10, padding:"10px 12px", color: text? "var(--ink)":"var(--ink-mute)", cursor:"text", userSelect:"text"}} onPointerDown={stop}>
+              {text ? withTags(text, {color:"var(--accent)", fontWeight:600}) : "—"}
+            </div>
+          </div>
+        ))}
+        <div style={{display:"grid", gridTemplateColumns:"auto 1fr", gap:"8px 14px", fontSize:12.5}}>
+          <span style={{color:"var(--ink-mute)"}}>Creator</span><span style={{display:"flex", alignItems:"center", gap:6, fontWeight:600}}><Avatar user={creator} size={18}/>{creator.name}</span>
+          <span style={{color:"var(--ink-mute)"}}>Publishes</span><span style={{fontWeight:600}}>{(variant && variant.scheduledAt) ? fmtDateTime(variant.scheduledAt) : scheduledAt ? fmtDateTime(scheduledAt) : "Not scheduled"}</span>
+          <span style={{color:"var(--ink-mute)"}}>Media</span><span style={{fontWeight:600}}>{item.media.type==="video" ? "Video" : "Image"}{item.media.duration ? " · "+item.media.duration+"s" : ""}{item.media.aspectRatio ? " · "+item.media.aspectRatio : ""}</span>
+          <span style={{color:"var(--ink-mute)"}}>Version</span><span style={{fontWeight:600}}>v{item.currentVersion}</span>
+        </div>
+        {warningList}
+        <span style={{flex:1}}/>
+        <div onPointerDown={stop}><Button variant="ghost" size="sm" icon="external" onClick={()=>onOpenDetails(item)}>Open full details</Button></div>
       </div>
-
-      <div style={{position:"absolute", inset:0, background:"rgba(91,95,239,.94)", opacity:rightOp, display:"flex", alignItems:"center", justifyContent:"center", pointerEvents:"none"}}><span style={{color:"#fff", fontWeight:800, fontSize:26, border:"3px solid #fff", borderRadius:12, padding:"6px 22px", transform:"rotate(-8deg)"}}>APPROVE</span></div>
-      <div style={{position:"absolute", inset:0, background:"rgba(220,38,38,.9)", opacity:leftOp, display:"flex", alignItems:"center", justifyContent:"center", pointerEvents:"none"}}><span style={{color:"#fff", fontWeight:800, fontSize:26, border:"3px solid #fff", borderRadius:12, padding:"6px 22px", transform:"rotate(8deg)"}}>REJECT</span></div>
-      <div style={{position:"absolute", inset:0, background:"rgba(217,119,6,.92)", opacity:upOp, display:"flex", alignItems:"center", justifyContent:"center", pointerEvents:"none"}}><span style={{color:"#fff", fontWeight:800, fontSize:24, border:"3px solid #fff", borderRadius:12, padding:"6px 22px"}}>EDITS</span></div>
+      {stamps}
     </div>
   );
 }
@@ -1618,31 +2097,40 @@ function ApprovalQueuePage(){
   const {state, dispatch, openDetails} = useApp();
   const [mode, setMode] = useState("package");
   const [filters, setFilters] = useState({brand:"", creator:"", campaign:"", priority:"", platform:""});
-  const [index, setIndex] = useState(0);
+  // Keys reviewed this session. Approved/rejected items drop out of the "submitted" pool on their own, so
+  // tracking what's been decided (rather than a position index) keeps the next post from being skipped.
+  const [reviewedKeys, setReviewedKeys] = useState([]);
   const [pending, setPending] = useState(null);
+  const [showFilters, setShowFilters] = useState(false);
+  const [immersive, setImmersive] = useState(null); // preferred platform while full-screen review is open
+  const narrow = useIsNarrow(900);
 
   const queue = useMemo(()=>buildQueue(state.contentItems, mode, filters), [state.contentItems, mode, filters]);
-  useEffect(()=>{ setIndex(0); }, [mode, JSON.stringify(filters)]);
-  const total = queue.length;
-  const current = queue[index];
-  const reviewed = Math.min(index, total);
+  useEffect(()=>{ setReviewedKeys([]); }, [mode, JSON.stringify(filters)]);
+  const remaining = queue.filter(e=>!reviewedKeys.includes(e.key));
+  const reviewed = reviewedKeys.length;
+  const total = reviewed + remaining.length;
+  const current = remaining[0];
+  useEffect(()=>{ if(!current) setImmersive(null); }, [current]);
+  const immersivePlatform = current && immersive ? (current.platform || (current.item.platforms.includes(immersive) ? immersive : current.item.platforms[0])) : null;
 
   function requestDecision(type){
     if(!current) return;
-    setPending({contentId:current.contentId, platform:current.platform, itemTitle:current.item.title, type});
+    setPending({key:current.key, contentId:current.contentId, platform:current.platform, itemTitle:current.item.title, type});
   }
   function confirmDecision(extra){
     const decision = pending.type==="approve"?"approved": pending.type==="reject"?"rejected":"changes_requested";
     dispatch({type:"SUBMIT_DECISION", contentId:pending.contentId, platform:pending.platform, decision, feedback:extra.text, tags:extra.tags, dueDate:extra.dueDate});
+    setReviewedKeys(k=>[...k, pending.key]);
     setPending(null);
-    setIndex(i=>i+1);
   }
   function undo(){
     dispatch({type:"UNDO_DECISION"});
-    setIndex(i=>Math.max(0,i-1));
+    setReviewedKeys(k=>k.slice(0,-1));
   }
 
   const creators = [...new Set(state.contentItems.map(i=>i.creator))].map(id=>USERS.find(u=>u.id===id));
+  const activeFilterCount = Object.values(filters).filter(Boolean).length;
 
   return (
     <div>
@@ -1652,46 +2140,56 @@ function ApprovalQueuePage(){
         </div>
       }/>
 
-      <Card style={{padding:14, marginBottom:18, display:"flex", flexWrap:"wrap", gap:10, alignItems:"center"}}>
+      <Card style={{padding: narrow? 10:14, marginBottom: narrow? 14:18, display:"flex", flexWrap:"wrap", gap:10, alignItems:"center"}}>
         <div style={{display:"flex", background:"var(--surface-2)", borderRadius:9, padding:3, gap:2}}>
           <button onClick={()=>setMode("package")} style={{padding:"6px 12px", borderRadius:7, border:"none", fontWeight:700, fontSize:12.5, cursor:"pointer", background:mode==="package"?"var(--surface)":"transparent", boxShadow:mode==="package"?"var(--shadow-sm)":"none"}}>Full package</button>
           <button onClick={()=>setMode("variant")} style={{padding:"6px 12px", borderRadius:7, border:"none", fontWeight:700, fontSize:12.5, cursor:"pointer", background:mode==="variant"?"var(--surface)":"transparent", boxShadow:mode==="variant"?"var(--shadow-sm)":"none"}}>Per platform</button>
         </div>
-        <div style={{width:1, height:24, background:"var(--border)"}}/>
+        {narrow && <button onClick={()=>setShowFilters(v=>!v)} style={{marginLeft:"auto", display:"flex", alignItems:"center", gap:6, padding:"7px 12px", borderRadius:9, border:"1px solid var(--border)", background: activeFilterCount? "var(--accent-soft)":"var(--surface)", color: activeFilterCount? "var(--accent-dark)":"var(--ink-soft)", fontWeight:700, fontSize:12.5, cursor:"pointer"}}>
+          <Icon name="filter" size={14}/>Filters{activeFilterCount? " ("+activeFilterCount+")":""}<Icon name="chevronDown" size={14} style={{transform: showFilters?"rotate(180deg)":"none", transition:"transform .2s"}}/>
+        </button>}
+        {(!narrow || showFilters) && <>
+        {!narrow && <div style={{width:1, height:24, background:"var(--border)"}}/>}
+        <div className="cf-queue-filters" style={{display:"contents"}}>
         <Select value={filters.brand} onChange={v=>setFilters(f=>({...f,brand:v}))} placeholder="All brands" options={BRANDS.map(b=>({value:b.id,label:b.name}))} style={{width:150}}/>
         <Select value={filters.platform} onChange={v=>setFilters(f=>({...f,platform:v}))} placeholder="All platforms" options={Object.entries(PLATFORM_META).map(([k,v])=>({value:k,label:v.label}))} style={{width:150}}/>
         <Select value={filters.creator} onChange={v=>setFilters(f=>({...f,creator:v}))} placeholder="All creators" options={creators.map(c=>({value:c.id,label:c.name}))} style={{width:150}}/>
         <Select value={filters.campaign} onChange={v=>setFilters(f=>({...f,campaign:v}))} placeholder="All campaigns" options={CAMPAIGNS.map(c=>({value:c.id,label:c.name}))} style={{width:170}}/>
         <Select value={filters.priority} onChange={v=>setFilters(f=>({...f,priority:v}))} placeholder="All priorities" options={Object.entries(PRIORITY_META).map(([k,v])=>({value:k,label:v.label}))} style={{width:140}}/>
+        </div>
+        </>}
       </Card>
+      <style>{`@media (max-width:900px){ .cf-queue-filters{ display:grid !important; grid-template-columns:1fr 1fr; gap:8px; width:100%; } .cf-queue-filters > *{ width:auto !important; min-width:0; } }`}</style>
 
       {total===0 ? (
         <Card style={{padding:0}}><EmptyState icon="check" title="Nothing waiting on you" subtitle="All submitted content matching these filters has been reviewed. Nice work."/></Card>
       ) : reviewed>=total ? (
-        <Card style={{padding:0}}><EmptyState icon="check" title={"Queue clear — "+total+" of "+total+" reviewed"} subtitle="You've reviewed everything in this queue. Adjust filters to see more, or check back later." action={<Button variant="primary" onClick={()=>setIndex(0)} style={{marginTop:6}}>Review again</Button>}/></Card>
+        <Card style={{padding:0}}><EmptyState icon="check" title={"Queue clear — "+total+" of "+total+" reviewed"} subtitle="You've reviewed everything in this queue. Adjust filters to see more, or check back later." action={<Button variant="primary" onClick={()=>setReviewedKeys([])} style={{marginTop:6}}>Review again</Button>}/></Card>
       ) : (
         <div>
           <div style={{display:"flex", alignItems:"center", gap:10, marginBottom:14}}>
             <div style={{fontSize:13, fontWeight:700, color:"var(--ink-soft)"}}>{reviewed} of {total} reviewed</div>
             <div style={{flex:1, height:6, borderRadius:99, background:"var(--surface-2)", overflow:"hidden"}}><div style={{width:(reviewed/total*100)+"%", height:"100%", background:"var(--accent)", borderRadius:99, transition:"width .3s ease"}}/></div>
           </div>
-          <div style={{position:"relative", height:520, maxWidth:460, margin:"0 auto"}}>
-            {queue.slice(index, index+3).reverse().map((entry, ri, arr)=>{
+          <div style={{position:"relative", height: narrow? "max(480px, calc(100dvh - 160px))" : "clamp(540px, calc(100dvh - 250px), 860px)", maxWidth: narrow? 520 : 780, margin:"0 auto"}}>
+            {remaining.slice(0, 3).reverse().map((entry, ri, arr)=>{
               const depth = arr.length-1-ri;
               return (
                 <div key={entry.key} style={{position:"absolute", inset:0, transform: depth>0? `translateY(${depth*8}px) scale(${1-depth*0.035})`:"none", opacity: depth>2?0:1, zIndex:10-depth}}>
-                  <SwipeCard entry={entry} isTop={depth===0} onOpenDetails={openDetails} onDecision={requestDecision}/>
+                  <SwipeCard entry={entry} isTop={depth===0} narrow={narrow} paused={!!immersive} onImmersive={p=>setImmersive(p)} onOpenDetails={openDetails} onDecision={requestDecision}/>
                 </div>
               );
             })}
           </div>
-          <div style={{display:"flex", justifyContent:"center", gap:14, marginTop:22}}>
+          <div style={{display:"flex", justifyContent:"center", gap:14, marginTop: narrow? 16:22}}>
             <Button variant="danger" size="lg" icon="x" onClick={()=>requestDecision("reject")} style={{borderRadius:99, width:56, height:56, padding:0, justifyContent:"center"}}/>
             <Button variant="amber" size="lg" icon="edit" onClick={()=>requestDecision("edits")} style={{borderRadius:99}}>Request Edits</Button>
             <Button variant="success" size="lg" icon="check" onClick={()=>requestDecision("approve")} style={{borderRadius:99, width:56, height:56, padding:0, justifyContent:"center"}}/>
           </div>
         </div>
       )}
+      {immersive && current && <ImmersiveViewer key={current.key} entry={current} platform={immersivePlatform} onPlatform={setImmersive}
+        onDecision={requestDecision} onClose={()=>setImmersive(null)} busy={!!pending}/>}
       <DecisionModal pending={pending} onCancel={()=>setPending(null)} onConfirm={confirmDecision}/>
     </div>
   );
@@ -2229,6 +2727,14 @@ function CreateContentPage(){
                   const task = isVideo ? videoFileToPoster(f, 480, 0.72) : imageFileToPreview(f, 480, 0.78);
                   task.then(dataUrl=>{ set({previewUrl:dataUrl, previewLoading:false}); })
                        .catch(()=>{ set({previewLoading:false}); });
+                  readMediaInfo(f, isVideo).then(info=>{
+                    if(!info) return;
+                    const patch = {};
+                    const ar = nearestAspect(info.w, info.h);
+                    if(ar) patch.aspectRatio = ar;
+                    if(isVideo && isFinite(info.duration) && info.duration>0) patch.duration = Math.round(info.duration);
+                    if(Object.keys(patch).length) set(patch);
+                  });
                   // ...and the actual file, uploaded for real so it can be rewatched/reopened later by anyone.
                   uploadMediaFile(f).then(({url})=>{
                     set({fileUrl:url, uploadStatus:"done"});

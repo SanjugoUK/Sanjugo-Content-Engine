@@ -3246,7 +3246,7 @@ function DriveSettings(){
         <li>In Terminal, in the contentflow-app folder: <span style={code}>wrangler secret put GOOGLE_CLIENT_ID</span> and <span style={code}>wrangler secret put GOOGLE_CLIENT_SECRET</span></li>
         <li>Reload this page and press <strong>Connect Google Drive</strong>.</li>
       </ol>
-      <Button variant="ghost" size="sm" icon="refresh" onClick={load}>Check again</Button>
+      <Button variant="ghost" size="sm" icon="refresh" onClick={()=>window.location.reload()}>Check again</Button>
     </div>
   );
 }

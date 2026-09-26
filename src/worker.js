@@ -20,6 +20,16 @@ export default {
       if (request.method === "POST") return postChat(request, env);
     }
 
+    if (url.pathname.startsWith("/api/google/")) {
+      try {
+        if (url.pathname === "/api/google/connect" && request.method === "GET") return await googleConnect(request, env);
+        if (url.pathname === "/api/google/callback" && request.method === "GET") return await googleCallback(request, env);
+        if (url.pathname === "/api/google/disconnect" && request.method === "POST") return await googleDisconnect(env);
+      } catch (e) {
+        return json({ error: e.message || "Google connection error" }, e.status || 500);
+      }
+    }
+
     if (url.pathname.startsWith("/api/library")) {
       try {
         if (url.pathname === "/api/library" && request.method === "GET") return await getLibrary(request, env);
@@ -209,9 +219,11 @@ async function postChat(request, env) {
 
 // ---------------------------------------------------------------------------
 // Content Library — the "Sanjugo Marketing Contents Final" Google Drive folder.
-// ContentFlow reads it through a Google service account: the folder is shared with the service account
-// as Viewer and the account's JSON key is stored in the GOOGLE_SERVICE_ACCOUNT secret. Files stay private
-// in Drive and nothing is ever written back — imports are copied into R2 so posts play like uploads.
+// ContentFlow reads it with Drive read-only access, from either:
+//   1. "Connect Google Drive" in Settings (preferred): an admin signs in with Google once; we keep the
+//      refresh token in D1. Needs the GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET secrets (an OAuth web client).
+//   2. A service account key in the GOOGLE_SERVICE_ACCOUNT secret, if an organisation allows key creation.
+// Files stay private in Drive and nothing is ever written back — imports are copied into R2.
 // ---------------------------------------------------------------------------
 
 class HttpError extends Error {
@@ -240,10 +252,10 @@ function b64url(bytes) {
 
 let googleToken = null; // { token, exp } — reused while this worker instance is warm
 async function getGoogleToken(env) {
-  const sa = serviceAccount(env);
-  if (!sa) throw new HttpError(503, "Google Drive isn't connected yet — see Settings → Google Drive.");
   const now = Math.floor(Date.now() / 1000);
   if (googleToken && googleToken.exp - 60 > now) return googleToken.token;
+  const sa = serviceAccount(env);
+  if (!sa) return await oauthAccessToken(env);
   const enc = (o) => b64url(new TextEncoder().encode(JSON.stringify(o)));
   const unsigned = enc({ alg: "RS256", typ: "JWT" }) + "." + enc({
     iss: sa.client_email, scope: "https://www.googleapis.com/auth/drive.readonly",
@@ -267,9 +279,13 @@ async function getGoogleToken(env) {
 async function libraryStatus(env) {
   const sa = serviceAccount(env);
   const head = await env.MEDIA.head(LIBRARY_INDEX_KEY);
+  const auth = sa ? null : await getGoogleAuth(env);
   return json({
-    connected: !!sa,
-    serviceEmail: sa ? sa.client_email : null,
+    connected: !!(sa || auth),
+    method: sa ? "service_account" : auth ? "google_signin" : null,
+    serviceEmail: sa ? sa.client_email : auth ? auth.email : null,
+    connectedAt: auth ? auth.connected_at : null,
+    signInConfigured: oauthConfigured(env),
     rootFolderId: env.LIBRARY_FOLDER_ID || null,
     lastRefresh: head ? (head.customMetadata && head.customMetadata.updatedAt) || head.uploaded : null,
   });
@@ -282,58 +298,70 @@ async function getLibrary(request, env) {
   return env.ASSETS.fetch(new Request(new URL("/library.json", request.url)));
 }
 
-// One pass over everything the service account can see (a few paged calls), then rebuild folder paths
-// from `parents`. Listing folder-by-folder would take ~90 calls — over the free plan's per-request limit.
+// Walk the library folder level by level, asking about up to 40 folders per request, so ~90 folders
+// take a handful of calls (the free plan allows 50 per request) and nothing outside the library is read.
 async function refreshLibrary(env) {
   const token = await getGoogleToken(env);
   const root = env.LIBRARY_FOLDER_ID;
   if (!root) throw new HttpError(500, "LIBRARY_FOLDER_ID is not set in wrangler.toml");
+  const folders = new Map([[root, { name: null, parent: null }]]);
   const items = [];
-  let pageToken = "", calls = 0;
-  do {
-    const u = new URL("https://www.googleapis.com/drive/v3/files");
-    u.searchParams.set("q", "trashed=false");
-    u.searchParams.set("fields", "nextPageToken,files(id,name,mimeType,size,parents,modifiedTime,description)");
-    u.searchParams.set("pageSize", "1000");
-    u.searchParams.set("supportsAllDrives", "true");
-    u.searchParams.set("includeItemsFromAllDrives", "true");
-    if (pageToken) u.searchParams.set("pageToken", pageToken);
-    const r = await fetch(u, { headers: { Authorization: "Bearer " + token } });
-    const d = await r.json().catch(() => ({}));
-    if (!r.ok) throw new HttpError(502, "Drive listing failed: " + ((d.error && d.error.message) || r.status));
-    items.push(...(d.files || []));
-    pageToken = d.nextPageToken || "";
-    calls++;
-  } while (pageToken && calls < 40);
-
-  const byId = new Map(items.map((i) => [i.id, i]));
-  const pathOf = (item) => { // folder names from just under the root down to the file, or null if outside the library
-    const names = [];
-    let p = item.parents && item.parents[0];
-    for (let guard = 0; p && guard < 25; guard++) {
-      if (p === root) return names.reverse();
-      const f = byId.get(p);
-      if (!f) return null;
-      names.push(f.name);
-      p = f.parents && f.parents[0];
+  let frontier = [root], calls = 0;
+  while (frontier.length) {
+    const next = [];
+    for (let i = 0; i < frontier.length; i += 40) {
+      const chunk = frontier.slice(i, i + 40);
+      let pageToken = "";
+      do {
+        if (++calls > 45) throw new HttpError(500, "The library has too many folders to list in one go.");
+        const u = new URL("https://www.googleapis.com/drive/v3/files");
+        u.searchParams.set("q", "(" + chunk.map((id) => `'${id}' in parents`).join(" or ") + ") and trashed=false");
+        u.searchParams.set("fields", "nextPageToken,files(id,name,mimeType,size,parents,modifiedTime,description)");
+        u.searchParams.set("pageSize", "1000");
+        u.searchParams.set("supportsAllDrives", "true");
+        u.searchParams.set("includeItemsFromAllDrives", "true");
+        if (pageToken) u.searchParams.set("pageToken", pageToken);
+        const r = await fetch(u, { headers: { Authorization: "Bearer " + token } });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new HttpError(502, "Drive listing failed: " + ((d.error && d.error.message) || r.status));
+        for (const f of d.files || []) {
+          const parent = (f.parents || []).find((p) => chunk.includes(p)) || (f.parents || [])[0];
+          if (f.mimeType === DRIVE_FOLDER) {
+            if (!folders.has(f.id)) { folders.set(f.id, { name: f.name, parent }); next.push(f.id); }
+          } else {
+            items.push({ ...f, parent });
+          }
+        }
+        pageToken = d.nextPageToken || "";
+      } while (pageToken);
     }
-    return null;
+    frontier = next;
+  }
+  const pathOf = (folderId) => { // folder names from just under the root down to this folder
+    const names = [];
+    for (let id = folderId, guard = 0; id && id !== root && guard < 25; guard++) {
+      const f = folders.get(id);
+      if (!f) break;
+      names.unshift(f.name);
+      id = f.parent;
+    }
+    return names;
   };
-  const files = [];
-  for (const it of items) {
-    if (it.mimeType === DRIVE_FOLDER) continue;
-    const path = pathOf(it);
-    if (!path) continue;
+  const files = items.map((it) => {
+    const path = pathOf(it.parent);
     const f = { id: it.id, name: it.name, mime: it.mimeType, size: it.size ? Number(it.size) : null, branch: path[0] || "Unsorted", path: path.slice(1), modified: it.modifiedTime };
     if (it.description) f.note = it.description;
-    files.push(f);
+    return f;
+  });
+  if (files.length === 0) {
+    const sa = serviceAccount(env);
+    throw new HttpError(404, sa ? "No files found — is the library folder shared with " + sa.client_email + "?" : "No files found — does the connected Google account have access to the library folder?");
   }
   const updatedAt = new Date().toISOString();
-  if (files.length === 0) throw new HttpError(404, "No files found — is the library folder shared with " + serviceAccount(env).client_email + "?");
   await env.MEDIA.put(LIBRARY_INDEX_KEY, JSON.stringify({ source: "live", updatedAt, rootFolderId: root, files }), {
     httpMetadata: { contentType: "application/json" }, customMetadata: { updatedAt },
   });
-  return { count: files.length, updatedAt };
+  return { count: files.length, updatedAt, calls };
 }
 
 async function driveMeta(id, token) {
@@ -424,4 +452,111 @@ async function libraryStream(id, request, env) {
   out.set("Accept-Ranges", "bytes");
   out.set("Cache-Control", "private, max-age=3600");
   return new Response(r.body, { status: r.status, headers: out });
+}
+
+// ---------------------------------------------------------------------------
+// "Connect Google Drive" — one admin signs in with Google once and approves read-only Drive access.
+// The long-lived refresh token is kept server-side in D1; browsers only ever see file data, never tokens.
+// ---------------------------------------------------------------------------
+
+const GOOGLE_SCOPES = "openid email https://www.googleapis.com/auth/drive.readonly";
+function oauthConfigured(env) { return !!(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET); }
+function redirectUri(request) { return new URL("/api/google/callback", request.url).toString(); }
+
+let googleAuthTableReady = false;
+async function ensureGoogleAuthTable(env) {
+  if (googleAuthTableReady) return;
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS google_auth (id INTEGER PRIMARY KEY, email TEXT, refresh_token TEXT NOT NULL, connected_at TEXT NOT NULL)`
+  ).run();
+  googleAuthTableReady = true;
+}
+async function getGoogleAuth(env) {
+  if (!oauthConfigured(env)) return null;
+  await ensureGoogleAuthTable(env);
+  return await env.DB.prepare("SELECT email, refresh_token, connected_at FROM google_auth WHERE id = 1").first();
+}
+
+async function oauthAccessToken(env) {
+  const auth = await getGoogleAuth(env);
+  if (!auth) throw new HttpError(503, "Google Drive isn't connected yet — an admin can connect it in Settings → Google Drive.");
+  const res = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ client_id: env.GOOGLE_CLIENT_ID, client_secret: env.GOOGLE_CLIENT_SECRET, refresh_token: auth.refresh_token, grant_type: "refresh_token" }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.access_token) {
+    if (data.error === "invalid_grant") throw new HttpError(401, "Google access was revoked or expired — reconnect Google Drive in Settings.");
+    throw new HttpError(502, "Google sign-in failed: " + (data.error_description || data.error || res.status));
+  }
+  googleToken = { token: data.access_token, exp: Math.floor(Date.now() / 1000) + (data.expires_in || 3600) };
+  return googleToken.token;
+}
+
+function randomState() {
+  const b = new Uint8Array(24); crypto.getRandomValues(b);
+  return b64url(b);
+}
+function cookie(request, name) {
+  const m = (request.headers.get("cookie") || "").match(new RegExp("(?:^|;\\s*)" + name + "=([^;]+)"));
+  return m ? decodeURIComponent(m[1]) : null;
+}
+function backToSettings(request, params) {
+  return new Response(null, { status: 302, headers: {
+    Location: new URL("/#/settings?" + new URLSearchParams(params), request.url).toString(),
+    "Set-Cookie": "cf_google_state=; Path=/api/google; Max-Age=0; HttpOnly; Secure; SameSite=Lax",
+  }});
+}
+
+async function googleConnect(request, env) {
+  if (!oauthConfigured(env)) return json({ error: "Google sign-in isn't set up yet (GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET)." }, 503);
+  const state = randomState();
+  const u = new URL("https://accounts.google.com/o/oauth2/v2/auth");
+  u.search = new URLSearchParams({
+    client_id: env.GOOGLE_CLIENT_ID, redirect_uri: redirectUri(request), response_type: "code",
+    scope: GOOGLE_SCOPES, access_type: "offline", prompt: "consent", include_granted_scopes: "true", state,
+  }).toString();
+  return new Response(null, { status: 302, headers: {
+    Location: u.toString(),
+    "Set-Cookie": `cf_google_state=${state}; Path=/api/google; Max-Age=600; HttpOnly; Secure; SameSite=Lax`,
+  }});
+}
+
+async function googleCallback(request, env) {
+  const url = new URL(request.url);
+  if (url.searchParams.get("error")) return backToSettings(request, { drive: "error", msg: "Google sign-in was cancelled (" + url.searchParams.get("error") + ")." });
+  const state = url.searchParams.get("state");
+  if (!state || state !== cookie(request, "cf_google_state")) return backToSettings(request, { drive: "error", msg: "That sign-in link expired — please try Connect again." });
+  const res = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ code: url.searchParams.get("code") || "", client_id: env.GOOGLE_CLIENT_ID, client_secret: env.GOOGLE_CLIENT_SECRET, redirect_uri: redirectUri(request), grant_type: "authorization_code" }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.access_token) return backToSettings(request, { drive: "error", msg: "Google didn't accept the sign-in: " + (data.error_description || data.error || res.status) });
+  if (!(data.scope || "").includes("drive.readonly")) return backToSettings(request, { drive: "error", msg: "Drive access wasn't approved — tick the Google Drive permission when you connect." });
+  let email = null;
+  try { email = JSON.parse(atob(data.id_token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/"))).email || null; } catch (e) {}
+  await ensureGoogleAuthTable(env);
+  const existing = await env.DB.prepare("SELECT refresh_token FROM google_auth WHERE id = 1").first();
+  const refresh = data.refresh_token || (existing && existing.refresh_token);
+  if (!refresh) return backToSettings(request, { drive: "error", msg: "Google didn't return long-term access — disconnect ContentFlow in your Google account's third-party access page and connect again." });
+  await env.DB.prepare(
+    `INSERT INTO google_auth (id, email, refresh_token, connected_at) VALUES (1, ?1, ?2, ?3)
+     ON CONFLICT(id) DO UPDATE SET email = excluded.email, refresh_token = excluded.refresh_token, connected_at = excluded.connected_at`
+  ).bind(email, refresh, new Date().toISOString()).run();
+  googleToken = { token: data.access_token, exp: Math.floor(Date.now() / 1000) + (data.expires_in || 3600) };
+  return backToSettings(request, { drive: "connected" });
+}
+
+async function googleDisconnect(env) {
+  await ensureGoogleAuthTable(env);
+  const row = await env.DB.prepare("SELECT refresh_token FROM google_auth WHERE id = 1").first();
+  if (row) {
+    await fetch("https://oauth2.googleapis.com/revoke?token=" + encodeURIComponent(row.refresh_token), { method: "POST" }).catch(() => {});
+    await env.DB.prepare("DELETE FROM google_auth WHERE id = 1").run();
+  }
+  googleToken = null;
+  return json({ ok: true });
 }

@@ -911,7 +911,8 @@ function reducer(state, action){
     }
     case "SET_USER": return {...state, currentUserId: action.id};
     case "SET_BRAND": return {...state, currentBrandId: action.id};
-    case "SET_ROUTE": return {...state, route: action.route, createPrefill: action.createPrefill || null, libraryQuery: action.libraryQuery || ""};
+    case "SET_ROUTE": return {...state, route: action.route, createPrefill: action.createPrefill || null, libraryQuery: action.libraryQuery || "", driveReturn: action.driveReturn || state.driveReturn || null};
+    case "CLEAR_DRIVE_RETURN": return {...state, driveReturn: null};
     case "SET_THEME": return {...state, theme: action.theme};
     case "ADD_TOAST": return {...state, toasts:[...state.toasts, {id:uid("toast"), message:action.message, variant:action.variant||"ok"}]};
     case "REMOVE_TOAST": return {...state, toasts: state.toasts.filter(t=>t.id!==action.id)};
@@ -3114,7 +3115,7 @@ function LibraryPicker({onPick}){
 }
 
 function DriveSettings(){
-  const {dispatch} = useApp();
+  const {state, dispatch} = useApp();
   const [st, setSt] = useState(null);
   const [busy, setBusy] = useState(false);
   const load = ()=> fetch("/api/library/status", {cache:"no-store"}).then(r=>r.ok? r.json() : {connected:false, offline:true}).catch(()=>({connected:false, offline:true})).then(setSt);
@@ -3126,35 +3127,61 @@ function DriveSettings(){
       const d = await r.json().catch(()=>({}));
       if(!r.ok) throw new Error(d.error || "Refresh failed ("+r.status+")");
       LIBRARY_CACHE = null;
-      dispatch({type:"ADD_TOAST", message:"Connected — "+d.count+" files loaded from Google Drive"});
+      dispatch({type:"ADD_TOAST", message:"Library loaded from Google Drive — "+d.count+" files"});
       load();
     }catch(e){ dispatch({type:"ADD_TOAST", message:e.message, variant:"danger"}); }
     setBusy(false);
   }
+  // Back from Google's sign-in page (#/settings?drive=connected|error): report it, then load the live library.
+  useEffect(()=>{
+    const r = state.driveReturn;
+    if(!r) return;
+    dispatch({type:"CLEAR_DRIVE_RETURN"});
+    if(r.drive==="connected"){ dispatch({type:"ADD_TOAST", message:"Google Drive connected"}); refresh(); }
+    else if(r.drive==="error") dispatch({type:"ADD_TOAST", message:r.msg || "Couldn't connect Google Drive", variant:"danger"});
+  }, [state.driveReturn]);
+  async function disconnect(){
+    if(!confirm("Disconnect Google Drive? The library will fall back to the snapshot and files can't be pulled in until someone connects again.")) return;
+    setBusy(true);
+    await fetch("/api/google/disconnect", {method:"POST"}).catch(()=>{});
+    LIBRARY_CACHE = null;
+    dispatch({type:"ADD_TOAST", message:"Google Drive disconnected"});
+    setBusy(false); load();
+  }
   if(!st) return <Skeleton h={80}/>;
   const code = {fontFamily:'ui-monospace, Menlo, monospace', fontSize:12, background:"var(--surface-2)", border:"1px solid var(--border)", borderRadius:5, padding:"1px 5px"};
-  return st.connected ? (
+  const origin = window.location.origin;
+  if(st.connected) return (
     <div>
       <div style={{display:"flex", alignItems:"center", gap:8, fontSize:13.5, fontWeight:600, marginBottom:6}}><span style={{width:8, height:8, borderRadius:99, background:"var(--green)"}}/>Connected</div>
       <div style={{fontSize:12.5, color:"var(--ink-soft)", lineHeight:1.6, marginBottom:12}}>
-        Reading the library as <span style={code}>{st.serviceEmail}</span> (view-only).<br/>
-        {st.lastRefresh ? "Last refreshed "+fmtDateTime(st.lastRefresh)+"." : "Not refreshed yet — press Refresh to load the live file list."}
+        Reading the library as <span style={code}>{st.serviceEmail || "Google account"}</span> — view-only.{st.connectedAt? " Connected "+fmtDateTime(st.connectedAt)+"." : ""}<br/>
+        {st.lastRefresh ? "Library last refreshed "+fmtDateTime(st.lastRefresh)+"." : "Not refreshed yet — press Refresh to load the live file list."}
       </div>
       <div style={{display:"flex", gap:8, flexWrap:"wrap"}}>
-        <Button variant="primary" icon="refresh" onClick={refresh} disabled={busy}>{busy? "Refreshing…" : "Refresh library now"}</Button>
+        <Button variant="primary" icon="refresh" onClick={()=>refresh()} disabled={busy}>{busy? "Working…" : "Refresh library now"}</Button>
         {st.rootFolderId && <a href={driveFolderUrl(st.rootFolderId)} target="_blank" rel="noopener noreferrer" style={{textDecoration:"none"}}><Button variant="ghost" icon="external">Open library folder</Button></a>}
+        {st.method==="google_signin" && <Button variant="ghost" onClick={disconnect} disabled={busy} style={{color:"var(--red)"}}>Disconnect</Button>}
       </div>
     </div>
-  ) : (
+  );
+  if(st.signInConfigured) return (
     <div>
-      <div style={{display:"flex", alignItems:"center", gap:8, fontSize:13.5, fontWeight:600, marginBottom:6}}><span style={{width:8, height:8, borderRadius:99, background:"var(--amber)"}}/>Not connected{st.offline? " (server not reachable here)":""}</div>
-      <div style={{fontSize:12.5, color:"var(--ink-soft)", lineHeight:1.6, marginBottom:10}}>Connect once so ContentFlow can pull files from the library straight into posts. Your files stay private — ContentFlow only gets view access.</div>
+      <div style={{display:"flex", alignItems:"center", gap:8, fontSize:13.5, fontWeight:600, marginBottom:6}}><span style={{width:8, height:8, borderRadius:99, background:"var(--amber)"}}/>Not connected</div>
+      <div style={{fontSize:12.5, color:"var(--ink-soft)", lineHeight:1.6, marginBottom:12}}>Sign in with the Google account that owns <strong>Sanjugo Marketing Contents Final</strong> (e.g. admin@sanjugo.co.uk) and allow read-only Drive access. You only do this once — after that it works for the whole team.</div>
+      <a href="/api/google/connect" style={{textDecoration:"none"}}><Button variant="primary">Connect Google Drive</Button></a>
+    </div>
+  );
+  return (
+    <div>
+      <div style={{display:"flex", alignItems:"center", gap:8, fontSize:13.5, fontWeight:600, marginBottom:6}}><span style={{width:8, height:8, borderRadius:99, background:"var(--amber)"}}/>Not set up{st.offline? " (server not reachable here)":""}</div>
+      <div style={{fontSize:12.5, color:"var(--ink-soft)", lineHeight:1.6, marginBottom:10}}>One-time setup so an admin can connect Google Drive with a single sign-in. Your files stay private — ContentFlow only gets view access.</div>
       <ol style={{fontSize:12.5, color:"var(--ink-soft)", lineHeight:1.7, margin:"0 0 10px", paddingLeft:20}}>
-        <li>In Google Cloud Console, create a project and enable the <strong>Google Drive API</strong>.</li>
-        <li>Create a <strong>service account</strong>, then add a <strong>JSON key</strong> (a file downloads).</li>
-        <li>In Google Drive, share <strong>Sanjugo Marketing Contents Final</strong> with the service account's email as <strong>Viewer</strong>.</li>
-        <li>In Terminal, in the contentflow-app folder, run <span style={code}>wrangler secret put GOOGLE_SERVICE_ACCOUNT</span> and paste the whole JSON file.</li>
-        <li>Come back here and reload — then press <strong>Refresh library now</strong>.</li>
+        <li>In Google Cloud (project <strong>ContentFlow</strong>), enable the <strong>Google Drive API</strong>.</li>
+        <li>Google Auth Platform → set up the consent screen with audience <strong>Internal</strong>.</li>
+        <li>Clients → Create client → <strong>Web application</strong>, with redirect URI <span style={code}>{origin}/api/google/callback</span></li>
+        <li>In Terminal, in the contentflow-app folder: <span style={code}>wrangler secret put GOOGLE_CLIENT_ID</span> and <span style={code}>wrangler secret put GOOGLE_CLIENT_SECRET</span></li>
+        <li>Reload this page and press <strong>Connect Google Drive</strong>.</li>
       </ol>
       <Button variant="ghost" size="sm" icon="refresh" onClick={load}>Check again</Button>
     </div>
@@ -4739,10 +4766,11 @@ function App(){
   // Deep links from outside the app (e.g. the Drive content library page): #/library?q=G219, #/create?barcode=G219
   useEffect(()=>{
     const openFromHash = ()=>{
-      const m = /^#\/(library|create)(?:\?(.*))?$/.exec(window.location.hash || "");
+      const m = /^#\/(library|create|settings)(?:\?(.*))?$/.exec(window.location.hash || "");
       if(!m) return;
       const params = new URLSearchParams(m[2] || "");
-      if(m[1]==="library") dispatch({type:"SET_ROUTE", route:"library", libraryQuery: params.get("q") || ""});
+      if(m[1]==="settings") dispatch({type:"SET_ROUTE", route:"settings", driveReturn: params.get("drive") ? {drive: params.get("drive"), msg: params.get("msg")} : null});
+      else if(m[1]==="library") dispatch({type:"SET_ROUTE", route:"library", libraryQuery: params.get("q") || ""});
       else dispatch({type:"SET_ROUTE", route:"create", createPrefill: params.get("barcode") ? {libraryBarcode: params.get("barcode")} : null});
       try{ history.replaceState(null, "", window.location.pathname + window.location.search); }catch(e){}
     };

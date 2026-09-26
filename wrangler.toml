@@ -9,6 +9,11 @@ crons = ["30 3 * * *"]
 # The Google Drive folder that holds the content library ("Sanjugo Marketing Contents Final").
 [vars]
 LIBRARY_FOLDER_ID = "11YpaH0QMfCekJEH3oiqEAvO3Cc-wTaqO"
+# Sign-in (Cloudflare Access). Leave ACCESS_* empty to keep the site open; fill both to require sign-in.
+ACCESS_TEAM_DOMAIN = ""
+ACCESS_AUD = ""
+# These emails always get in as admins, so the team can never be locked out.
+BOOTSTRAP_ADMINS = "admin@sanjugo.co.uk"
 
 [assets]
 directory = "./public"

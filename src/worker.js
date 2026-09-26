@@ -11,6 +11,31 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
+    // Who is this? With Cloudflare Access switched on, only people on the ContentFlow team list get past here.
+    let viewer = { accessEnabled: false, member: null };
+    if (url.pathname.startsWith("/api/")) {
+      try {
+        viewer = await identify(request, env);
+      } catch (e) {
+        return json({ error: e.message || "Sign-in check failed", code: e.code || "auth" }, e.status || 401);
+      }
+      if (url.pathname === "/api/me") return json(meResponse(viewer, request));
+      if (url.pathname === "/api/team") {
+        try {
+          if (request.method === "GET") return json(await listTeam(env));
+          if (request.method === "POST") { requireAdmin(viewer); return json(await saveMember(request, env, viewer)); }
+        } catch (e) {
+          return json({ error: e.message || "Team error" }, e.status || 500);
+        }
+      }
+      // Admin-only actions (only enforced once sign-in is on — before that everyone is effectively an admin).
+      const adminOnly = (url.pathname === "/api/storage/cleanup") || (url.pathname === "/api/google/disconnect") ||
+        (url.pathname === "/api/google/connect") || (url.pathname === "/api/library/refresh");
+      if (adminOnly) {
+        try { requireAdmin(viewer); } catch (e) { return json({ error: e.message }, e.status || 403); }
+      }
+    }
+
     if (url.pathname === "/api/storage" || url.pathname === "/api/storage/cleanup") {
       try {
         if (url.pathname === "/api/storage" && request.method === "GET") return json(await storageReport(env));
@@ -782,4 +807,141 @@ async function runCleanup(env, { trigger }) {
   }
   await kvSet(env, "last_cleanup", result);
   return result;
+}
+
+// ---------------------------------------------------------------------------
+// Team & access. Sign-in is Cloudflare Access (email + one-time code) in front of the whole site. Access
+// proves *who* someone is; the team list below decides whether they're allowed in and with what role, so
+// adding a new hire is just adding their email in Settings — no Cloudflare changes needed.
+// Until ACCESS_TEAM_DOMAIN and ACCESS_AUD are set, the site stays open (demo user switcher) as before.
+// ---------------------------------------------------------------------------
+
+const ROLES = ["creator", "manager", "approver", "admin"];
+const DEFAULT_TEAM = [
+  { id: "u_cyrus", name: "Cyrus", role: "admin" },
+  { id: "u_yanyan", name: "Yan Yan", role: "admin" },
+  { id: "u_aidev", name: "AI Dev", role: "creator" },
+];
+
+let teamTableReady = false;
+async function ensureTeamTable(env) {
+  if (teamTableReady) return;
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS team_members (
+    id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT, role TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1,
+    added_at TEXT NOT NULL, added_by TEXT, last_seen TEXT)`).run();
+  const n = await env.DB.prepare("SELECT COUNT(*) AS n FROM team_members").first();
+  if (!n.n) {
+    const now = new Date().toISOString();
+    for (const m of DEFAULT_TEAM) {
+      await env.DB.prepare("INSERT INTO team_members (id, name, email, role, active, added_at) VALUES (?1, ?2, NULL, ?3, 1, ?4)").bind(m.id, m.name, m.role, now).run();
+    }
+  }
+  teamTableReady = true;
+}
+const memberOut = (r) => ({ id: r.id, name: r.name, email: r.email || "", role: r.role, active: !!r.active, addedAt: r.added_at, lastSeen: r.last_seen || null });
+
+async function listTeam(env) {
+  await ensureTeamTable(env);
+  const { results } = await env.DB.prepare("SELECT * FROM team_members ORDER BY active DESC, added_at ASC").all();
+  return { members: (results || []).map(memberOut) };
+}
+
+function requireAdmin(viewer) {
+  if (!viewer.accessEnabled) return; // open mode: no identities to check yet
+  if (!viewer.member || viewer.member.role !== "admin") throw new HttpError(403, "Only admins can do that.");
+}
+
+async function saveMember(request, env, viewer) {
+  const b = await request.json().catch(() => ({}));
+  const name = String(b.name || "").trim().slice(0, 60);
+  const email = String(b.email || "").trim().toLowerCase().slice(0, 120);
+  const role = String(b.role || "");
+  const active = b.active === false ? 0 : 1;
+  if (!name) throw new HttpError(400, "Name is required.");
+  if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new HttpError(400, "That email doesn't look right.");
+  if (!ROLES.includes(role)) throw new HttpError(400, "Unknown role.");
+  await ensureTeamTable(env);
+  if (email) {
+    const clash = await env.DB.prepare("SELECT id FROM team_members WHERE email = ?1 AND id != ?2").bind(email, b.id || "").first();
+    if (clash) throw new HttpError(409, "Someone on the team already uses that email.");
+  }
+  const id = b.id || "u_" + crypto.randomUUID().slice(0, 8);
+  const existing = await env.DB.prepare("SELECT * FROM team_members WHERE id = ?1").bind(id).first();
+  // Never leave the team without an active admin who can sign in.
+  if (existing && existing.role === "admin" && existing.active && (role !== "admin" || !active)) {
+    const others = await env.DB.prepare("SELECT COUNT(*) AS n FROM team_members WHERE role = 'admin' AND active = 1 AND id != ?1").bind(id).first();
+    if (!others.n) throw new HttpError(400, "Keep at least one active admin.");
+  }
+  if (existing) {
+    await env.DB.prepare("UPDATE team_members SET name = ?2, email = ?3, role = ?4, active = ?5 WHERE id = ?1").bind(id, name, email || null, role, active).run();
+  } else {
+    await env.DB.prepare("INSERT INTO team_members (id, name, email, role, active, added_at, added_by) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)")
+      .bind(id, name, email || null, role, active, new Date().toISOString(), viewer.member ? viewer.member.email : null).run();
+  }
+  return { member: memberOut(await env.DB.prepare("SELECT * FROM team_members WHERE id = ?1").bind(id).first()) };
+}
+
+// ---- Cloudflare Access token check (RS256 JWT signed by the team's Access certs)
+let accessKeys = null; // { at, keys: Map(kid -> CryptoKey) }
+async function accessKey(env, kid) {
+  const fresh = accessKeys && Date.now() - accessKeys.at < 3600e3;
+  if (!fresh || !accessKeys.keys.has(kid)) {
+    const r = await fetch(`https://${env.ACCESS_TEAM_DOMAIN}/cdn-cgi/access/certs`);
+    const d = await r.json();
+    const keys = new Map();
+    for (const k of d.keys || []) {
+      keys.set(k.kid, await crypto.subtle.importKey("jwk", k, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["verify"]));
+    }
+    accessKeys = { at: Date.now(), keys };
+  }
+  return accessKeys.keys.get(kid);
+}
+function b64urlDecode(str) {
+  const s = str.replace(/-/g, "+").replace(/_/g, "/");
+  return Uint8Array.from(atob(s + "===".slice((s.length + 3) % 4)), (c) => c.charCodeAt(0));
+}
+async function verifyAccessJwt(token, env) {
+  const [h, p, sig] = (token || "").split(".");
+  if (!h || !p || !sig) return null;
+  const header = JSON.parse(new TextDecoder().decode(b64urlDecode(h)));
+  const payload = JSON.parse(new TextDecoder().decode(b64urlDecode(p)));
+  const key = await accessKey(env, header.kid);
+  if (!key) return null;
+  const ok = await crypto.subtle.verify("RSASSA-PKCS1-v1_5", key, b64urlDecode(sig), new TextEncoder().encode(h + "." + p));
+  if (!ok) return null;
+  const aud = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
+  if (!aud.includes(env.ACCESS_AUD)) return null;
+  if (payload.iss !== `https://${env.ACCESS_TEAM_DOMAIN}`) return null;
+  if (!payload.exp || payload.exp * 1000 < Date.now()) return null;
+  return payload;
+}
+
+async function identify(request, env) {
+  if (!env.ACCESS_TEAM_DOMAIN || !env.ACCESS_AUD) return { accessEnabled: false, member: null };
+  const token = request.headers.get("Cf-Access-Jwt-Assertion") || cookie(request, "CF_Authorization");
+  const claims = token ? await verifyAccessJwt(token, env) : null;
+  if (!claims || !claims.email) { const e = new HttpError(401, "Please sign in again."); e.code = "signed_out"; throw e; }
+  const email = String(claims.email).toLowerCase();
+  await ensureTeamTable(env);
+  let row = await env.DB.prepare("SELECT * FROM team_members WHERE email = ?1").bind(email).first();
+  // Bootstrap: emails in BOOTSTRAP_ADMINS always get in as admins (added to the list the first time).
+  const bootstrap = String(env.BOOTSTRAP_ADMINS || "").toLowerCase().split(/[\s,]+/).filter(Boolean);
+  if (!row && bootstrap.includes(email)) {
+    await env.DB.prepare("INSERT INTO team_members (id, name, email, role, active, added_at, added_by) VALUES (?1, ?2, ?3, 'admin', 1, ?4, 'bootstrap')")
+      .bind("u_" + crypto.randomUUID().slice(0, 8), email.split("@")[0], email, new Date().toISOString()).run();
+    row = await env.DB.prepare("SELECT * FROM team_members WHERE email = ?1").bind(email).first();
+  }
+  if (!row || !row.active) { const e = new HttpError(403, email + " isn't on the ContentFlow team. Ask an admin to add you in Settings → Team & access."); e.code = "not_member"; throw e; }
+  if (!row.last_seen || Date.now() - Date.parse(row.last_seen) > 3600e3) {
+    await env.DB.prepare("UPDATE team_members SET last_seen = ?2 WHERE id = ?1").bind(row.id, new Date().toISOString()).run();
+  }
+  return { accessEnabled: true, email, member: memberOut(row) };
+}
+
+function meResponse(viewer, request) {
+  return {
+    accessEnabled: viewer.accessEnabled,
+    member: viewer.member,
+    logoutUrl: viewer.accessEnabled ? new URL("/cdn-cgi/access/logout", request.url).toString() : null,
+  };
 }

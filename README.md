@@ -68,7 +68,20 @@ From now on, any update just needs `git push` to the `main` branch — Cloudflar
 redeploys automatically. No Terminal commands needed unless a future change adds new infrastructure
 (another database table, another bucket, etc.), in which case I'll flag exactly what's needed.
 
-## Important: this has no login wall yet
+## Team & access (sign-in)
+
+Settings → **Team & access** is the team list: name, email, role (Creator, Social Media Manager, Approver,
+Admin). Add a new hire there and send them the link; remove people there. The list lives in D1 (`team_members`).
+
+Sign-in is Cloudflare Access (email + one-time code) in front of the site. Access proves who someone is; the
+team list decides who gets in, so you never change Cloudflare to add or remove people. To switch it on:
+1. Cloudflare → Zero Trust → Access → Applications → Add → Self-hosted, domain
+   `sanjugo-content-engine.rapid-dust-8baf.workers.dev`, policy **Allow · Everyone**, login method **One-time PIN**.
+2. Put the team domain (e.g. `sanjugo.cloudflareaccess.com`) and the application's **AUD tag** into
+   `ACCESS_TEAM_DOMAIN` / `ACCESS_AUD` in `wrangler.toml`, then push.
+`BOOTSTRAP_ADMINS` (admin@sanjugo.co.uk) always gets in as an admin, so nobody can be locked out.
+
+## (Older note) login wall
 
 Right now, anyone with the live link can open and use the app — there's no password. Two ways to
 lock it down, both free:

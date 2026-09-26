@@ -177,6 +177,19 @@ const USERS = [
   {id:"u_yanyan", name:"Yan Yan", role:"admin", brands:["sanjugo"], avatarColor:"#1B2333", title:"Admin"},
   {id:"u_aidev", name:"AI Dev", role:"creator", brands:["sanjugo"], avatarColor:"#0891B2", title:"Creator"},
 ];
+/* The live team comes from /api/team (Settings → Team & access). USERS is updated in place when it loads so
+   every existing USERS.find(...) keeps working; removed people stay (inactive) so old posts still show who made them. */
+const AVATAR_COLORS = ["#D9582A","#1B2333","#0891B2","#7A5AF8","#079455","#DC8A0E","#2E6BE6","#E5484D"];
+function applyTeam(members){
+  const next = members.map((m,i)=>{
+    const prev = USERS.find(u=>u.id===m.id);
+    let h = 0; for(const c of m.id) h = (h*31 + c.charCodeAt(0))>>>0;
+    return {id:m.id, name:m.name, role:m.role, email:m.email||"", active:m.active!==false, brands:["sanjugo"],
+      avatarColor: prev ? prev.avatarColor : AVATAR_COLORS[h % AVATAR_COLORS.length], title: (ROLE_META[m.role]||{}).label || m.role, lastSeen:m.lastSeen};
+  });
+  if(next.length) USERS.splice(0, USERS.length, ...next);
+}
+const activeUsers = () => USERS.filter(u=>u.active!==false);
 const BRANDS = [
   {id:"sanjugo", name:"Sanjugo", color:"#D9642A", logo:true, accounts:{instagram:"@sanjugo", facebook:"Sanjugo", tiktok:"@sanjugo", youtube:"Sanjugo", gbp:"Sanjugo — Shoreditch, Angel, Victoria"}},
 ];
@@ -910,6 +923,8 @@ function reducer(state, action){
       };
     }
     case "SET_USER": return {...state, currentUserId: action.id};
+    case "TEAM_LOADED": { applyTeam(action.members); return {...state, team: action.members, teamRev:(state.teamRev||0)+1}; }
+    case "SET_ME": return {...state, me: action.me, lock: action.lock || null, ...(action.me && action.me.member ? {currentUserId: action.me.member.id} : {})};
     case "SET_BRAND": return {...state, currentBrandId: action.id};
     case "SET_ROUTE": return {...state, route: action.route, createPrefill: action.createPrefill || null, libraryQuery: action.libraryQuery || "", driveReturn: action.driveReturn || state.driveReturn || null};
     case "CLEAR_DRIVE_RETURN": return {...state, driveReturn: null};
@@ -1102,6 +1117,16 @@ function Sidebar({open, onClose}){
       </nav>
 
       <div style={{padding:12, borderTop:"1px solid var(--sidebar-line)", position:"relative"}}>
+        {state.me && state.me.accessEnabled ? (
+          <div style={{display:"flex", alignItems:"center", gap:10, padding:"8px", borderRadius:10, background:"var(--sidebar-2)", border:"1px solid var(--sidebar-line)"}}>
+            <Avatar user={user} size={32}/>
+            <div style={{flex:1, minWidth:0}}>
+              <div style={{color:"var(--sidebar-title)", fontSize:13, fontWeight:600, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>{user.name}</div>
+              <div style={{color:"var(--sidebar-text-dim)", fontSize:11, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>{ROLE_META[user.role].label} · {state.me.member && state.me.member.email}</div>
+            </div>
+            <a href={state.me.logoutUrl || "/cdn-cgi/access/logout"} title="Sign out" style={{color:"var(--sidebar-text-dim)", fontSize:11.5, fontWeight:600, textDecoration:"none"}}>Sign out</a>
+          </div>
+        ) : <>
         <button onClick={()=>setUserMenu(v=>!v)} style={{width:"100%", display:"flex", alignItems:"center", gap:10, padding:"8px", borderRadius:10, background:"var(--sidebar-2)", border:"1px solid var(--sidebar-line)", cursor:"pointer"}}>
           <Avatar user={user} size={32}/>
           <div style={{flex:1, textAlign:"left", overflow:"hidden"}}>
@@ -1113,7 +1138,7 @@ function Sidebar({open, onClose}){
         {userMenu && (
           <div style={{position:"absolute", left:12, right:12, bottom:"100%", marginBottom:6, background:"var(--sidebar)", border:"1px solid var(--sidebar-line)", borderRadius:10, boxShadow:"var(--shadow-lg)", zIndex:50, overflow:"hidden", maxHeight:300, overflowY:"auto"}}>
             <div style={{padding:"8px 12px 4px", fontSize:10.5, fontWeight:700, color:"var(--sidebar-text-dim)", textTransform:"uppercase", letterSpacing:".4px"}}>Switch user (demo)</div>
-            {USERS.map(u=>(
+            {activeUsers().map(u=>(
               <button key={u.id} onClick={()=>{dispatch({type:"SET_USER", id:u.id}); setUserMenu(false); dispatch({type:"ADD_TOAST", message:"Signed in as "+u.name+" · "+ROLE_META[u.role].label});}}
                 style={{width:"100%", display:"flex", alignItems:"center", gap:9, padding:"8px 12px", background: u.id===user.id?"var(--sidebar-2)":"transparent", border:"none", cursor:"pointer", textAlign:"left"}}>
                 <Avatar user={u} size={26}/>
@@ -1126,6 +1151,7 @@ function Sidebar({open, onClose}){
             ))}
           </div>
         )}
+        </>}
       </div>
     </aside>
     <style>{`
@@ -3315,6 +3341,98 @@ function StorageSettings(){
   );
 }
 
+/* Settings → Team & access: add a new hire by email, change roles, remove people. With sign-in on, the list is
+   the guest list — only these emails get past the one-time-code sign-in. */
+function TeamAccessSettings(){
+  const {state, dispatch} = useApp();
+  const [members, setMembers] = useState(null);
+  const [draft, setDraft] = useState({name:"", email:"", role:"creator"});
+  const [busy, setBusy] = useState(false);
+  const [added, setAdded] = useState(null);
+  const [showRemoved, setShowRemoved] = useState(false);
+  const accessOn = !!(state.me && state.me.accessEnabled);
+  const siteUrl = window.location.origin;
+  const load = ()=> fetch("/api/team", {cache:"no-store"}).then(r=>r.ok? r.json() : Promise.reject()).then(d=>{ setMembers(d.members); dispatch({type:"TEAM_LOADED", members:d.members}); }).catch(()=>setMembers(USERS.map(u=>({id:u.id, name:u.name, email:u.email||"", role:u.role, active:u.active!==false, offline:true}))));
+  useEffect(()=>{ load(); }, []);
+  async function save(m){
+    setBusy(true);
+    try{
+      const r = await fetch("/api/team", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(m)});
+      const d = await r.json().catch(()=>({}));
+      if(!r.ok) throw new Error(d.error || "Couldn't save ("+r.status+")");
+      await load();
+      setBusy(false);
+      return d.member;
+    }catch(e){ dispatch({type:"ADD_TOAST", message:e.message, variant:"danger"}); setBusy(false); load(); return null; }
+  }
+  async function add(){
+    if(!draft.name.trim() || !draft.email.trim()) return;
+    const m = await save({name:draft.name, email:draft.email, role:draft.role});
+    if(m){ setAdded(m); setDraft({name:"", email:"", role:"creator"}); dispatch({type:"ADD_TOAST", message:m.name+" added to the team"}); }
+  }
+  if(!members) return <Skeleton h={120}/>;
+  const input = {padding:"7px 9px", borderRadius:8, border:"1px solid var(--border)", fontSize:13, background:"var(--surface)", color:"var(--ink)", minWidth:0};
+  const code = {fontFamily:'ui-monospace, Menlo, monospace', fontSize:12, background:"var(--surface-2)", border:"1px solid var(--border)", borderRadius:5, padding:"1px 5px"};
+  const shown = members.filter(m=> showRemoved || m.active);
+  const removedCount = members.filter(m=>!m.active).length;
+  const roleOpts = Object.entries(ROLE_META).map(([k,v])=>({value:k, label:v.label}));
+  const missingEmail = members.filter(m=>m.active && !m.email).length;
+  return (
+    <div>
+      <div style={{display:"flex", gap:10, alignItems:"flex-start", padding:"10px 12px", borderRadius:8, background: accessOn? "var(--green-soft)" : "var(--amber-soft)", fontSize:12.5, lineHeight:1.55, marginBottom:14}}>
+        <span style={{width:8, height:8, borderRadius:99, marginTop:6, flexShrink:0, background: accessOn? "var(--green)" : "var(--amber)"}}/>
+        {accessOn
+          ? <span><strong>Sign-in is on.</strong> Only the active people below can open ContentFlow. They sign in with their email and a one-time code sent to it. Signed in as <strong>{state.me.member && state.me.member.email}</strong>.</span>
+          : <span><strong>Sign-in is off — anyone with the link can open ContentFlow.</strong> You can build the team list now; once sign-in is switched on, only these emails get in. {missingEmail>0 && <>Add an email for the {missingEmail} {missingEmail===1? "person":"people"} below without one first.</>}</span>}
+      </div>
+
+      <div style={{border:"1px solid var(--border)", borderRadius:10, overflow:"hidden", marginBottom:12}}>
+        {shown.map((m,i)=>(
+          <div key={m.id+(m.email||"")+m.role+m.active} style={{display:"grid", gridTemplateColumns:"minmax(110px,1fr) minmax(160px,1.6fr) 170px auto", gap:8, alignItems:"center", padding:"8px 10px", borderTop: i? "1px solid var(--border)" : "none", opacity: m.active? 1 : .55}} className="cf-team-row">
+            <input defaultValue={m.name} disabled={!m.active||busy} onBlur={e=>{ const v=e.target.value.trim(); if(v && v!==m.name) save({...m, name:v}); }} style={input} aria-label="Name"/>
+            <input defaultValue={m.email} placeholder="email@example.com" disabled={!m.active||busy} onBlur={e=>{ const v=e.target.value.trim(); if(v!==m.email) save({...m, email:v}); }} style={{...input, borderColor: m.active && !m.email ? "var(--amber)" : "var(--border)"}} aria-label="Email"/>
+            <Select value={m.role} onChange={v=>save({...m, role:v})} options={roleOpts} style={{width:"100%"}}/>
+            <div style={{display:"flex", gap:6, alignItems:"center", justifyContent:"flex-end"}}>
+              <span style={{fontSize:11, color:"var(--ink-mute)", whiteSpace:"nowrap"}} className="cf-hide-narrow">{m.lastSeen? "seen "+fmtDate(m.lastSeen,{day:"numeric",month:"short"}) : accessOn? "not signed in yet" : ""}</span>
+              {m.active
+                ? <Button variant="ghost" size="sm" disabled={busy} onClick={()=>{ if(confirm("Remove "+m.name+" from the team? They won't be able to open ContentFlow. Their past posts stay.")) save({...m, active:false}); }} style={{color:"var(--red)"}}>Remove</Button>
+                : <Button variant="ghost" size="sm" disabled={busy} onClick={()=>save({...m, active:true})}>Restore</Button>}
+            </div>
+          </div>
+        ))}
+      </div>
+      {removedCount>0 && <div style={{marginBottom:12}}><Button variant="text" size="sm" onClick={()=>setShowRemoved(v=>!v)}>{showRemoved? "Hide removed people" : "Show removed people ("+removedCount+")"}</Button></div>}
+
+      <div style={{fontSize:12.5, fontWeight:600, marginBottom:8}}>Add someone</div>
+      <div className="cf-team-add" style={{display:"grid", gridTemplateColumns:"1fr 1.4fr 170px auto", gap:8, marginBottom:8}}>
+        <input value={draft.name} onChange={e=>setDraft(d=>({...d, name:e.target.value}))} placeholder="Name" style={input}/>
+        <input value={draft.email} onChange={e=>setDraft(d=>({...d, email:e.target.value}))} onKeyDown={e=>e.key==="Enter" && add()} placeholder="Their email (any provider)" type="email" style={input}/>
+        <Select value={draft.role} onChange={v=>setDraft(d=>({...d, role:v}))} options={roleOpts} style={{width:"100%"}}/>
+        <Button variant="primary" icon="plus" onClick={add} disabled={busy || !draft.name.trim() || !draft.email.trim()}>Add</Button>
+      </div>
+      <div style={{fontSize:11.5, color:"var(--ink-mute)", lineHeight:1.5, marginBottom: added? 12 : 0}}>Roles: <strong>Creator</strong> makes posts · <strong>Social Media Manager</strong> makes and schedules · <strong>Approver</strong> approves and schedules · <strong>Admin</strong> does everything incl. Settings. See the table above.</div>
+      {added && <div style={{padding:"10px 12px", borderRadius:8, border:"1px solid var(--border)", fontSize:12.5, lineHeight:1.6}}>
+        <strong>{added.name} is on the team.</strong> Send them the link {accessOn? "— they sign in with "+added.email+" and a one-time code" : "(sign-in isn't on yet, so the link already works)"}:
+        <div style={{display:"flex", gap:8, alignItems:"center", marginTop:6, flexWrap:"wrap"}}>
+          <span style={code}>{siteUrl}</span>
+          <Button variant="ghost" size="sm" onClick={()=>{ try{ navigator.clipboard.writeText(siteUrl); dispatch({type:"ADD_TOAST", message:"Link copied"}); }catch(e){} }}>Copy link</Button>
+        </div>
+      </div>}
+      {!accessOn && <details style={{marginTop:16, fontSize:12.5, color:"var(--ink-soft)", lineHeight:1.7}}>
+        <summary style={{cursor:"pointer", fontWeight:600, color:"var(--ink)"}}>How to switch sign-in on (one time, ~10 minutes)</summary>
+        <ol style={{margin:"8px 0 0", paddingLeft:20}}>
+          <li>Make sure every active person above has their email filled in (admin@sanjugo.co.uk can always get in).</li>
+          <li>Cloudflare dashboard → <strong>Zero Trust</strong> (choose the Free plan if asked) → <strong>Access → Applications → Add an application → Self-hosted</strong>.</li>
+          <li>Application domain: <span style={code}>{window.location.host}</span>. Session duration: 1 month.</li>
+          <li>Policy: action <strong>Allow</strong>, include <strong>Everyone</strong>; login method <strong>One-time PIN</strong>. (ContentFlow's own team list decides who's really let in — so you never touch Cloudflare again to add people.)</li>
+          <li>Save, then copy the application's <strong>Audience (AUD) tag</strong> and your team domain (<span style={code}>yourteam.cloudflareaccess.com</span>) and send them to whoever maintains ContentFlow to switch it on.</li>
+        </ol>
+      </details>}
+      <style>{`@media (max-width:760px){ .cf-team-row, .cf-team-add{ grid-template-columns:1fr 1fr !important; } }`}</style>
+    </div>
+  );
+}
+
 /* ============================== CAMPAIGNS ============================== */
 /* Dropdown with "No campaign" plus a quick "+ New" so creators never have to leave the form. */
 function CampaignPicker({value, brand, onChange}){
@@ -3570,11 +3688,11 @@ function CreateContentPage(){
                 </div>
                 <div>
                   <label style={{fontSize:12.5, fontWeight:700, display:"block", marginBottom:6}}>Assigned creator</label>
-                  <Select value={form.creator} onChange={v=>set({creator:v})} options={USERS.map(u=>({value:u.id,label:u.name}))}/>
+                  <Select value={form.creator} onChange={v=>set({creator:v})} options={activeUsers().map(u=>({value:u.id,label:u.name}))}/>
                 </div>
                 <div>
                   <label style={{fontSize:12.5, fontWeight:700, display:"block", marginBottom:6}}>Assigned approver</label>
-                  <Select value={form.approver} onChange={v=>set({approver:v})} options={USERS.filter(u=>u.role==="approver"||u.role==="admin").map(u=>({value:u.id,label:u.name}))}/>
+                  <Select value={form.approver} onChange={v=>set({approver:v})} options={activeUsers().filter(u=>u.role==="approver"||u.role==="admin").map(u=>({value:u.id,label:u.name}))}/>
                 </div>
               </div>
               <TextField label="Internal notes" value={form.notes} onChange={v=>set({notes:v})} placeholder="Anything the approver should know…" textarea/>
@@ -4401,7 +4519,7 @@ function writeSeen(userId, id){ try{ localStorage.setItem("contentflow_chat_seen
 function readLocalChat(){ try{ return JSON.parse(localStorage.getItem(CHAT_LOCAL_KEY)||"[]"); }catch(e){ return []; } }
 const EVERYONE_RE = /(^|\s)@(everyone|all|team)\b/i;
 function findMentions(text){
-  if(EVERYONE_RE.test(text)) return USERS.map(u=>u.id);
+  if(EVERYONE_RE.test(text)) return activeUsers().map(u=>u.id);
   const t = text.toLowerCase();
   return USERS.filter(u=> t.includes("@"+u.name.toLowerCase())).map(u=>u.id);
 }
@@ -4491,10 +4609,10 @@ function useChat(currentUserId, dispatch){
 }
 
 function escapeRe(s){ return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
-const MENTION_RE = new RegExp("(@(?:"+[...USERS.map(u=>u.name)].sort((a,b)=>b.length-a.length).map(escapeRe).join("|")+"|everyone|all|team)\\b)", "i");
+const mentionRe = () => new RegExp("(@(?:"+[...USERS.map(u=>u.name)].sort((a,b)=>b.length-a.length).map(escapeRe).join("|")+"|everyone|all|team)\\b)", "i");
 function ChatText({text, me}){
   const meName = (USERS.find(u=>u.id===me)||{}).name||"";
-  return text.split(MENTION_RE).map((part,i)=>{
+  return text.split(mentionRe()).map((part,i)=>{
     if(i%2===0) return <React.Fragment key={i}>{part}</React.Fragment>;
     const isMe = part.toLowerCase()==="@"+meName.toLowerCase() || /^@(everyone|all|team)$/i.test(part);
     return <span key={i} style={{fontWeight:600, color: isMe? "var(--accent-dark)" : "var(--blue)", background: isMe? "var(--accent-soft)" : "var(--blue-soft)", borderRadius:4, padding:"0 3px"}}>{part}</span>;
@@ -4531,7 +4649,7 @@ function ChatPage(){
     el.scrollTop = el.scrollHeight;
   }, [shown.length, onlyMentions]);
 
-  const candidates = mention ? [...USERS.filter(u=>u.id!==me).map(u=>({key:u.id, label:u.name, sub:ROLE_META[u.role].label, user:u})), {key:"everyone", label:"everyone", sub:"Notify the whole team"}]
+  const candidates = mention ? [...activeUsers().filter(u=>u.id!==me).map(u=>({key:u.id, label:u.name, sub:ROLE_META[u.role].label, user:u})), {key:"everyone", label:"everyone", sub:"Notify the whole team"}]
       .filter(c=>c.label.toLowerCase().startsWith(mention.query.toLowerCase())) : [];
 
   function onChange(e){
@@ -4572,7 +4690,7 @@ function ChatPage(){
     <div>
       <PageHeader title="Team Chat" subtitle={narrow? "Type @ to mention someone." : "Keep each other posted — type @ to mention someone."} action={narrow ? null :
         <div style={{display:"flex", alignItems:"center", gap:8}}>
-          <div style={{display:"flex"}}>{USERS.map((u,i)=><span key={u.id} title={u.name} style={{marginLeft:i?-8:0, borderRadius:99, boxShadow:"0 0 0 2px var(--surface)"}}><Avatar user={u} size={28}/></span>)}</div>
+          <div style={{display:"flex"}}>{activeUsers().map((u,i)=><span key={u.id} title={u.name} style={{marginLeft:i?-8:0, borderRadius:99, boxShadow:"0 0 0 2px var(--surface)"}}><Avatar user={u} size={28}/></span>)}</div>
         </div>
       }/>
       <Card style={{padding:0, display:"flex", flexDirection:"column", height: narrow? "calc(100dvh - 200px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px))" : "calc(100dvh - 190px)", minHeight:380, overflow:"hidden"}}>
@@ -4673,7 +4791,7 @@ function TeamPage(){
             {["User","Role","Assigned brands","Content created","Pending tasks","Approval turnaround"].map(h=><th key={h} style={{padding:"10px 12px", fontSize:11.5, color:"var(--ink-mute)", fontWeight:700, textTransform:"uppercase"}}>{h}</th>)}
           </tr></thead>
           <tbody>
-            {USERS.map(u=>{
+            {activeUsers().map(u=>{
               const created = state.contentItems.filter(i=>i.creator===u.id).length;
               const pending = state.contentItems.filter(i=>(i.creator===u.id||i.approver===u.id) && ["submitted","changes_requested"].includes(i.status)).length;
               const turnaround = (u.role==="approver"||u.role==="admin")? (1.2 + (u.id.length%3)*0.6).toFixed(1)+"h" : "—";
@@ -4815,11 +4933,8 @@ function SettingsPage(){
         <TemplateEditor template={state.calendarTemplate} onChange={t=>saveConfig({calendarTemplate:t})}/>
       </Card>
 
-      <SectionTitle>Admin access <span style={{fontWeight:500, color:"var(--ink-mute)", fontSize:12}}>(who can manage this page)</span></SectionTitle>
-      <Card style={{padding:18, marginBottom:6}}>
-        <div style={{fontSize:12.5, color:"var(--ink-mute)", marginBottom:14, lineHeight:1.5}}>The emails below get full edit rights on Settings whenever they're signed in and viewing this dashboard, on top of the demo role switcher above. Sharing and who can open this dashboard at all is controlled from claude.ai's own Share menu on this artifact — add teammates there first, then list the ones who should manage settings here.</div>
-        <AdminEmailEditor emails={state.adminEmails} onChange={e=>saveConfig({adminEmails:e})} viewerEmail={caps.viewerEmail}/>
-      </Card>
+      <SectionTitle>Team &amp; access <span style={{fontWeight:500, color:"var(--ink-mute)", fontSize:12}}>(who can open ContentFlow)</span></SectionTitle>
+      <Card style={{padding:18, marginBottom:6}}><TeamAccessSettings/></Card>
     </div>
   );
 }
@@ -4891,6 +5006,23 @@ function App(){
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const caps = useCaps();
   const chat = useChat(state.currentUserId, dispatch);
+
+  // Who's signed in (when Cloudflare Access sign-in is on) and the live team list.
+  useEffect(()=>{
+    let cancelled = false;
+    (async ()=>{
+      try{
+        const r = await fetch("/api/me", {cache:"no-store"});
+        const d = await r.json().catch(()=>({}));
+        if(cancelled) return;
+        if(r.status===401 || r.status===403) { dispatch({type:"SET_ME", me:null, lock:{code:d.code, message:d.error}}); return; }
+        if(r.ok) dispatch({type:"SET_ME", me:d});
+        const t = await fetch("/api/team", {cache:"no-store"});
+        if(t.ok && !cancelled){ const td = await t.json(); if(Array.isArray(td.members) && td.members.length) dispatch({type:"TEAM_LOADED", members:td.members}); }
+      }catch(e){ /* offline or no server: keep the built-in team */ }
+    })();
+    return ()=>{ cancelled = true; };
+  }, []);
 
   // Deep links from outside the app (e.g. the Drive content library page): #/library?q=G219, #/create?barcode=G219
   useEffect(()=>{
@@ -4973,6 +5105,8 @@ function App(){
   };
   const titles = {dashboard:"Dashboard", calendar:"Calendar", queue:"Approval Queue", create:"Create Content", published:"Published", analytics:"Analytics", team:"Team", settings:"Settings", chat:"Team Chat", library:"Content Library"};
 
+  if(state.lock) return <LockScreen lock={state.lock}/>;
+
   return (
     <AppCtx.Provider value={ctx}>
       <div style={{display:"flex", height:"100%", minHeight:"100vh"}}>
@@ -4989,6 +5123,23 @@ function App(){
       <ToastHost toasts={state.toasts} remove={id=>dispatch({type:"REMOVE_TOAST", id})}/>
       <style>{`@media (max-width:600px){ .cf-main{ padding:18px 16px 50px !important; } }`}</style>
     </AppCtx.Provider>
+  );
+}
+
+function LockScreen({lock}){
+  const signedOut = lock.code==="signed_out";
+  return (
+    <div style={{minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center", padding:24, background:"var(--bg)"}}>
+      <div style={{maxWidth:420, width:"100%", background:"var(--surface)", border:"1px solid var(--border)", borderRadius:12, padding:28, textAlign:"center", boxShadow:"var(--shadow-md)"}}>
+        <img src={LOGO_SANJUGO} alt="Sanjugo" style={{width:48, height:48, borderRadius:99, marginBottom:14}}/>
+        <div style={{fontSize:18, fontWeight:600, marginBottom:8}}>{signedOut ? "Please sign in again" : "You don't have access yet"}</div>
+        <div style={{fontSize:13.5, color:"var(--ink-soft)", lineHeight:1.6, marginBottom:20}}>{lock.message || "Ask a ContentFlow admin to add your email in Settings → Team & access."}</div>
+        <div style={{display:"flex", gap:8, justifyContent:"center", flexWrap:"wrap"}}>
+          <Button variant="primary" onClick={()=>window.location.reload()}>Try again</Button>
+          <a href="/cdn-cgi/access/logout" style={{textDecoration:"none"}}><Button variant="ghost">Use a different email</Button></a>
+        </div>
+      </div>
+    </div>
   );
 }
 

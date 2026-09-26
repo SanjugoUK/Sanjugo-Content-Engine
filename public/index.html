@@ -55,6 +55,16 @@
   :focus-visible{outline:2px solid var(--accent); outline-offset:2px; border-radius:4px;}
   @media (prefers-reduced-motion: reduce){ *{animation-duration:.001ms !important; transition-duration:.001ms !important;} }
   #cf-root{min-height:100%;}
+  /* Mobile usability pass: iOS Safari zooms the whole page in when a focused form field is under
+     16px, which feels broken on every tap — force real form fields to 16px on phone-sized screens. */
+  @media (max-width:640px){
+    input, select, textarea { font-size:16px !important; }
+    .cf-field-grid { grid-template-columns:1fr !important; }
+  }
+  /* Bigger, easier-to-hit tap targets on touch screens (buttons, nav items, checkboxes). */
+  @media (pointer:coarse){
+    button, [role="button"] { min-height:40px; }
+  }
   @keyframes cf-shimmer{0%{background-position:100% 0;}100%{background-position:-100% 0;}}
   @keyframes cf-toast-in{from{opacity:0; transform:translateY(8px);} to{opacity:1; transform:translateY(0);}}
   @keyframes cf-card-in{from{opacity:0; transform:translateY(10px) scale(.98);} to{opacity:1; transform:translateY(0) scale(1);}}
@@ -1145,7 +1155,7 @@ function ContentDetailDrawer({item, onClose}){
                 <Icon name="upload" size={13}/>Open original in a new tab
               </a>
             )}
-            <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:12}}>
+            <div className="cf-field-grid" style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:12}}>
               <InfoField label="Creator" value={creator.name}/>
               <InfoField label="Approver" value={approver.name}/>
               <InfoField label="Content pillar" value={item.pillar}/>
@@ -1208,7 +1218,7 @@ function ContentDetailDrawer({item, onClose}){
                 {v.feedback && <div style={{fontSize:12.5, background:"var(--surface-2)", borderRadius:8, padding:"8px 10px", fontStyle:"italic"}}>"{v.feedback}"</div>}
                 {item.versions.length>1 && <button onClick={()=>setCompareVersion(compareVersion===v.version?null:v.version)} style={{marginTop:8, background:"none", border:"none", color:"var(--accent)", fontWeight:700, fontSize:12, cursor:"pointer", padding:0}}>{compareVersion===v.version? "Hide comparison":"Compare with current"}</button>}
                 {compareVersion===v.version && (
-                  <div style={{marginTop:8, display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, fontSize:11.5}}>
+                  <div className="cf-field-grid" style={{marginTop:8, display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, fontSize:11.5}}>
                     <div style={{background:"var(--surface-2)", borderRadius:8, padding:8}}><div style={{fontWeight:700, marginBottom:4}}>v{v.version}</div>{v.changes}</div>
                     <div style={{background:"var(--accent-soft)", borderRadius:8, padding:8}}><div style={{fontWeight:700, marginBottom:4}}>v{item.currentVersion} (current)</div>{item.versions[item.versions.length-1].changes}</div>
                   </div>
@@ -2175,7 +2185,7 @@ function CreateContentPage(){
           {step===0 && (
             <div>
               <TextField label="Content title" value={form.title} onChange={v=>set({title:v})} placeholder="e.g. Autumn Roast — Hero Reel"/>
-              <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:14}}>
+              <div className="cf-field-grid" style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:14}}>
                 <div>
                   <label style={{fontSize:12.5, fontWeight:700, display:"block", marginBottom:6}}>Brand</label>
                   <Select value={form.brand} onChange={v=>set({brand:v})} options={BRANDS.map(b=>({value:b.id,label:b.name}))}/>
@@ -2242,7 +2252,7 @@ function CreateContentPage(){
                   </div>
                 </div>
               )}
-              <div style={{display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:14}}>
+              <div className="cf-field-grid" style={{display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:14}}>
                 <div>
                   <label style={{fontSize:12.5, fontWeight:700, display:"block", marginBottom:6}}>Media type</label>
                   <Select value={form.mediaType} onChange={v=>set({mediaType:v})} options={[{value:"video",label:"Video"},{value:"image",label:"Image"}]}/>
@@ -2283,7 +2293,7 @@ function CreateContentPage(){
                     {(p==="instagram"||p==="facebook") && <>
                       <TextField label="Caption" value={v.caption||""} onChange={val=>setVariant(p,{caption:val})} textarea placeholder="Write a caption…"/>
                       <TextField label="Hashtags" value={v.hashtagsText||""} onChange={val=>setVariant(p,{hashtagsText:val})} placeholder="#brand #campaign"/>
-                      <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:14}}>
+                      <div className="cf-field-grid" style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:14}}>
                         <TextField label="Location tag" value={v.location||""} onChange={val=>setVariant(p,{location:val})} placeholder="Optional"/>
                         <TextField label="First comment" value={v.firstComment||""} onChange={val=>setVariant(p,{firstComment:val})} placeholder="Optional"/>
                       </div>
@@ -2300,14 +2310,14 @@ function CreateContentPage(){
                     {p==="youtube" && <>
                       <TextField label="Title" value={v.title||""} onChange={val=>setVariant(p,{title:val})} placeholder="Video title"/>
                       <TextField label="Description" value={v.description||""} onChange={val=>setVariant(p,{description:val})} textarea placeholder="Video description"/>
-                      <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:14}}>
+                      <div className="cf-field-grid" style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:14}}>
                         <div><label style={{fontSize:12.5,fontWeight:700,display:"block",marginBottom:6}}>Visibility</label><Select value={v.visibility||"Public"} onChange={val=>setVariant(p,{visibility:val})} options={["Public","Unlisted","Private"].map(x=>({value:x,label:x}))}/></div>
                         <TextField label="Playlist" value={v.playlist||""} onChange={val=>setVariant(p,{playlist:val})} placeholder="Optional"/>
                       </div>
                     </>}
                     {p==="gbp" && <>
                       <TextField label="Post description" value={v.caption||""} onChange={val=>setVariant(p,{caption:val})} textarea placeholder="What's the update?"/>
-                      <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:14}}>
+                      <div className="cf-field-grid" style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:14}}>
                         <div><label style={{fontSize:12.5,fontWeight:700,display:"block",marginBottom:6}}>CTA type</label><Select value={v.cta||"Learn More"} onChange={val=>setVariant(p,{cta:val})} options={["Learn More","Order Online","Book","Call Now"].map(x=>({value:x,label:x}))}/></div>
                         <TextField label="CTA URL" value={v.url||""} onChange={val=>setVariant(p,{url:val})} placeholder="https://…"/>
                       </div>
@@ -2319,7 +2329,7 @@ function CreateContentPage(){
           )}
           {step===4 && (
             <div>
-              <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:14, marginBottom:6}}>
+              <div className="cf-field-grid" style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:14, marginBottom:6}}>
                 <div>
                   <label style={{fontSize:12.5, fontWeight:700, display:"block", marginBottom:6}}>Publishing date</label>
                   <input type="date" onChange={e=>{ const t=form.scheduledAt? form.scheduledAt.slice(11,16):"09:00"; set({scheduledAt: e.target.value+"T"+t+":00"}); }} style={{width:"100%", borderRadius:9, border:"1px solid var(--border)", padding:"8px 10px"}}/>

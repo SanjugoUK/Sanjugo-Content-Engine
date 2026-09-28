@@ -10,7 +10,7 @@ export default {
     if (event.cron === "30 3 * * *") {
       ctx.waitUntil(runCleanup(env, { trigger: "nightly" }).catch((e) => console.error("cleanup failed", e)));
       // Nightly stats from Make (skipped quietly if the analytics webhook isn't set up yet).
-      ctx.waitUntil(makeConfig(env).then((c) => pullPlatforms(c).length && triggerAnalyticsPull(env, { trigger: "nightly", force: true })).catch((e) => console.error("analytics pull failed", e)));
+      ctx.waitUntil(makeConfig(env).then((c) => pullPlatforms(c).length && triggerAnalyticsPull(env, { trigger: "nightly" })).catch((e) => console.error("analytics pull failed", e)));
     } else {
       ctx.waitUntil(autoPublishDue(env).catch((e) => console.error("auto-publish failed", e)));
     }
@@ -1438,15 +1438,11 @@ async function sendPublishJobs(env, { item, platforms, origin, userId, trigger }
   return results;
 }
 
-async function triggerAnalyticsPull(env, { trigger, force }) {
+async function triggerAnalyticsPull(env, { trigger }) {
   const cfg = await makeConfig(env);
   const platforms = pullPlatforms(cfg);
   if (!platforms.length) throw new HttpError(400, "Add at least one Pull webhook in Settings → Make.com first.");
   await ensureMakeTables(env);
-  const recent = await env.DB.prepare("SELECT created_at FROM make_jobs WHERE kind = 'analytics' AND status != 'failed' ORDER BY created_at DESC LIMIT 1").first();
-  if (!force && recent && Date.now() - Date.parse(recent.created_at) < 10 * 60e3) {
-    throw new HttpError(429, "Stats were requested less than 10 minutes ago — give Make a moment to finish.");
-  }
   const id = "pull_" + crypto.randomUUID().slice(0, 12);
   const token = crypto.randomUUID() + crypto.randomUUID().slice(0, 8);
   const now = new Date().toISOString();

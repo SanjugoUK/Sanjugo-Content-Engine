@@ -152,6 +152,14 @@ async function postState(request, env, ctx) {
   } catch (e) {
     return new Response(JSON.stringify({ error: "Invalid JSON" }), { status: 400 });
   }
+  // After the shared workspace is reset, a tab that loaded the old copy must not write it back: every save carries
+  // the resetId it loaded, and a mismatch is refused (the app then reloads fresh).
+  const current = await env.DB.prepare("SELECT json_extract(data, '$.resetId') AS resetId FROM app_state WHERE id = 1").first();
+  const liveReset = current && current.resetId ? String(current.resetId) : null;
+  if (liveReset && body.resetId !== liveReset) {
+    return new Response(JSON.stringify({ error: "The workspace was reset — reload to get the current posts.", code: "reset" }), { status: 409, headers: { "Content-Type": "application/json" } });
+  }
+  if (liveReset) body.resetId = liveReset;
   const json = JSON.stringify(body);
   await env.DB.prepare(
     `INSERT INTO app_state (id, data, updated_at) VALUES (1, ?1, datetime('now'))

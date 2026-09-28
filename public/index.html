@@ -166,7 +166,7 @@ function useCaps(){
 }
 
 /* ============================== MOCK DATA ============================== */
-const TODAY = new Date("2026-09-22T09:00:00");
+const TODAY = new Date(); // the real "now" when the page loads (was a fixed demo date)
 function dayOffset(n, h=9, m=0){ const d=new Date(TODAY); d.setDate(d.getDate()+n); d.setHours(h,m,0,0); return d.toISOString(); }
 function fmtDate(iso, opts){ const d=new Date(iso); return d.toLocaleDateString("en-GB", opts||{day:"numeric",month:"short",year:"numeric"}); }
 function fmtDateTime(iso){ const d=new Date(iso); return d.toLocaleDateString("en-GB",{day:"numeric",month:"short"})+" · "+d.toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit"}); }
@@ -192,6 +192,32 @@ function applyTeam(members){
   if(next.length) USERS.splice(0, USERS.length, ...next);
 }
 const activeUsers = () => USERS.filter(u=>u.active!==false);
+// A post's approver is one person's id, or ANY_APPROVER — "any approver or admin can approve it" (Cyrus or Yan Yan).
+const ANY_APPROVER = "any";
+// Average time from a post being sent for approval to this person's decision on it, from the real activity log.
+function reviewTurnaround(log, userId){
+  const sentAt = {}; const waits = [];
+  [...(log||[])].sort((a,b)=> new Date(a.at)-new Date(b.at)).forEach(a=>{
+    if(a.type==="submitted" || (a.type==="created" && /submitted/i.test(a.detail||""))) sentAt[a.contentId] = new Date(a.at).getTime();
+    else if(["approved","rejected","changes_requested"].includes(a.type) && a.user===userId && sentAt[a.contentId]){
+      waits.push(new Date(a.at).getTime() - sentAt[a.contentId]); delete sentAt[a.contentId];
+    }
+  });
+  if(!waits.length) return "—";
+  const h = waits.reduce((x,y)=>x+y,0)/waits.length/3600e3;
+  return h < 1 ? Math.max(1, Math.round(h*60))+"m" : h < 48 ? h.toFixed(1)+"h" : (h/24).toFixed(1)+"d";
+}
+const isReviewer = u => !!u && u.active!==false && (u.role==="approver" || u.role==="admin");
+const reviewers = () => activeUsers().filter(isReviewer);
+function approversOf(item){ return item && item.approver===ANY_APPROVER ? reviewers() : USERS.filter(u=>item && u.id===item.approver); }
+function approverName(item){
+  if(item && item.approver===ANY_APPROVER){ const n = reviewers().map(u=>u.name); return n.length ? n.join(" or ") : "Any approver"; }
+  const u = USERS.find(u=>item && u.id===item.approver); return u ? u.name : "—";
+}
+function approverOptions(){
+  const list = reviewers();
+  return [...(list.length>1 ? [{value:ANY_APPROVER, label:list.map(u=>u.name).join(" or ")+" (either can approve)"}] : []), ...list.map(u=>({value:u.id, label:u.name}))];
+}
 const BRANDS = [
   {id:"sanjugo", name:"Sanjugo", color:"#D9642A", logo:true, accounts:{instagram:"@sanjugo", facebook:"Sanjugo", tiktok:"@sanjugo", youtube:"Sanjugo", gbp:"Sanjugo — Shoreditch, Angel, Victoria"}},
 ];
@@ -320,222 +346,11 @@ function makeVariant(platform, over){
   return Object.assign(base, over);
 }
 
-const RAW_ITEMS = [
-  {id:"ct_01", title:"Autumn Roast — Hero Reel", brand:"lumen", campaign:"c_autumn", pillar:"Product", creator:"u_ava", approver:"u_jordan",
-   priority:"high", notes:"Tie to in-store sampling starting Monday.", status:"submitted", createdOffset:-3, platforms:["instagram","tiktok","facebook"], currentVersion:2,
-   media:{type:"video", duration:24, aspectRatio:"9:16"}, due: dayOffset(1),
-   variants:{
-     instagram: makeVariant("instagram",{status:"submitted", caption:"Our Autumn Roast is back ☕🍂 Notes of maple and toasted hazelnut — in stores now.", hashtags:["#AutumnRoast","#LumenCoffee","#CoffeeLovers"], scheduledAt:dayOffset(2,8,30)}),
-     tiktok: makeVariant("tiktok",{status:"submitted", caption:"the way this smells when it hits the grinder 🍂☕", hashtags:["#coffeetok","#fallvibes"], scheduledAt:dayOffset(2,9,0), duetEnabled:true, stitchEnabled:false, commentsEnabled:true, privacy:"Public"}),
-     facebook: makeVariant("facebook",{status:"submitted", caption:"Our Autumn Roast is back — maple, toasted hazelnut, and everything cozy. Find it in all four locations now.", scheduledAt:dayOffset(2,8,30)}),
-   }},
-  {id:"ct_02", title:"Loyalty App — Swipe Carousel", brand:"lumen", campaign:"c_loyalty", pillar:"Promotion", creator:"u_ava", approver:"u_jordan",
-   priority:"normal", notes:"", status:"changes_requested", createdOffset:-6, platforms:["instagram","gbp"], currentVersion:1, due: dayOffset(-1),
-   media:{type:"image", duration:null, aspectRatio:"4:5"},
-   variants:{
-     instagram: makeVariant("instagram",{status:"changes_requested", caption:"Every 9th coffee is on us. Download the Lumen app and start stacking stamps today.", hashtags:["#LumenRewards"], scheduledAt:null}),
-     gbp: makeVariant("gbp",{status:"changes_requested", cta:"Learn More", url:"https://lumencoffee.example/app", caption:"Every 9th coffee is on us with the Lumen Rewards app."}),
-   },
-   lastFeedback:{by:"u_jordan", at: dayOffset(-1), tags:["Change caption","Brand issue"], text:"Caption reads a bit flat — bring back the warm/playful tone from the June batch. Also the app icon in the graphic is the old logo."}},
-  {id:"ct_03", title:"Behind the Roastery — Founder Story", brand:"lumen", campaign:"c_autumn", pillar:"Behind the Scenes", creator:"u_ava", approver:"u_jordan",
-   priority:"low", notes:"Long-form, good for YouTube.", status:"draft", createdOffset:-1, platforms:["youtube","instagram"], currentVersion:1, due: dayOffset(4),
-   media:{type:"video", duration:118, aspectRatio:"9:16"},
-   variants:{
-     youtube: makeVariant("youtube",{status:"draft", title:"Why we roast small batch", description:"A look inside the Lumen roastery with founder Elin Marsh.", visibility:"Public", audience:"Not for kids"}),
-     instagram: makeVariant("instagram",{status:"draft", caption:"", hashtags:[]}),
-   }},
-  {id:"ct_04", title:"New Year Reset — Trainer Intro", brand:"verve", campaign:"c_newyear", pillar:"UGC", creator:"u_ava", approver:"u_jordan",
-   priority:"urgent", notes:"Needs legal review — testimonial claims.", status:"submitted", createdOffset:-2, platforms:["instagram","tiktok","youtube"], currentVersion:3, due: dayOffset(0),
-   media:{type:"video", duration:31, aspectRatio:"9:16"},
-   variants:{
-     instagram: makeVariant("instagram",{status:"submitted", caption:"Meet Coach Reme — 6am energy, every single day. New Year classes open now.", hashtags:["#VerveFit","#NewYearNewYou"], scheduledAt:dayOffset(1,7,0)}),
-     tiktok: makeVariant("tiktok",{status:"submitted", caption:"POV: your 6am coach actually shows up hyped", hashtags:["#gymtok","#fitness"], scheduledAt:dayOffset(1,7,0), duetEnabled:false, stitchEnabled:false, commentsEnabled:true, privacy:"Public"}),
-     youtube: makeVariant("youtube",{status:"submitted", title:"Meet Coach Reme", description:"New Year classes are open — meet your 6am coach.", visibility:"Public"}),
-   }},
-  {id:"ct_05", title:"Class Spotlight — HIIT Circuit", brand:"verve", campaign:"c_classes", pillar:"Product", creator:"u_marcus", approver:"u_jordan",
-   priority:"normal", notes:"", status:"approved", createdOffset:-5, platforms:["instagram","facebook"], currentVersion:1, due: dayOffset(-2),
-   media:{type:"video", duration:19, aspectRatio:"9:16"},
-   variants:{
-     instagram: makeVariant("instagram",{status:"approved", caption:"45 minutes, zero equipment excuses. HIIT Circuit runs Tue/Thu at 6pm.", hashtags:["#HIITWorkout","#VerveFit"], scheduledAt:dayOffset(2,18,0)}),
-     facebook: makeVariant("facebook",{status:"approved", caption:"45 minutes, zero excuses. HIIT Circuit — Tuesdays & Thursdays, 6pm.", scheduledAt:dayOffset(2,18,0)}),
-   }},
-  {id:"ct_06", title:"Member Transformation — Priya S.", brand:"verve", campaign:"c_newyear", pillar:"UGC", creator:"u_marcus", approver:"u_jordan",
-   priority:"high", notes:"", status:"rejected", createdOffset:-4, platforms:["instagram"], currentVersion:2, due: dayOffset(-3),
-   media:{type:"image", duration:null, aspectRatio:"4:5"},
-   variants:{ instagram: makeVariant("instagram",{status:"rejected", caption:"From couch to 10k — Priya's 6 month journey with Verve.", hashtags:["#transformation"]}) },
-   lastFeedback:{by:"u_jordan", at: dayOffset(-3), tags:["Legal review needed","Brand issue"], text:"We don't have a signed release for before/after photos from this member yet. Hold until legal confirms, then resubmit."}},
-  {id:"ct_07", title:"Wedding Season — Bridal Bouquet Reel", brand:"petal", campaign:"c_wedding", pillar:"Seasonal", creator:"u_marcus", approver:"u_sam",
-   priority:"high", notes:"Book early promo — mention 10% deposit discount.", status:"scheduled", createdOffset:-7, platforms:["instagram","tiktok","facebook"], currentVersion:1, due: dayOffset(-4),
-   media:{type:"video", duration:15, aspectRatio:"9:16"},
-   variants:{
-     instagram: makeVariant("instagram",{status:"approved", publishStatus:"scheduled", caption:"Booking 2027 weddings now — reserve with just 10% deposit through October.", hashtags:["#WeddingFlowers","#PetalAndCo"], scheduledAt:dayOffset(3,10,0)}),
-     tiktok: makeVariant("tiktok",{status:"approved", publishStatus:"scheduled", caption:"the bouquet build of dreams 💐", hashtags:["#weddingtok","#florist"], scheduledAt:dayOffset(3,10,0), duetEnabled:true, stitchEnabled:true, commentsEnabled:true, privacy:"Public"}),
-     facebook: makeVariant("facebook",{status:"approved", publishStatus:"scheduled", caption:"Booking 2027 weddings now — reserve with a 10% deposit through October.", scheduledAt:dayOffset(3,10,0)}),
-   }},
-  {id:"ct_08", title:"Everyday Blooms — Friday Delivery", brand:"petal", campaign:"c_everyday", pillar:"Product", creator:"u_marcus", approver:"u_sam",
-   priority:"normal", notes:"", status:"scheduled", createdOffset:-2, platforms:["instagram","gbp"], currentVersion:1, due: dayOffset(0),
-   media:{type:"image", duration:null, aspectRatio:"1:1"},
-   variants:{
-     instagram: makeVariant("instagram",{status:"approved", publishStatus:"scheduled", caption:"Friday flowers, delivered by noon. Order by 9am for same-day.", hashtags:["#FridayFlowers"], scheduledAt:dayOffset(1,9,0)}),
-     gbp: makeVariant("gbp",{status:"approved", publishStatus:"scheduled", cta:"Order Online", url:"https://petalandco.example/order", caption:"Friday flowers, delivered by noon.", scheduledAt:dayOffset(1,9,0)}),
-   }},
-  {id:"ct_09", title:"Autumn Roast — Barista Tips", brand:"lumen", campaign:"c_autumn", pillar:"Education", creator:"u_ava", approver:"u_jordan",
-   priority:"normal", notes:"", status:"publishing", createdOffset:-8, platforms:["tiktok","youtube"], currentVersion:1, due: dayOffset(-1),
-   media:{type:"video", duration:41, aspectRatio:"9:16"},
-   variants:{
-     tiktok: makeVariant("tiktok",{status:"approved", publishStatus:"publishing", caption:"pour-over ratio that fixes bitter coffee, every time", hashtags:["#coffeetips"], scheduledAt:dayOffset(0,9,0), duetEnabled:true, stitchEnabled:true, commentsEnabled:true, privacy:"Public"}),
-     youtube: makeVariant("youtube",{status:"approved", publishStatus:"publishing", title:"Fix bitter pour-over coffee in 30 seconds", description:"The ratio our head barista swears by.", visibility:"Public", scheduledAt:dayOffset(0,9,0)}),
-   }},
-  {id:"ct_10", title:"Studio Tour — New Verve Location", brand:"verve", campaign:"c_classes", pillar:"Behind the Scenes", creator:"u_marcus", approver:"u_jordan",
-   priority:"low", notes:"", status:"published", createdOffset:-10, platforms:["instagram","facebook","youtube"], currentVersion:1, due: dayOffset(-6),
-   media:{type:"video", duration:52, aspectRatio:"9:16"},
-   variants:{
-     instagram: makeVariant("instagram",{status:"approved", publishStatus:"published", caption:"Our third studio just opened on Kingsway — come say hi.", hashtags:["#VerveFit","#NewStudio"], scheduledAt:dayOffset(-6,8,0), postUrl:"https://instagram.example/p/verve-tour"}),
-     facebook: makeVariant("facebook",{status:"approved", publishStatus:"published", caption:"Our third studio just opened on Kingsway — come say hi.", scheduledAt:dayOffset(-6,8,0), postUrl:"https://facebook.example/verve/posts/tour"}),
-     youtube: makeVariant("youtube",{status:"approved", publishStatus:"published", title:"Inside our new Kingsway studio", description:"A first look at Verve's newest location.", visibility:"Public", scheduledAt:dayOffset(-6,8,0), postUrl:"https://youtube.example/shorts/verve-tour"}),
-   }},
-  {id:"ct_11", title:"Petal Workshop — Autumn Wreaths", brand:"petal", campaign:"c_everyday", pillar:"Promotion", creator:"u_marcus", approver:"u_sam",
-   priority:"normal", notes:"", status:"published", createdOffset:-14, platforms:["instagram","tiktok"], currentVersion:1, due: dayOffset(-10),
-   media:{type:"video", duration:28, aspectRatio:"9:16"},
-   variants:{
-     instagram: makeVariant("instagram",{status:"approved", publishStatus:"published", caption:"Spots just opened for our Autumn Wreath workshop — Oct 4th.", hashtags:["#PetalWorkshop"], scheduledAt:dayOffset(-10,11,0), postUrl:"https://instagram.example/p/petal-workshop"}),
-     tiktok: makeVariant("tiktok",{status:"approved", publishStatus:"published", caption:"making a wreath in 30 seconds 🍂", hashtags:["#diyflowers"], scheduledAt:dayOffset(-10,11,0), duetEnabled:true, stitchEnabled:true, commentsEnabled:true, privacy:"Public", postUrl:"https://tiktok.example/@petalandco/video/wreath"}),
-   }},
-  {id:"ct_12", title:"Lumen x Local Market Pop-up", brand:"lumen", campaign:"c_autumn", pillar:"Promotion", creator:"u_ava", approver:"u_jordan",
-   priority:"normal", notes:"", status:"failed", createdOffset:-3, platforms:["facebook","gbp"], currentVersion:1, due: dayOffset(-1),
-   media:{type:"image", duration:null, aspectRatio:"1:1"},
-   variants:{
-     facebook: makeVariant("facebook",{status:"approved", publishStatus:"failed", caption:"Find us at the Riverside Market this Saturday, 9–2.", scheduledAt:dayOffset(-1,9,0), errorMessage:"Account token expired — reconnect the Facebook page in Settings."}),
-     gbp: makeVariant("gbp",{status:"approved", publishStatus:"failed", cta:"Learn More", url:"https://lumencoffee.example/market", caption:"Find us at the Riverside Market this Saturday.", scheduledAt:dayOffset(-1,9,0), errorMessage:"Image aspect ratio rejected by Google Business Profile (must be 4:3 or 1:1)."}),
-   }},
-  {id:"ct_13", title:"Petal — Same Day Delivery Reminder", brand:"petal", campaign:"c_everyday", pillar:"Promotion", creator:"u_marcus", approver:"u_sam",
-   priority:"low", notes:"", status:"draft", createdOffset:0, platforms:["instagram"], currentVersion:1, due: dayOffset(6),
-   media:{type:"image", duration:null, aspectRatio:"1:1"},
-   variants:{ instagram: makeVariant("instagram",{status:"draft", caption:"", hashtags:[]}) }},
-  {id:"ct_14", title:"Verve — Nutrition Q&A Recap", brand:"verve", campaign:"c_newyear", pillar:"Education", creator:"u_ava", approver:"u_jordan",
-   priority:"normal", notes:"Trim to under 60s for TikTok.", status:"submitted", createdOffset:-1, platforms:["tiktok","instagram"], currentVersion:1, due: dayOffset(2),
-   media:{type:"video", duration:74, aspectRatio:"9:16"},
-   variants:{
-     tiktok: makeVariant("tiktok",{status:"submitted", caption:"your top 5 nutrition questions, answered", hashtags:["#nutritiontips"], scheduledAt:dayOffset(3,17,0), duetEnabled:false, stitchEnabled:false, commentsEnabled:true, privacy:"Public"}),
-     instagram: makeVariant("instagram",{status:"submitted", caption:"We opened the floor for questions — here are our top 5 answers.", hashtags:["#VerveFit"], scheduledAt:dayOffset(3,17,0)}),
-   }},
-  {id:"ct_15", title:"Lumen — Decaf Myth-busting", brand:"lumen", campaign:"c_autumn", pillar:"Education", creator:"u_ava", approver:"u_jordan",
-   priority:"low", notes:"", status:"changes_requested", createdOffset:-9, platforms:["instagram","tiktok"], currentVersion:2, due: dayOffset(-5),
-   media:{type:"video", duration:22, aspectRatio:"9:16"},
-   variants:{
-     instagram: makeVariant("instagram",{status:"changes_requested", caption:"Decaf still has caffeine? Let's clear that up.", hashtags:["#CoffeeFacts"]}),
-     tiktok: makeVariant("tiktok",{status:"changes_requested", caption:"decaf myths, busted", hashtags:["#coffeefacts"], duetEnabled:true, stitchEnabled:false, commentsEnabled:true, privacy:"Public"}),
-   },
-   lastFeedback:{by:"u_jordan", at: dayOffset(-5), tags:["Incorrect format","Change publishing time"], text:"TikTok export is 4:5, needs to be 9:16 — please re-export. Also let's push this to Wednesday so it doesn't clash with the roast launch post."}},
-  {id:"ct_16", title:"Overhead Dishes — Reel Cut 3", brand:"sanjugo", campaign:"c_augshoot", pillar:"Product", creator:"u_aidev", approver:"u_cyrus",
-   priority:"normal", notes:"Source: Google Drive · August Shoot 2026 · 20260820_AL_FC_FIN_v3_G738.mp4. Third export of this REEL — the v2 cut already ran as a published Story; this is a fresh, not-yet-published re-edit.", status:"submitted", createdOffset:-2, platforms:["instagram","tiktok"], currentVersion:1, due: dayOffset(3),
-   media:{type:"video", duration:16, aspectRatio:"9:16"}, driveSource:"G738.mp4",
-   variants:{
-     instagram: makeVariant("instagram",{status:"submitted", caption:"Top-down and unbothered. 🍣", hashtags:["#Sanjugo","#SushiLondon","#OverheadShot"], scheduledAt:dayOffset(3,12,0)}),
-     tiktok: makeVariant("tiktok",{status:"submitted", caption:"the whole spread, from above", hashtags:["#sushitok","#foodreel"], scheduledAt:dayOffset(3,12,0), duetEnabled:true, stitchEnabled:false, commentsEnabled:true, privacy:"Public"}),
-   }},
-  {id:"ct_17", title:"Red Dragon Roll — Hands-On Cut", brand:"sanjugo", campaign:"c_augshoot", pillar:"Product", creator:"u_aidev", approver:"u_cyrus",
-   priority:"low", notes:"Source: Google Drive · August Shoot 2026 · 20260817_AL_FC_USD_v2_G727.mp4. Previously published cut — repurposing for TikTok, where it hasn't run before.", status:"submitted", createdOffset:-4, platforms:["tiktok"], currentVersion:1, due: dayOffset(6),
-   media:{type:"video", duration:21, aspectRatio:"9:16"}, driveSource:"G727.mp4",
-   variants:{
-     tiktok: makeVariant("tiktok",{status:"submitted", caption:"Red Dragon Roll, rolled to order 🐉", hashtags:["#Sanjugo","#RedDragonRoll","#MakiRoll"], scheduledAt:dayOffset(6,18,0), duetEnabled:false, stitchEnabled:true, commentsEnabled:true, privacy:"Public"}),
-   }},
-  {id:"ct_18", title:"Salmon Nigiri Close-Up", brand:"sanjugo", campaign:"c_augshoot", pillar:"Product", creator:"u_aidev", approver:"u_cyrus",
-   priority:"normal", notes:"Source: Google Drive · August Shoot 2026.", status:"published", createdOffset:-12, platforms:["instagram","facebook"], currentVersion:1, due: dayOffset(-9),
-   media:{type:"image", duration:null, aspectRatio:"1:1"},
-   variants:{
-     instagram: makeVariant("instagram",{status:"approved", publishStatus:"published", caption:"Fresh salmon, hand-pressed, every order. 🍣", hashtags:["#Sanjugo","#SushiLondon","#Nigiri"], scheduledAt:dayOffset(-9,12,0), postUrl:"https://instagram.example/p/sanjugo-nigiri"}),
-     facebook: makeVariant("facebook",{status:"approved", publishStatus:"published", caption:"Fresh salmon, hand-pressed, every order.", scheduledAt:dayOffset(-9,12,0), postUrl:"https://facebook.example/sanjugo/posts/nigiri"}),
-   }},
-  {id:"ct_19", title:"Weekend Set Menu Reel", brand:"sanjugo", campaign:"c_evergreen", pillar:"Promotion", creator:"u_aidev", approver:"u_cyrus",
-   priority:"normal", notes:"", status:"approved", createdOffset:-1, platforms:["instagram"], currentVersion:1, due: dayOffset(0),
-   media:{type:"video", duration:18, aspectRatio:"9:16"},
-   variants:{
-     instagram: makeVariant("instagram",{status:"approved", caption:"Weekend set menu — 3 courses, one great deal.", hashtags:["#Sanjugo","#SushiLondon","#WeekendSet"], scheduledAt:null}),
-   }},
-];
-
-function buildContentItems(){
-  return RAW_ITEMS.filter(r=>r.brand==="sanjugo").map(r=>{
-    const createdAt = dayOffset(r.createdOffset);
-    const versions = [];
-    for(let v=1; v<=r.currentVersion; v++){
-      versions.push({
-        version:v, editor: v===r.currentVersion? USERS.find(u=>u.id===r.creator).name : USERS.find(u=>u.id===r.creator).name,
-        date: dayOffset(r.createdOffset + (v-1)*1.5),
-        changes: v===1? "Initial draft created." : (r.lastFeedback && v===r.currentVersion ? "Revised per manager feedback: "+r.lastFeedback.tags.join(", ")+"." : "Copy and asset refresh."),
-        decision: v===r.currentVersion && r.lastFeedback ? "Changes Requested" : (v<r.currentVersion? "Superseded":"—"),
-        feedback: v===r.currentVersion && r.lastFeedback ? r.lastFeedback.text : null,
-      });
-    }
-    return {...r, createdAt, versions, gradient: grad(r.id)};
-  });
-}
-
-function buildActivity(items){
-  const log = [];
-  items.forEach(it=>{
-    log.push({id:uid("act"), at:it.createdAt, type:"created", contentId:it.id, contentTitle:it.title, user:it.creator, detail:"Content created"});
-    if(["submitted","changes_requested","rejected","approved","scheduled","publishing","published","failed"].includes(it.status) || it.currentVersion>1){
-      log.push({id:uid("act"), at: dayOffset(new Date(it.createdAt).getDate()-TODAY.getDate()+0.5), type:"submitted", contentId:it.id, contentTitle:it.title, user:it.creator, detail:"Submitted for approval", version:1});
-    }
-    if(it.lastFeedback){
-      log.push({id:uid("act"), at:it.lastFeedback.at, type: it.status==="rejected"?"rejected":"changes_requested", contentId:it.id, contentTitle:it.title, user:it.lastFeedback.by, detail: (it.status==="rejected"?"Rejected — ":"Requested changes — ")+it.lastFeedback.tags.join(", "), comment:it.lastFeedback.text, version:it.currentVersion-1});
-    }
-    if(["approved","scheduled","publishing","published"].includes(it.status)){
-      log.push({id:uid("act"), at: dayOffset(new Date(it.due).getDate()-TODAY.getDate()-1), type:"approved", contentId:it.id, contentTitle:it.title, user:it.approver, detail:"Approved for publishing", version:it.currentVersion});
-    }
-    if(["scheduled","publishing","published"].includes(it.status)){
-      log.push({id:uid("act"), at:it.due, type:"scheduled", contentId:it.id, contentTitle:it.title, user:it.approver, detail:"Scheduled for publishing"});
-    }
-    if(it.status==="published"){
-      log.push({id:uid("act"), at:it.due, type:"published", contentId:it.id, contentTitle:it.title, user:"system", detail:"Published successfully"});
-    }
-    if(it.status==="failed"){
-      log.push({id:uid("act"), at:it.due, type:"failed", contentId:it.id, contentTitle:it.title, user:"system", detail:"Publication failed"});
-    }
-  });
-  return log.sort((a,b)=> new Date(b.at)-new Date(a.at));
-}
-
-function buildPublishedPosts(items){
-  const posts = [];
-  items.filter(it=>it.status==="published").forEach(it=>{
-    Object.values(it.variants).forEach(v=>{
-      if(v.publishStatus!=="published") return;
-      let seed=0; for(const c of it.id+v.platform) seed=(seed*31+c.charCodeAt(0))%97;
-      const views = 2200 + seed*143 + (v.platform==="tiktok"?4000:0);
-      const likes = Math.round(views*(0.04+ (seed%10)/300));
-      const comments = Math.round(views*(0.004+(seed%5)/1500));
-      const shares = Math.round(views*(0.006+(seed%7)/1400));
-      const saves = Math.round(views*(0.01+(seed%9)/1200));
-      const reach = Math.round(views*0.78);
-      const engagementRate = (likes+comments+shares+saves)/views*100;
-      const snapshots = [2,6,24,72,168].map((hrs,i)=>{
-        const decay = [0.18,0.4,0.68,0.9,1][i];
-        return {
-          label: hrs<24? hrs+"h" : (hrs/24)+"d",
-          hours: hrs,
-          views: Math.round(views*decay), likes: Math.round(likes*decay), comments: Math.round(comments*decay),
-          shares: Math.round(shares*decay), saves: Math.round(saves*decay),
-        };
-      });
-      posts.push({
-        id: uid("post"), contentId: it.id, contentTitle: it.title, brand: it.brand, campaign:it.campaign, pillar: it.pillar,
-        followsGained: Math.round(views/1000*3.5*(0.7+(seed%7)/10)),
-        platform: v.platform, account: BRANDS.find(b=>b.id===it.brand).accounts[v.platform],
-        publishedAt: v.scheduledAt, postUrl: v.postUrl, gradient: it.gradient,
-        views, reach, likes, comments, shares, saves, engagementRate,
-        analyticsUpdatedAt: dayOffset(0,7,45), snapshots,
-      });
-    });
-  });
-  return posts.sort((a,b)=> new Date(b.publishedAt)-new Date(a.publishedAt));
-}
-
-const CONTENT_ITEMS = buildContentItems();
-const ACTIVITY_LOG = buildActivity(CONTENT_ITEMS);
-const PUBLISHED_POSTS = buildPublishedPosts(CONTENT_ITEMS);
+/* Go-live: the workspace starts empty — everything shown comes from the shared server copy (real posts from the team)
+   and real stats from Make. The only made-up numbers left are the clearly labelled "Sample data" in Analytics. */
+const CONTENT_ITEMS = [];
+const ACTIVITY_LOG = [];
+const PUBLISHED_POSTS = [];
 
 /* ============================== ICONS ============================== */
 function Icon({name, size=18, strokeWidth=1.8, style}){
@@ -872,11 +687,19 @@ async function fetchServerState(){
 }
 function pushServerState(state){
   const payload = {
+    resetId: state.serverResetId || null,
     contentItems: state.contentItems, activityLog: state.activityLog, decisionHistory: state.decisionHistory,
     calendarTemplate: state.calendarTemplate, adminEmails: state.adminEmails, theme: state.theme, campaigns: state.campaigns,
     chatUpdates: state.chatUpdates !== false,
   };
-  fetch("/api/state", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload)}).catch(()=>{
+  fetch("/api/state", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload)}).then(res=>{
+    // 409 = the shared workspace was reset after this page loaded. Don't write the old copy back — reload fresh.
+    if(res.status===409){
+      try{ localStorage.removeItem(LS_KEY); }catch(e){}
+      let once = false; try{ once = sessionStorage.getItem("cf_reset_reload")==="1"; sessionStorage.setItem("cf_reset_reload","1"); }catch(e){}
+      if(!once) window.location.reload();
+    }
+  }).catch(()=>{
     /* offline or /api not available — localStorage cache above still has this device covered */
   });
 }
@@ -930,6 +753,7 @@ function reducer(state, action){
         campaigns: Array.isArray(s.campaigns) ? s.campaigns : state.campaigns,
         chatUpdates: s.chatUpdates !== false,
         theme: s.theme || state.theme,
+        serverResetId: s.resetId || null,
         serverLoaded: true,
       };
     }
@@ -1616,6 +1440,12 @@ function useRealAnalytics(){
   }, []);
   return realAnalyticsStore.data;
 }
+// Picture for a real post (its own thumbnail when the platform gave one), falling back to the colour tile.
+function PostThumb({post, radius=0, iconSize=24}){
+  const [broken, setBroken] = useState(false);
+  if(post && post.thumb && !broken) return <img src={post.thumb} alt="" loading="lazy" referrerPolicy="no-referrer" onError={()=>setBroken(true)} style={{width:"100%", height:"100%", objectFit:"cover", borderRadius:radius, display:"block"}}/>;
+  return <Thumb item={{gradient:post.gradient, media:{type:"video"}}} radius={radius} iconSize={iconSize}/>;
+}
 function realAnalyticsPosts(data, items){
   if(!data || !data.posts) return [];
   const byId = new Map((items||[]).map(i=>[i.id, i]));
@@ -1681,7 +1511,6 @@ function ContentDetailDrawer({item, onClose}){
   const brand = BRANDS.find(b=>b.id===item.brand);
   const campaign = {name: campaignLabel(state.campaigns, item.campaign)};
   const creator = USERS.find(u=>u.id===item.creator);
-  const approver = USERS.find(u=>u.id===item.approver);
 
   return (
     <Drawer open={!!item} onClose={onClose} width={560}>
@@ -1734,7 +1563,7 @@ function ContentDetailDrawer({item, onClose}){
             )}
             <div className="cf-field-grid" style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:12}}>
               <InfoField label="Creator" value={creator.name}/>
-              <InfoField label="Approver" value={approver.name}/>
+              <InfoField label="Approver" value={approverName(item)}/>
               <InfoField label="Content pillar" value={item.pillar}/>
               <InfoField label="Created" value={fmtDate(item.createdAt)}/>
               <InfoField label="Aspect ratio" value={item.media.aspectRatio}/>
@@ -2740,7 +2569,7 @@ function RevisionEditor({item, onClose}){
     setNotify(true);
   }, [item && item.id]);
   if(!item || !f) return null;
-  const approver = USERS.find(u=>u.id===item.approver);
+  const toTell = approversOf(item).filter(u=>u.id!==state.currentUserId);
   const setV = (p, patch) => setF(x=>({...x, variants:{...x.variants, [p]:{...x.variants[p], ...patch}}}));
   const input = {width:"100%", padding:"9px 11px", borderRadius:8, border:"1px solid var(--border)", fontSize:13.5, background:"var(--surface)", color:"var(--ink)", fontFamily:"inherit"};
   const label = {display:"block", fontSize:12.5, fontWeight:600, marginBottom:6, marginTop:14};
@@ -2777,8 +2606,8 @@ function RevisionEditor({item, onClose}){
   async function save(resubmit){
     setBusy(true);
     dispatch({type:"REVISE_CONTENT", contentId:item.id, patch:patchFromForm(), resubmit, note:f.note.trim()});
-    if(resubmit && notify && approver && approver.id!==state.currentUserId){
-      await chat.send("@"+approver.name+" I've made the changes to \""+(f.title.trim()||item.title)+"\" and resubmitted it for approval."+(f.note.trim()? "\n"+f.note.trim() : ""), item.id);
+    if(resubmit && notify && toTell.length){
+      await chat.send(toTell.map(u=>"@"+u.name).join(" ")+" I've made the changes to \""+(f.title.trim()||item.title)+"\" and resubmitted it for approval."+(f.note.trim()? "\n"+f.note.trim() : ""), item.id);
     }
     setBusy(false);
     onClose();
@@ -2837,8 +2666,8 @@ function RevisionEditor({item, onClose}){
 
         <label style={label}>Note to the approver <span style={{fontWeight:400, color:"var(--ink-mute)"}}>(what you changed)</span></label>
         <textarea value={f.note} onChange={e=>setF(x=>({...x, note:e.target.value}))} rows={2} placeholder="e.g. Shortened the caption and swapped to the brighter shot (G731)." style={{...input, resize:"vertical"}}/>
-        {approver && approver.id!==state.currentUserId && <label style={{display:"flex", alignItems:"center", gap:7, fontSize:12.5, marginTop:10, color:"var(--ink-soft)", cursor:"pointer"}}>
-          <input type="checkbox" checked={notify} onChange={e=>setNotify(e.target.checked)}/> Tell {approver.name} in Team Chat when I resubmit
+        {toTell.length>0 && <label style={{display:"flex", alignItems:"center", gap:7, fontSize:12.5, marginTop:10, color:"var(--ink-soft)", cursor:"pointer"}}>
+          <input type="checkbox" checked={notify} onChange={e=>setNotify(e.target.checked)}/> Tell {toTell.map(u=>u.name).join(" and ")} in Team Chat when I resubmit
         </label>}
       </div>
       <div style={{position:"sticky", bottom:0, background:"var(--surface)", borderTop:"1px solid var(--border)", padding:"12px 18px", display:"flex", justifyContent:"flex-end", gap:8, flexWrap:"wrap"}}>
@@ -3129,7 +2958,9 @@ function DashboardPage(){
   const [loading, setLoading] = useState(true);
   useEffect(()=>{ const t=setTimeout(()=>setLoading(false), 550); return ()=>clearTimeout(t); }, []);
   const items = useMemo(()=> state.currentBrandId==="all"? state.contentItems : state.contentItems.filter(i=>i.brand===state.currentBrandId), [state.contentItems, state.currentBrandId]);
-  const posts = useMemo(()=> state.currentBrandId==="all"? state.publishedPosts : state.publishedPosts.filter(p=>p.brand===state.currentBrandId), [state.publishedPosts, state.currentBrandId]);
+  const realData = useRealAnalytics();
+  const monthAgo = new Date(TODAY); monthAgo.setDate(monthAgo.getDate()-30);
+  const posts = useMemo(()=> realAnalyticsPosts(realData, state.contentItems).filter(p=> new Date(p.publishedAt) >= monthAgo), [realData, state.contentItems]);
 
   const awaiting = items.filter(i=>i.status==="submitted").length;
   const changes = items.filter(i=>i.status==="changes_requested").length;
@@ -3140,7 +2971,6 @@ function DashboardPage(){
   const totalViews = posts.reduce((s,p)=>s+p.views,0);
   const totalEng = posts.reduce((s,p)=>s+p.likes+p.comments+p.shares+p.saves,0);
   const engRate = totalViews? (totalEng/totalViews*100):0;
-  const followerGrowth = 312;
 
   const upcoming = useMemo(()=> items.flatMap(i=>Object.values(i.variants).filter(v=>v.scheduledAt).map(v=>({item:i,v}))).filter(x=> new Date(x.v.scheduledAt) >= TODAY).sort((a,b)=>new Date(a.v.scheduledAt)-new Date(b.v.scheduledAt)).slice(0,6), [items]);
   const recentActivity = state.activityLog.filter(a=>["approved","rejected","changes_requested"].includes(a.type)).slice(0,5);
@@ -3177,9 +3007,9 @@ function DashboardPage(){
         <StatTile label="Failed publications" value={failed} icon="warn" color="var(--red)" hint="See failed" onClick={()=>dispatch({type:"SET_ROUTE", route:"calendar", calendarPreset:{view:"list", status:"failed"}})}/>
       </div>
       <div style={{display:"flex", gap:14, flexWrap:"wrap", marginBottom:22}}>
-        <StatTile label="Total views (published)" value={fmtNum(totalViews)} icon="trend" sub="Demonstration data" color="var(--accent)" hint="Analytics" onClick={()=>dispatch({type:"SET_ROUTE", route:"analytics"})}/>
-        <StatTile label="Engagement rate" value={fmtPct(engRate)} icon="heart" sub="Demonstration data" color="var(--accent)" hint="Analytics" onClick={()=>dispatch({type:"SET_ROUTE", route:"analytics"})}/>
-        <StatTile label="Follower growth (30d)" value={"+"+followerGrowth} icon="team" sub="Demonstration data" color="var(--accent)" hint="Forecast growth" onClick={()=>dispatch({type:"SET_ROUTE", route:"analytics"})}/>
+        <StatTile label="Views (last 30 days)" value={fmtNum(totalViews)} icon="trend" sub={posts.length? "From Make · all connected accounts" : "No stats yet — pull them in Settings"} color="var(--accent)" hint="Analytics" onClick={()=>dispatch({type:"SET_ROUTE", route:"analytics"})}/>
+        <StatTile label="Engagement rate" value={fmtPct(engRate)} icon="heart" sub="Likes, comments, shares & saves ÷ views" color="var(--accent)" hint="Analytics" onClick={()=>dispatch({type:"SET_ROUTE", route:"analytics"})}/>
+        <StatTile label="Posts live (30 days)" value={posts.length} icon="published" sub="Across every connected platform" color="var(--accent)" hint="See posts" onClick={()=>dispatch({type:"SET_ROUTE", route:"published"})}/>
       </div>
 
       {warnings.length>0 && (
@@ -3198,7 +3028,7 @@ function DashboardPage(){
 
       <div className="cf-dash-grid" style={{display:"grid", gridTemplateColumns:"1.3fr 1fr", gap:16, marginBottom:16}}>
         <Card style={{padding:18}}>
-          <SectionTitle>Platform performance <span style={{fontWeight:500, color:"var(--ink-mute)", fontSize:12}}>(views, demo data)</span></SectionTitle>
+          <SectionTitle>Platform performance <span style={{fontWeight:500, color:"var(--ink-mute)", fontSize:12}}>(views, last 30 days)</span></SectionTitle>
           {platformPerf.length? <BarChart data={platformPerf} height={190}/> : <EmptyState icon="analytics" title="No published posts yet"/>}
         </Card>
         <Card style={{padding:18}}>
@@ -4292,7 +4122,7 @@ function CreateContentPage(){
   const user = USERS.find(u=>u.id===state.currentUserId);
   const [step, setStep] = useState(0);
   const [form, setForm] = useState({
-    title:"", campaign: "", brand: BRANDS[0].id, pillar: PILLARS[0], creator: user.id, approver: (USERS.find(u=>u.role==="approver"||u.role==="admin")||USERS[0]).id, priority:"normal", notes:"",
+    title:"", campaign: "", brand: BRANDS[0].id, pillar: PILLARS[0], creator: user.id, approver: reviewers().length>1 ? ANY_APPROVER : ((reviewers()[0]||USERS[0]).id), priority:"normal", notes:"",
     mediaType:"video", aspectRatio:"9:16", duration:20, fileName:"",
     platforms:["instagram"], scheduledAt:"", variants:{},
     ...(state.createPrefill || {}),
@@ -4433,7 +4263,7 @@ function CreateContentPage(){
                 </div>
                 <div>
                   <label style={{fontSize:12.5, fontWeight:700, display:"block", marginBottom:6}}>Assigned approver</label>
-                  <Select value={form.approver} onChange={v=>set({approver:v})} options={activeUsers().filter(u=>u.role==="approver"||u.role==="admin").map(u=>({value:u.id,label:u.name}))}/>
+                  <Select value={form.approver} onChange={v=>set({approver:v})} options={approverOptions()}/>
                 </div>
               </div>
               <TextField label="Internal notes" value={form.notes} onChange={v=>set({notes:v})} placeholder="Anything the approver should know…" textarea/>
@@ -4641,7 +4471,7 @@ function PostAnalyticsDrawer({post, onClose}){
       <div style={{padding:20, borderBottom:"1px solid var(--border)"}}>
         <div style={{display:"flex", justifyContent:"space-between", alignItems:"flex-start"}}>
           <div>
-            <div style={{fontSize:11.5, color:"var(--ink-mute)", fontWeight:600, marginBottom:3, display:"flex", alignItems:"center", gap:6}}><PlatformIcon platform={post.platform} size={12}/>{post.account}</div>
+            <div style={{fontSize:11.5, color:"var(--ink-mute)", fontWeight:600, marginBottom:3, display:"flex", alignItems:"center", gap:6}}><PlatformIcon platform={post.platform} size={12}/>{post.account || PLATFORM_META[post.platform].label}</div>
             <h2 style={{fontSize:17, margin:0}}>{post.contentTitle}</h2>
           </div>
           <button onClick={onClose} style={{width:32,height:32,borderRadius:9,border:"1px solid var(--border)",background:"var(--surface)",cursor:"pointer"}}><Icon name="x" size={16}/></button>
@@ -4649,7 +4479,7 @@ function PostAnalyticsDrawer({post, onClose}){
         <div style={{fontSize:12, color:"var(--ink-mute)", marginTop:6}}>Published {fmtDateTime(post.publishedAt)} · Analytics last updated {fmtDateTime(post.analyticsUpdatedAt)}</div>
       </div>
       <div style={{padding:20}}>
-        <div style={{height:170, borderRadius:14, overflow:"hidden", marginBottom:18}}><Thumb item={{gradient:post.gradient, media:{type:"video"}}} radius={14} iconSize={30}/></div>
+        <div style={{height:170, borderRadius:14, overflow:"hidden", marginBottom:18}}><PostThumb post={post} radius={14} iconSize={30}/></div>
         <div style={{display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:10, marginBottom:18}}>
           {metrics.map(m=>(
             <div key={m.label} style={{background:"var(--surface-2)", borderRadius:11, padding:"12px 10px"}}>
@@ -4661,14 +4491,16 @@ function PostAnalyticsDrawer({post, onClose}){
         <Card style={{padding:14, marginBottom:18, background:"var(--emerald-soft)", border:"1px solid #A7DFC5"}}>
           <div style={{fontSize:12, color:"var(--ink-mute)", fontWeight:700, marginBottom:3}}>ENGAGEMENT RATE</div>
           <div className="num" style={{fontSize:22, fontWeight:800, color:"var(--emerald)"}}>{fmtPct(post.engagementRate)}</div>
-          <div style={{fontSize:11, color:"var(--ink-mute)", marginTop:2}}>(Likes + Comments + Shares + Saves) ÷ Views × 100 — demonstration data</div>
+          <div style={{fontSize:11, color:"var(--ink-mute)", marginTop:2}}>(Likes + Comments + Shares + Saves) ÷ Views × 100{post.sample? " — sample data" : ""}</div>
         </Card>
         <SectionTitle>Performance over time</SectionTitle>
+        {(post.snapshots||[]).length<2 ? <div style={{fontSize:12.5, color:"var(--ink-mute)", lineHeight:1.5}}>The trend builds up as stats are pulled on more days (every night, or with "Get latest stats now").</div> :
         <LineChart height={190} xLabels={post.snapshots.map(s=>s.label)} series={[
           {name:"Views", color:"var(--accent)", points:post.snapshots.map(s=>s.views)},
           {name:"Likes", color:"var(--emerald)", points:post.snapshots.map(s=>s.likes)},
-        ]}/>
-        {post.postUrl && <a href={post.postUrl} target="_blank" rel="noreferrer" style={{display:"inline-flex", alignItems:"center", gap:6, marginTop:16, fontSize:12.5, fontWeight:700, color:"var(--accent)", textDecoration:"none"}}>View live post <Icon name="external" size={13}/></a>}
+        ]}/>}
+        {(post.permalink || post.postUrl) && <a href={post.permalink || post.postUrl} target="_blank" rel="noreferrer" style={{display:"inline-flex", alignItems:"center", gap:6, marginTop:16, fontSize:12.5, fontWeight:700, color:"var(--accent)", textDecoration:"none"}}>View live post <Icon name="external" size={13}/></a>}
+        {false && <a href={post.postUrl} target="_blank" rel="noreferrer" style={{display:"inline-flex", alignItems:"center", gap:6, marginTop:16, fontSize:12.5, fontWeight:700, color:"var(--accent)", textDecoration:"none"}}>View live post <Icon name="external" size={13}/></a>}
       </div>
     </Drawer>
   );
@@ -4679,11 +4511,14 @@ function PublishedContentPage(){
   const [view, setView] = useState("grid");
   const [q, setQ] = useState("");
   const [selected, setSelected] = useState(null);
-  const posts = state.publishedPosts.filter(p=> !q || p.contentTitle.toLowerCase().includes(q.toLowerCase()) || p.account.toLowerCase().includes(q.toLowerCase()));
+  const realData = useRealAnalytics();
+  const all = useMemo(()=> realAnalyticsPosts(realData, state.contentItems).sort((a,b)=> new Date(b.publishedAt)-new Date(a.publishedAt)), [realData, state.contentItems]);
+  const ql = q.trim().toLowerCase();
+  const posts = all.filter(p=> !ql || p.contentTitle.toLowerCase().includes(ql) || PLATFORM_META[p.platform].label.toLowerCase().includes(ql));
 
   return (
     <div>
-      <PageHeader title="Published Content" subtitle={posts.length+" live posts across all connected accounts."}/>
+      <PageHeader title="Published Content" subtitle={all.length ? all.length+" live posts across your connected accounts · stats from Make"+(realData && realData.lastPull? ", updated "+fmtDateTime(realData.lastPull.at) : "") : "Live posts appear here once stats are pulled from Make (Settings → Make.com)."}/>
       <Card style={{padding:14, marginBottom:16, display:"flex", gap:10, alignItems:"center", flexWrap:"wrap"}}>
         <div style={{position:"relative", flex:1, minWidth:200}}>
           <Icon name="search" size={15} style={{position:"absolute", left:10, top:9, color:"var(--ink-mute)"}}/>
@@ -4695,12 +4530,12 @@ function PublishedContentPage(){
         </div>
       </Card>
 
-      {posts.length===0 ? <Card style={{padding:0}}><EmptyState icon="published" title="No published posts found" subtitle="Try a different search term."/></Card> :
+      {posts.length===0 ? <Card style={{padding:0}}><EmptyState icon="published" title={all.length? "No published posts found" : "No live posts yet"} subtitle={all.length? "Try a different search term." : "Pull stats in Settings → Make.com and every post on your connected accounts shows up here."}/></Card> :
       view==="grid" ? (
         <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(230px,1fr))", gap:14}}>
           {posts.map(p=>(
             <Card key={p.id} onClick={()=>setSelected(p)} style={{padding:0, cursor:"pointer", overflow:"hidden"}}>
-              <div style={{height:130}}><Thumb item={{gradient:p.gradient, media:{type:"video"}}} radius={0} iconSize={24}/></div>
+              <div style={{height:130}}><PostThumb post={p} radius={0} iconSize={24}/></div>
               <div style={{padding:12}}>
                 <div style={{display:"flex", alignItems:"center", gap:6, marginBottom:6}}><PlatformIcon platform={p.platform} size={12}/><span style={{fontSize:11, color:"var(--ink-mute)", fontWeight:600}}>{fmtDate(p.publishedAt)}</span></div>
                 <div style={{fontSize:13, fontWeight:700, marginBottom:8, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>{p.contentTitle}</div>
@@ -4720,10 +4555,10 @@ function PublishedContentPage(){
             <tbody>
               {posts.map(p=>(
                 <tr key={p.id} onClick={()=>setSelected(p)} style={{borderBottom:"1px solid var(--border)", cursor:"pointer"}}>
-                  <td style={{padding:"8px 12px"}}><div style={{width:34,height:34,borderRadius:8,overflow:"hidden"}}><Thumb item={{gradient:p.gradient, media:{type:"video"}}} radius={8} iconSize={13}/></div></td>
+                  <td style={{padding:"8px 12px"}}><div style={{width:34,height:34,borderRadius:8,overflow:"hidden"}}><PostThumb post={p} radius={8} iconSize={13}/></div></td>
                   <td style={{padding:"8px 12px", fontWeight:700}}>{p.contentTitle}</td>
                   <td style={{padding:"8px 12px"}}><PlatformIcon platform={p.platform} size={13}/></td>
-                  <td style={{padding:"8px 12px", color:"var(--ink-soft)"}}>{p.account}</td>
+                  <td style={{padding:"8px 12px", color:"var(--ink-soft)"}}>{PLATFORM_META[p.platform].label}</td>
                   <td style={{padding:"8px 12px", color:"var(--ink-soft)"}}>{fmtDate(p.publishedAt)}</td>
                   <td className="num" style={{padding:"8px 12px", fontWeight:700}}>{fmtNum(p.views)}</td>
                   <td className="num" style={{padding:"8px 12px"}}>{fmtNum(p.reach)}</td>
@@ -4841,7 +4676,7 @@ function AnalyticsPage(){
   const narrow = useIsNarrow(900);
   const todayStr = TODAY.toISOString().slice(0,10);
   const monthAgoStr = (()=>{ const d=new Date(TODAY); d.setDate(d.getDate()-29); return d.toISOString().slice(0,10); })();
-  const [filters, setFilters] = useState({range:"30", customFrom:monthAgoStr, customTo:todayStr, platforms:[], campaign:"", pillar:"", contentId:""});
+  const [filters, setFilters] = useState({range:"", customFrom:monthAgoStr, customTo:todayStr, platforms:[], campaign:"", pillar:"", contentId:""});
   const [metric, setMetric] = useState("views");
   const [compare, setCompare] = useState(true);
   const [sort, setSort] = useState({key:"views", dir:-1});
@@ -4857,18 +4692,24 @@ function AnalyticsPage(){
   const allPosts = useMemo(()=> src==="real" ? realPosts : [...state.publishedPosts, ...SAMPLE_HISTORY], [src, realPosts, state.publishedPosts]);
   const hasSample = allPosts.some(p=>p.sample);
 
+  // No range picked yet → "All time" for real stats (so older posts show), "Last 30 days" for sample data.
+  const range = filters.range || (src==="real" ? "all" : "30");
   const {rangeStart, rangeEnd, days} = useMemo(()=>{
     let start, end;
-    if(filters.range==="custom" && filters.customFrom && filters.customTo){
+    if(range==="all"){
+      end = new Date(TODAY); end.setHours(23,59,59,999);
+      const first = allPosts.reduce((m,p)=> Math.min(m, new Date(p.publishedAt).getTime()), end.getTime());
+      start = new Date(first); start.setHours(0,0,0,0);
+    } else if(range==="custom" && filters.customFrom && filters.customTo){
       start = new Date(filters.customFrom+"T00:00:00"); end = new Date(filters.customTo+"T23:59:59");
       if(start>end){ const t=start; start=end; end=t; }
     } else {
-      const n = Number(filters.range)||30;
+      const n = Number(range)||30;
       end = new Date(TODAY); end.setHours(23,59,59,999);
       start = new Date(TODAY); start.setDate(start.getDate()-n+1); start.setHours(0,0,0,0);
     }
     return {rangeStart:start, rangeEnd:end, days: Math.max(1, Math.min(366, Math.round((end-start)/86400000)+1))};
-  }, [filters.range, filters.customFrom, filters.customTo]);
+  }, [range, filters.customFrom, filters.customTo, allPosts]);
   const prevStart = new Date(rangeStart); prevStart.setDate(prevStart.getDate()-days);
   const prevEnd = new Date(rangeStart.getTime()-1);
 
@@ -4944,8 +4785,8 @@ function AnalyticsPage(){
       {/* Filters */}
       <Card style={{padding:12, marginBottom:16}}>
         <div className="cf-an-filters" style={{display:"flex", flexWrap:"wrap", gap:8, alignItems:"center"}}>
-          <Select value={filters.range} onChange={v=>setF({range:v})} options={[{value:"7",label:"Last 7 days"},{value:"30",label:"Last 30 days"},{value:"90",label:"Last 90 days"},{value:"365",label:"Last 12 months"},{value:"custom",label:"Custom range…"}]} style={{width:150}}/>
-          {filters.range==="custom" && <>
+          <Select value={range} onChange={v=>setF({range:v})} options={[{value:"7",label:"Last 7 days"},{value:"30",label:"Last 30 days"},{value:"90",label:"Last 90 days"},{value:"365",label:"Last 12 months"},{value:"all",label:"All time"},{value:"custom",label:"Custom range…"}]} style={{width:150}}/>
+          {range==="custom" && <>
             <input type="date" value={filters.customFrom} max={filters.customTo} onChange={e=>setF({customFrom:e.target.value})} style={inputStyle}/>
             <span style={{color:"var(--ink-mute)", fontSize:12.5}}>to</span>
             <input type="date" value={filters.customTo} min={filters.customFrom} max={todayStr} onChange={e=>setF({customTo:e.target.value})} style={inputStyle}/>
@@ -5548,8 +5389,8 @@ function TeamPage(){
           <tbody>
             {activeUsers().map(u=>{
               const created = state.contentItems.filter(i=>i.creator===u.id).length;
-              const pending = state.contentItems.filter(i=>(i.creator===u.id||i.approver===u.id) && ["submitted","changes_requested"].includes(i.status)).length;
-              const turnaround = (u.role==="approver"||u.role==="admin")? (1.2 + (u.id.length%3)*0.6).toFixed(1)+"h" : "—";
+              const pending = state.contentItems.filter(i=>(i.creator===u.id || i.approver===u.id || (i.approver===ANY_APPROVER && isReviewer(u))) && ["submitted","changes_requested"].includes(i.status)).length;
+              const turnaround = isReviewer(u) ? reviewTurnaround(state.activityLog, u.id) : "—";
               return (
                 <tr key={u.id} style={{borderBottom:"1px solid var(--border)"}}>
                   <td style={{padding:"10px 12px"}}><div style={{display:"flex", alignItems:"center", gap:9}}><Avatar user={u} size={30}/><div><div style={{fontWeight:700}}>{u.name}</div><div style={{fontSize:11, color:"var(--ink-mute)"}}>{u.title}</div></div></div></td>
@@ -5923,6 +5764,7 @@ function App(){
   useEffect(()=>{
     let cancelled = false;
     fetchServerState().then(data=>{
+      if(data){ try{ sessionStorage.removeItem("cf_reset_reload"); }catch(e){} }
       if(!cancelled && data) dispatch({type:"LOAD_STATE", data});
     });
     return ()=>{ cancelled = true; };

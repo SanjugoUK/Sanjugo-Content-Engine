@@ -111,6 +111,18 @@ app either way, so everyone stays in sync in real time, just like opening the In
 
 Tell me once you've deployed (or if any step errors) and I'll help from there.
 
+## Approvers
+
+A post's approver is one person, or **"Cyrus or Yan Yan (either can approve)"** (stored as `approver: "any"` — every
+active admin/approver). That option is the default for new posts; both people get the Team Chat update and push alert,
+and whoever decides first moves the post on.
+
+## Starting over (workspace reset)
+
+The shared posts live in one JSON record (D1 `app_state`). A reset stamps it with a new `resetId`; every save must carry
+the `resetId` it loaded, so a phone or laptop tab opened before the reset can't write the old posts back — it's refused
+(409) and the app reloads fresh. Back up first with `npx wrangler d1 export contentflow-db --remote --output <file>.sql`.
+
 ## Make.com — auto-publishing and real analytics
 
 Each platform has its **own** Make scenarios (team "My Team", eu1 zone), in two folders, so one can be fixed, paused or

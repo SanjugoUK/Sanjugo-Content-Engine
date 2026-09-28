@@ -1942,7 +1942,7 @@ function ScreenMedia({item, fit="cover"}){
   );
 }
 
-/* Tap to expand, like "…more" in the real apps. Stops the tap from opening the details drawer / starting a swipe. */
+/* Tap to expand, like "…more" in the real apps. Stops the tap from opening the details drawer. */
 function PhoneCaption({children, lines=1, style}){
   const [open, setOpen] = useState(false);
   const clamp = open ? {maxHeight:pt(260), overflowY:"auto"} : {display:"-webkit-box", WebkitLineClamp:lines, WebkitBoxOrient:"vertical", overflow:"hidden"};
@@ -2259,9 +2259,6 @@ function ImmersiveViewer({entry, platform, onPlatform, onDecision, onClose, busy
     if(busy) return;
     const onKey = e=>{
       if(e.key==="Escape") onClose();
-      else if(e.key==="ArrowRight") onDecision("approve");
-      else if(e.key==="ArrowLeft") onDecision("reject");
-      else if(e.key==="ArrowUp") onDecision("edits");
     };
     window.addEventListener("keydown", onKey);
     return ()=>window.removeEventListener("keydown", onKey);
@@ -2307,10 +2304,8 @@ function variantFields(platform, v){
 }
 
 function SwipeCard({entry, onDecision, onOpenDetails, isTop, narrow, paused, onImmersive}){
+  // Decisions are made with the buttons only (no swiping), each confirmed in a dialog.
   const ref = useRef(null);
-  const dragDist = useRef(0);
-  const [drag, setDrag] = useState({x:0, y:0, active:false});
-  const startRef = useRef({x:0,y:0});
   const item = entry.item;
   const brand = BRANDS.find(b=>b.id===item.brand);
   const campaign = {name: campaignLabel(useApp().state.campaigns, item.campaign)};
@@ -2327,39 +2322,8 @@ function SwipeCard({entry, onDecision, onOpenDetails, isTop, narrow, paused, onI
   if(item.media.duration && item.media.duration>60 && platformList.includes("tiktok")) warnings.push("Video exceeds TikTok's recommended length");
   if(!scheduledAt) warnings.push("No publish time set");
 
-  function onPointerDown(e){
-    if(!isTop) return;
-    ref.current.setPointerCapture && ref.current.setPointerCapture(e.pointerId);
-    startRef.current = {x:e.clientX, y:e.clientY};
-    dragDist.current = 0;
-    setDrag(d=>({...d, active:true}));
-  }
-  function onPointerMove(e){
-    if(!drag.active) return;
-    setDrag(d=>({...d, x:e.clientX-startRef.current.x, y:e.clientY-startRef.current.y}));
-  }
-  function onPointerUp(){
-    if(!drag.active) return;
-    const {x,y} = drag;
-    dragDist.current = Math.abs(x)+Math.abs(y);
-    const TH = 110;
-    if(Math.abs(x) > TH && Math.abs(x) > Math.abs(y)){
-      onDecision(x>0? "approve":"reject");
-      setDrag({x:0,y:0,active:false});
-    } else if(y < -TH && Math.abs(y) > Math.abs(x)){
-      onDecision("edits");
-      setDrag({x:0,y:0,active:false});
-    } else {
-      setDrag({x:0,y:0,active:false});
-    }
-  }
-  const canTap = ()=> dragDist.current < 8;
-  const openDetails = ()=>{ if(canTap()) onOpenDetails(item); };
+  const openDetails = ()=> onOpenDetails(item);
   const stop = e=>e.stopPropagation();
-  const rotate = drag.x/22;
-  const rightOp = Math.max(0, Math.min(1, drag.x/110));
-  const leftOp = Math.max(0, Math.min(1, -drag.x/110));
-  const upOp = Math.max(0, Math.min(1, -drag.y/110));
 
   const tabs = !entry.platform && item.platforms.length>1 && item.platforms.map(p=>(
     <button key={p} onPointerDown={stop} onClick={e=>{ stop(e); setActivePlatform(p); e.currentTarget.scrollIntoView && e.currentTarget.scrollIntoView({inline:"center", block:"nearest", behavior:"smooth"}); }}
@@ -2377,7 +2341,7 @@ function SwipeCard({entry, onDecision, onOpenDetails, isTop, narrow, paused, onI
       {muted? "Sound off":"Sound on"}
     </button>
   );
-  const phone = <PhonePreview platform={activePlatform} item={item} variant={variant} brand={brand} playing={isTop && !paused} muted={muted || !isTop} onAutoMuted={()=>setMuted(true)} canTap={canTap}/>;
+  const phone = <PhonePreview platform={activePlatform} item={item} variant={variant} brand={brand} playing={isTop && !paused} muted={muted || !isTop} onAutoMuted={()=>setMuted(true)}/>;
   const fullBtn = (
     <button onPointerDown={stop} onClick={e=>{ stop(e); onImmersive(activePlatform); }} title="View full screen, exactly as it will appear"
       style={{display:"flex", alignItems:"center", gap:5, padding:"6px 11px", borderRadius:99, border:"1px solid var(--accent)", background:"var(--accent)", color:"#fff", fontSize:12, fontWeight:700, cursor:"pointer", flexShrink:0}}>
@@ -2390,21 +2354,12 @@ function SwipeCard({entry, onDecision, onOpenDetails, isTop, narrow, paused, onI
       {warnings.map((w,i)=><div key={i} style={{display:"flex", gap:6, alignItems:"center", fontSize:11.5, color:"var(--amber)", fontWeight:600}}><Icon name="warn" size={12}/>{w}</div>)}
     </div>
   );
-  const stamps = (
-    <>
-      <div style={{position:"absolute", inset:0, background:"rgba(91,95,239,.94)", opacity:rightOp, display:"flex", alignItems:"center", justifyContent:"center", pointerEvents:"none", zIndex:20}}><span style={{color:"#fff", fontWeight:800, fontSize:26, border:"3px solid #fff", borderRadius:12, padding:"6px 22px", transform:"rotate(-8deg)"}}>APPROVE</span></div>
-      <div style={{position:"absolute", inset:0, background:"rgba(220,38,38,.9)", opacity:leftOp, display:"flex", alignItems:"center", justifyContent:"center", pointerEvents:"none", zIndex:20}}><span style={{color:"#fff", fontWeight:800, fontSize:26, border:"3px solid #fff", borderRadius:12, padding:"6px 22px", transform:"rotate(8deg)"}}>REJECT</span></div>
-      <div style={{position:"absolute", inset:0, background:"rgba(217,119,6,.92)", opacity:upOp, display:"flex", alignItems:"center", justifyContent:"center", pointerEvents:"none", zIndex:20}}><span style={{color:"#fff", fontWeight:800, fontSize:24, border:"3px solid #fff", borderRadius:12, padding:"6px 22px"}}>EDITS</span></div>
-    </>
-  );
   const rootStyle = {
     position:"absolute", inset:0, borderRadius:20, background:"var(--surface)", border:"1px solid var(--border)", boxShadow:"var(--shadow-lg)",
-    transform: `translate(${drag.x}px, ${drag.y}px) rotate(${rotate}deg)`,
-    transition: drag.active? "none":"transform .35s cubic-bezier(.2,.8,.2,1)",
-    touchAction:"none", cursor: isTop?"grab":"default", overflow:"hidden", display:"flex", flexDirection: narrow?"column":"row",
+    overflow:"hidden", display:"flex", flexDirection: narrow?"column":"row",
     containerType:"size",
   };
-  const handlers = {ref, onPointerDown, onPointerMove, onPointerUp, onPointerLeave:onPointerUp};
+  const handlers = {ref};
 
   if(narrow){
     return (
@@ -2427,7 +2382,6 @@ function SwipeCard({entry, onDecision, onOpenDetails, isTop, narrow, paused, onI
           </div>
           {soundBtn}{fullBtn}
         </div>
-        {stamps}
       </div>
     );
   }
@@ -2467,7 +2421,6 @@ function SwipeCard({entry, onDecision, onOpenDetails, isTop, narrow, paused, onI
         <span style={{flex:1}}/>
         <div onPointerDown={stop}><Button variant="ghost" size="sm" icon="external" onClick={()=>onOpenDetails(item)}>Open full details</Button></div>
       </div>
-      {stamps}
     </div>
   );
 }
@@ -2725,7 +2678,7 @@ function ApprovalQueuePage(){
 
   return (
     <div>
-      <PageHeader title="Approval Queue" subtitle={qtab==="review" ? "Swipe right to approve, left to reject, up to request edits." : "Fix what the approver asked for, then resubmit."} action={qtab!=="review" ? null :
+      <PageHeader title="Approval Queue" subtitle={qtab==="review" ? "Review each post, then tap ✕ Reject, Request Edits or ✓ Approve." : "Fix what the approver asked for, then resubmit."} action={qtab!=="review" ? null :
         <div style={{display:"flex", gap:8, alignItems:"center"}}>
           <Button variant="ghost" size="sm" icon="undo" onClick={undo} disabled={state.decisionHistory.length===0}>Undo Last Decision</Button>
         </div>
@@ -5663,7 +5616,7 @@ function SettingsPage(){
         <Card style={{padding:18, marginBottom:26}}><CampaignManager/></Card>
         <SectionTitle>Recurring calendar template <span style={{fontWeight:500, color:"var(--ink-mute)", fontSize:12}}>(drives calendar auto-fill)</span></SectionTitle>
         <Card style={{padding:18, marginBottom:26}}>
-          <div style={{fontSize:12.5, color:"var(--ink-mute)", marginBottom:14, lineHeight:1.5}}>Define the recurring weekly slots your content plan follows (e.g. "Reels every Monday, Wednesday and Friday"). When a manager swipes right to approve something in the queue and it has no publish time set, it's automatically dropped into the next empty slot below that matches its platform — anything left over waits in "Unscheduled" on the calendar until a slot frees up.</div>
+          <div style={{fontSize:12.5, color:"var(--ink-mute)", marginBottom:14, lineHeight:1.5}}>Define the recurring weekly slots your content plan follows (e.g. "Reels every Monday, Wednesday and Friday"). When an approver approves something in the queue and it has no publish time set, it's automatically dropped into the next empty slot below that matches its platform — anything left over waits in "Unscheduled" on the calendar until a slot frees up.</div>
           <TemplateEditor template={state.calendarTemplate} onChange={t=>saveConfig({calendarTemplate:t})}/>
         </Card>
       </>}

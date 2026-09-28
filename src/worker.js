@@ -1417,7 +1417,9 @@ async function sendPublishJobs(env, { item, platforms, origin, userId, trigger }
       "SELECT id FROM make_jobs WHERE kind = 'publish' AND content_id = ?1 AND platform = ?2 AND (status = 'done' OR (status = 'sent' AND created_at > ?3))"
     ).bind(item.id, platform, new Date(Date.now() - 20 * 60e3).toISOString()).first();
     if (busy) { results.push({ platform, skipped: "Already sent to Make." }); continue; }
-    const tags = (v.hashtags || []).filter((t) => !(v.caption || "").includes(t)).join(" ");
+    // (Older posts may still hold typed hashtags in hashtagsText.)
+    const allTags = (v.hashtags && v.hashtags.length) ? v.hashtags : String(v.hashtagsText || "").split(/[\s,]+/).filter(Boolean).map((t) => (t.startsWith("#") ? t : "#" + t));
+    const tags = allTags.filter((t) => !(v.caption || "").includes(t)).join(" ");
     const caption = [v.caption || "", tags].filter(Boolean).join("\n\n").slice(0, 2200);
     const isPhoto = item.media && item.media.type === "image";
     const key = String(item.media.fileUrl).split("/").pop().split("?")[0];

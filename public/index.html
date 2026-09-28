@@ -747,7 +747,7 @@ function reducer(state, action){
       const s = action.data || {};
       return {
         ...state,
-        contentItems: Array.isArray(s.contentItems) ? s.contentItems : state.contentItems,
+        contentItems: Array.isArray(s.contentItems) ? withTagsFixed(s.contentItems) : state.contentItems,
         activityLog: Array.isArray(s.activityLog) ? s.activityLog : state.activityLog,
         decisionHistory: Array.isArray(s.decisionHistory) ? s.decisionHistory : state.decisionHistory,
         calendarTemplate: Array.isArray(s.calendarTemplate) ? s.calendarTemplate : state.calendarTemplate,
@@ -1792,6 +1792,23 @@ const pt = n => `calc(${n} * 100cqw / 390)`;
 const PHONE_FONT = '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Roboto, Arial, sans-serif';
 const PHONE_W = "min(100cqw, calc(100cqh * 9 / 19.5))";
 function handleOf(s){ return (s||"").replace(/^@/,"").toLowerCase().replace(/[^a-z0-9._]/g,""); }
+// "#Sanjugo, sushi #LondonEats" → ["#Sanjugo", "#sushi", "#LondonEats"]
+function parseTags(text){ return String(text||"").split(/[\s,]+/).filter(Boolean).map(t=> t.startsWith("#")? t : "#"+t); }
+// Posts created before the fix kept typed hashtags in hashtagsText only; move them into hashtags.
+function withTagsFixed(items){
+  let changed = false;
+  const out = (items||[]).map(it=>{
+    let vChanged = false; const variants = {...(it.variants||{})};
+    Object.entries(variants).forEach(([p,v])=>{
+      if(v && v.hashtagsText !== undefined){
+        const {hashtagsText, ...rest} = v;
+        variants[p] = {...rest, hashtags: (v.hashtags||[]).length ? v.hashtags : parseTags(hashtagsText)}; vChanged = true;
+      }
+    });
+    if(!vChanged) return it; changed = true; return {...it, variants};
+  });
+  return changed ? out : items;
+}
 function fullCaption(v){ return [v.caption, (v.hashtags||[]).join(" ")].filter(Boolean).join(" "); }
 function withTags(text, tagStyle){
   return (text||"").split(/(#[\p{L}\p{N}_]+)/u).map((part,i)=> part.startsWith("#") ? <span key={i} style={tagStyle}>{part}</span> : part);
@@ -4166,7 +4183,8 @@ function CreateContentPage(){
   function buildItem(status){
     const variants = {};
     form.platforms.forEach(p=>{
-      variants[p] = makeVariant(p, {status: status==="draft"?"draft":"submitted", scheduledAt: form.variants[p]?.overrideTime || form.scheduledAt || null, ...form.variants[p]});
+      const {hashtagsText, ...fv} = form.variants[p] || {};
+      variants[p] = makeVariant(p, {status: status==="draft"?"draft":"submitted", scheduledAt: fv.overrideTime || form.scheduledAt || null, ...fv, hashtags: parseTags(hashtagsText)});
     });
     return {
       id: uid("ct"), title: form.title||"Untitled content", brand: form.brand, campaign: form.campaign, pillar: form.pillar,

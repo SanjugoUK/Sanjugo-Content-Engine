@@ -7,7 +7,13 @@ import Anthropic from "@anthropic-ai/sdk";
 export default {
   // Nightly storage clean-up (see the Storage lifecycle section below; schedule is in wrangler.toml).
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(runCleanup(env, { trigger: "nightly" }).catch((e) => console.error("cleanup failed", e)));
+    if (event.cron === "30 3 * * *") {
+      ctx.waitUntil(runCleanup(env, { trigger: "nightly" }).catch((e) => console.error("cleanup failed", e)));
+      // Nightly stats from Make (skipped quietly if the analytics webhook isn't set up yet).
+      ctx.waitUntil(makeConfig(env).then((c) => c.analyticsHook && triggerAnalyticsPull(env, { trigger: "nightly", force: true })).catch((e) => console.error("analytics pull failed", e)));
+    } else {
+      ctx.waitUntil(autoPublishDue(env).catch((e) => console.error("auto-publish failed", e)));
+    }
   },
 
   async fetch(request, env, ctx) {
@@ -15,6 +21,10 @@ export default {
 
     // Who is this? With Cloudflare Access switched on, only people on the ContentFlow team list get past here.
     let viewer = { accessEnabled: false, member: null };
+    // Make reports results here from its own servers; it proves itself with the one-time job token instead of a sign-in.
+    if (url.pathname === "/api/make/callback") {
+      try { return await makeRoute(request, env, url, viewer, ctx); } catch (e) { return json({ error: e.message || "Make error" }, e.status || 500); }
+    }
     if (url.pathname.startsWith("/api/")) {
       try {
         viewer = await identify(request, env);
@@ -67,7 +77,23 @@ export default {
 
     if (url.pathname === "/api/chat") {
       if (request.method === "GET") return getChat(url, env);
-      if (request.method === "POST") return postChat(request, env);
+      if (request.method === "POST") return postChat(request, env, ctx);
+    }
+
+    if (url.pathname === "/api/make" || url.pathname.startsWith("/api/make/")) {
+      try {
+        return await makeRoute(request, env, url, viewer, ctx);
+      } catch (e) {
+        return json({ error: e.message || "Make error" }, e.status || 500);
+      }
+    }
+
+    if (url.pathname.startsWith("/api/push/")) {
+      try {
+        return await pushRoute(request, env, url, viewer);
+      } catch (e) {
+        return json({ error: e.message || "Push error" }, e.status || 500);
+      }
     }
 
     if (url.pathname.startsWith("/api/google/")) {
@@ -263,7 +289,7 @@ async function getChat(url, env) {
   });
 }
 
-async function postChat(request, env) {
+async function postChat(request, env, ctx) {
   let body;
   try { body = await request.json(); } catch (e) {
     return new Response(JSON.stringify({ error: "Invalid JSON" }), { status: 400 });
@@ -277,6 +303,14 @@ async function postChat(request, env) {
   const row = await env.DB.prepare(
     "INSERT INTO chat_messages (author, text, mentions, content_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5) RETURNING *"
   ).bind(author, text, JSON.stringify(mentions), contentId, new Date().toISOString()).first();
+  const notify = mentions.filter((id) => id !== author);
+  if (ctx && notify.length) {
+    ctx.waitUntil((async () => {
+      const { members } = await listTeam(env);
+      const who = (members.find((m) => m.id === author) || {}).name || "Someone";
+      await pushToUsers(env, notify, { title: `${who} in Team Chat`, body: text.slice(0, 180), url: "/#/chat", tag: "chat-" + row.id });
+    })().catch((e) => console.error("chat push", e)));
+  }
   return new Response(JSON.stringify({ message: rowToMessage(row) }), {
     headers: { "Content-Type": "application/json" },
   });
@@ -1047,6 +1081,7 @@ async function postWorkflowUpdates(env, body) {
   await ensureChatTable(env);
 
   for (const a of fresh) {
+    if (String(a.id).startsWith("act_make_")) continue; // Make results are announced when Make reports back
     const item = items.get(a.contentId);
     if (!item) continue;
     const actor = nameOf(a.user);
@@ -1082,9 +1117,511 @@ async function postWorkflowUpdates(env, body) {
     }
     if (!text) continue;
     const mentions = [...new Set(notify)];
+    const alert = text;
     if (mentions.length) text += " " + mentions.map((id) => "@" + nameOf(id)).join(" ");
-    await env.DB.prepare(
+    const res = await env.DB.prepare(
       "INSERT OR IGNORE INTO chat_messages (author, text, mentions, content_id, created_at, event_id) VALUES ('system', ?1, ?2, ?3, ?4, ?5)"
     ).bind(text, JSON.stringify(mentions), item.id, new Date().toISOString(), a.id).run();
+    // Only the save that actually posted the update sends the push, so nobody gets the same alert twice.
+    if (res.meta && res.meta.changes > 0 && mentions.length) {
+      const tab = { created: "review", submitted: "review", changes_requested: "changes", rejected: "rejected" }[a.type];
+      await pushToUsers(env, mentions, { title: "Creator Studio", body: alert.slice(0, 220), url: tab ? "/#/queue?tab=" + tab : "/#/chat", tag: "post-" + item.id });
+    }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Push alerts — lock-screen / desktop notifications through the standard Web Push service of each browser
+// (Apple, Google, Mozilla), so people hear about approvals and @mentions with Creator Studio closed.
+// Each device opts in from Settings → Notifications; its subscription is kept in D1 (push_subs) against the
+// team member using it. The server's VAPID signing key is created on first use and kept in app_kv, so there
+// is nothing to configure. Payloads are encrypted to each device as the standard requires (RFC 8291).
+// iPhone/iPad only allow this for the Home Screen app (Share → Add to Home Screen), iOS 16.4 or later.
+// ---------------------------------------------------------------------------
+
+async function ensurePushTable(env) {
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS push_subs (
+    endpoint TEXT PRIMARY KEY, user_id TEXT NOT NULL, p256dh TEXT NOT NULL, auth TEXT NOT NULL,
+    device TEXT, created_at TEXT NOT NULL, last_ok TEXT)`).run();
+}
+
+function concatBytes(...parts) {
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let o = 0;
+  for (const p of parts) { out.set(p, o); o += p.length; }
+  return out;
+}
+
+let vapidCache = null;
+async function vapidKeys(env) {
+  if (vapidCache) return vapidCache;
+  await ensureStorageTables(env);
+  let saved = await kvGet(env, "vapid_keys");
+  if (!saved) {
+    const kp = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
+    const candidate = {
+      publicKey: b64url(await crypto.subtle.exportKey("raw", kp.publicKey)),
+      privateJwk: await crypto.subtle.exportKey("jwk", kp.privateKey),
+      createdAt: new Date().toISOString(),
+    };
+    // Two requests racing on first use must end up with the same key, so only the first write wins.
+    await env.DB.prepare("INSERT OR IGNORE INTO app_kv (k, v) VALUES ('vapid_keys', ?1)").bind(JSON.stringify(candidate)).run();
+    saved = await kvGet(env, "vapid_keys");
+  }
+  const privateKey = await crypto.subtle.importKey("jwk", saved.privateJwk, { name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]);
+  vapidCache = { publicKey: saved.publicKey, privateKey };
+  return vapidCache;
+}
+
+async function vapidAuthHeader(env, endpoint) {
+  const { publicKey, privateKey } = await vapidKeys(env);
+  const enc = (o) => b64url(new TextEncoder().encode(JSON.stringify(o)));
+  const admin = String(env.BOOTSTRAP_ADMINS || "").split(/[\s,]+/).filter(Boolean)[0];
+  const unsigned = enc({ typ: "JWT", alg: "ES256" }) + "." + enc({
+    aud: new URL(endpoint).origin,
+    exp: Math.floor(Date.now() / 1000) + 12 * 3600,
+    sub: admin ? "mailto:" + admin : "https://sanjugo.co.uk",
+  });
+  const sig = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, privateKey, new TextEncoder().encode(unsigned));
+  return `vapid t=${unsigned}.${b64url(sig)}, k=${publicKey}`;
+}
+
+// aes128gcm content encoding for Web Push (RFC 8291 + RFC 8188), single record.
+async function encryptPushPayload(sub, plaintext) {
+  const uaPublic = b64urlDecode(sub.p256dh);
+  const authSecret = b64urlDecode(sub.auth);
+  const te = new TextEncoder();
+  const hkdf = async (salt, ikm, info, bytes) => {
+    const key = await crypto.subtle.importKey("raw", ikm, "HKDF", false, ["deriveBits"]);
+    return new Uint8Array(await crypto.subtle.deriveBits({ name: "HKDF", hash: "SHA-256", salt, info }, key, bytes * 8));
+  };
+  const local = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+  const asPublic = new Uint8Array(await crypto.subtle.exportKey("raw", local.publicKey));
+  const uaKey = await crypto.subtle.importKey("raw", uaPublic, { name: "ECDH", namedCurve: "P-256" }, false, []);
+  const ecdhSecret = new Uint8Array(await crypto.subtle.deriveBits({ name: "ECDH", public: uaKey }, local.privateKey, 256));
+  const ikm = await hkdf(authSecret, ecdhSecret, concatBytes(te.encode("WebPush: info\0"), uaPublic, asPublic), 32);
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const cek = await hkdf(salt, ikm, te.encode("Content-Encoding: aes128gcm\0"), 16);
+  const nonce = await hkdf(salt, ikm, te.encode("Content-Encoding: nonce\0"), 12);
+  const aesKey = await crypto.subtle.importKey("raw", cek, "AES-GCM", false, ["encrypt"]);
+  const record = concatBytes(te.encode(plaintext), new Uint8Array([2])); // 0x02 = last (only) record, no padding
+  const cipher = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce }, aesKey, record));
+  const header = new Uint8Array(21);
+  header.set(salt, 0);
+  new DataView(header.buffer).setUint32(16, 4096);
+  header[20] = asPublic.length;
+  return concatBytes(header, asPublic, cipher);
+}
+
+async function sendPushTo(env, sub, message) {
+  const body = await encryptPushPayload(sub, JSON.stringify(message));
+  const res = await fetch(sub.endpoint, {
+    method: "POST",
+    headers: {
+      Authorization: await vapidAuthHeader(env, sub.endpoint),
+      "Content-Encoding": "aes128gcm",
+      "Content-Type": "application/octet-stream",
+      TTL: String(24 * 3600),
+      Urgency: "high",
+      ...(message.tag ? { Topic: String(message.tag).replace(/[^A-Za-z0-9_-]/g, "").slice(0, 32) } : {}),
+    },
+    body,
+  });
+  if (res.status === 404 || res.status === 410) {
+    // The device unsubscribed or the browser dropped the subscription — forget it.
+    await env.DB.prepare("DELETE FROM push_subs WHERE endpoint = ?1").bind(sub.endpoint).run();
+    return { ok: false, gone: true, status: res.status };
+  }
+  if (!res.ok) {
+    const detail = (await res.text().catch(() => "")).slice(0, 200);
+    console.error("push failed", res.status, new URL(sub.endpoint).host, detail);
+    return { ok: false, status: res.status, detail };
+  }
+  await env.DB.prepare("UPDATE push_subs SET last_ok = ?2 WHERE endpoint = ?1").bind(sub.endpoint, new Date().toISOString()).run();
+  return { ok: true, status: res.status };
+}
+
+// message: { title, body, url, tag } — sent to every device of each listed team member.
+async function pushToUsers(env, userIds, message) {
+  const ids = [...new Set((userIds || []).filter(Boolean))];
+  if (!ids.length) return;
+  await ensurePushTable(env);
+  const { results } = await env.DB.prepare(
+    `SELECT * FROM push_subs WHERE user_id IN (${ids.map((_, i) => "?" + (i + 1)).join(",")})`
+  ).bind(...ids).all();
+  await Promise.all((results || []).map((s) => sendPushTo(env, s, message).catch((e) => console.error("push error", e))));
+}
+
+async function pushRoute(request, env, url, viewer) {
+  if (url.pathname === "/api/push/key" && request.method === "GET") {
+    return json({ publicKey: (await vapidKeys(env)).publicKey });
+  }
+  if (request.method !== "POST") return json({ error: "Not found" }, 404);
+  const body = await request.json().catch(() => ({}));
+  await ensurePushTable(env);
+  if (url.pathname === "/api/push/subscribe") {
+    const s = body.subscription || {};
+    const keys = s.keys || {};
+    if (!/^https:\/\//.test(s.endpoint || "") || !keys.p256dh || !keys.auth) return json({ error: "Invalid subscription" }, 400);
+    // With sign-in on, the device belongs to whoever is signed in; before that, to the name picked on the welcome page.
+    const userId = viewer.member ? viewer.member.id : String(body.userId || "").slice(0, 64);
+    if (!userId) return json({ error: "userId is required" }, 400);
+    await env.DB.prepare(
+      `INSERT INTO push_subs (endpoint, user_id, p256dh, auth, device, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+       ON CONFLICT(endpoint) DO UPDATE SET user_id = excluded.user_id, p256dh = excluded.p256dh, auth = excluded.auth, device = excluded.device`
+    ).bind(s.endpoint, userId, String(keys.p256dh), String(keys.auth), String(body.device || "").slice(0, 80), new Date().toISOString()).run();
+    return json({ ok: true, userId });
+  }
+  if (url.pathname === "/api/push/unsubscribe") {
+    await env.DB.prepare("DELETE FROM push_subs WHERE endpoint = ?1").bind(String(body.endpoint || "")).run();
+    return json({ ok: true });
+  }
+  if (url.pathname === "/api/push/test") {
+    const sub = await env.DB.prepare("SELECT * FROM push_subs WHERE endpoint = ?1").bind(String(body.endpoint || "")).first();
+    if (!sub) return json({ error: "This device isn't signed up for alerts yet." }, 404);
+    const r = await sendPushTo(env, sub, { title: "Creator Studio", body: "✅ Alerts are working on this device.", url: "/#/settings", tag: "test" });
+    return r.ok ? json({ ok: true }) : json({ error: `The push service said ${r.status}${r.detail ? ": " + r.detail : ""}` }, 502);
+  }
+  return json({ error: "Not found" }, 404);
+}
+
+// ---------------------------------------------------------------------------
+// Make.com — auto-publishing and real analytics.
+// Creator Studio talks to two Make scenarios through their webhooks (URLs saved by an admin in Settings → Make.com):
+//   • "Creator Studio — Publish": one request per post × platform. Make posts it and calls /api/make/callback with
+//     the live link (or the error).
+//   • "Creator Studio — Analytics": asks Make for the latest post stats; Make calls back once per platform.
+// Every request carries a one-time random token and the callback must return it, so nothing else can report
+// results. Which Instagram / Facebook / YouTube accounts are used is chosen inside Make, so moving from the test
+// accounts to Sanjugo's is only a change in Make. TikTok and Google Business stay manual ("Mark as published").
+// ---------------------------------------------------------------------------
+
+const MAKE_PLATFORMS = ["instagram", "facebook", "youtube"];
+const MAKE_HOOK_RE = /^https:\/\/hook\.[a-z0-9]+\.make\.com\/[A-Za-z0-9]+$/;
+const DEFAULT_PUBLIC_URL = "https://sanjugo-content-engine.rapid-dust-8baf.workers.dev";
+const PLATFORM_NAMES = { instagram: "Instagram", facebook: "Facebook", youtube: "YouTube Shorts", tiktok: "TikTok", gbp: "Google Business" };
+
+async function ensureMakeTables(env) {
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS make_jobs (
+    id TEXT PRIMARY KEY, kind TEXT NOT NULL, content_id TEXT, platform TEXT, token TEXT NOT NULL, status TEXT NOT NULL,
+    post_id TEXT, permalink TEXT, error TEXT, requested_by TEXT, trigger TEXT, scheduled_for TEXT, detail TEXT,
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS social_posts (
+    platform TEXT NOT NULL, post_id TEXT NOT NULL, content_id TEXT, permalink TEXT, caption TEXT, type TEXT, thumb TEXT,
+    published_at TEXT, likes INTEGER, comments INTEGER, shares INTEGER, saves INTEGER, reach INTEGER, views INTEGER,
+    updated_at TEXT NOT NULL, PRIMARY KEY (platform, post_id))`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS social_snapshots (
+    platform TEXT NOT NULL, post_id TEXT NOT NULL, day TEXT NOT NULL, likes INTEGER, comments INTEGER, shares INTEGER,
+    saves INTEGER, reach INTEGER, views INTEGER, PRIMARY KEY (platform, post_id, day))`).run();
+}
+
+async function makeConfig(env) {
+  return { publishHook: "", analyticsHook: "", autoPublish: false, ...((await kvGet(env, "make_config")) || {}) };
+}
+const hookLabel = (u) => (u ? u.replace(/^(https:\/\/hook\.[^/]+\/)(.{4}).*$/, "$1$2…") : "");
+
+// Scheduled times are saved from the browser as London wall-clock time without a zone ("2026-09-28T18:00:00").
+function tzOffsetMs(ts, tz) {
+  const parts = new Intl.DateTimeFormat("en-GB", { timeZone: tz, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }).formatToParts(new Date(ts));
+  const g = (t) => Number(parts.find((p) => p.type === t).value);
+  return Date.UTC(g("year"), g("month") - 1, g("day"), g("hour"), g("minute"), g("second")) - ts;
+}
+function londonTime(s) {
+  if (!s) return NaN;
+  if (/(Z|[+-]\d\d:?\d\d)$/i.test(s)) return Date.parse(s);
+  const asUtc = Date.parse(s + "Z");
+  return asUtc - tzOffsetMs(asUtc, "Europe/London");
+}
+const londonDay = (ts = Date.now()) => new Date(ts + tzOffsetMs(ts, "Europe/London")).toISOString().slice(0, 10);
+
+async function readState(env) {
+  const row = await env.DB.prepare("SELECT data FROM app_state WHERE id = 1").first();
+  return row ? JSON.parse(row.data) : {};
+}
+
+async function postSystemChat(env, { text, mentions = [], contentId = null, eventId }) {
+  await ensureChatTable(env);
+  const res = await env.DB.prepare(
+    "INSERT OR IGNORE INTO chat_messages (author, text, mentions, content_id, created_at, event_id) VALUES ('system', ?1, ?2, ?3, ?4, ?5)"
+  ).bind(text, JSON.stringify(mentions), contentId, new Date().toISOString(), eventId).run();
+  return !!(res.meta && res.meta.changes > 0);
+}
+
+function jobOut(r) {
+  let detail = null;
+  try { detail = r.detail ? JSON.parse(r.detail) : null; } catch (e) {}
+  return { id: r.id, kind: r.kind, contentId: r.content_id, platform: r.platform, status: r.status, postId: r.post_id,
+    permalink: r.permalink, error: r.error, requestedBy: r.requested_by, trigger: r.trigger, scheduledFor: r.scheduled_for,
+    detail, createdAt: r.created_at, updatedAt: r.updated_at };
+}
+
+async function callHook(url, payload) {
+  const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+  const text = (await res.text().catch(() => "")).slice(0, 200);
+  if (!res.ok) throw new HttpError(502, `Make didn't accept the request (${res.status}${text ? ": " + text : ""}). Check the scenario is switched on.`);
+}
+
+function absoluteMediaUrl(u, origin) {
+  if (!u) return null;
+  if (/^https:\/\//.test(u)) return u;
+  if (u.startsWith("/")) return origin + u;
+  return null; // blob:, data: — a local preview that never reached storage
+}
+
+// Send one post to Make for the given platforms. Returns the jobs created (or reasons they weren't).
+async function sendPublishJobs(env, { item, platforms, origin, userId, trigger }) {
+  const cfg = await makeConfig(env);
+  if (!cfg.publishHook) throw new HttpError(400, "Add the Make publish webhook in Settings → Make.com first.");
+  await ensureMakeTables(env);
+  const results = [];
+  const mediaUrl = absoluteMediaUrl(item.media && item.media.fileUrl, origin);
+  for (const platform of platforms) {
+    const v = (item.variants || {})[platform];
+    if (!MAKE_PLATFORMS.includes(platform)) { results.push({ platform, skipped: "Publish this one by hand — Make can't post to " + (PLATFORM_NAMES[platform] || platform) + "." }); continue; }
+    if (!v) { results.push({ platform, skipped: "This post isn't set up for " + PLATFORM_NAMES[platform] + "." }); continue; }
+    if (v.publishStatus === "published") { results.push({ platform, skipped: "Already published." }); continue; }
+    if (!mediaUrl) { results.push({ platform, skipped: "The video or photo hasn't finished uploading to Creator Studio." }); continue; }
+    const busy = await env.DB.prepare(
+      "SELECT id FROM make_jobs WHERE kind = 'publish' AND content_id = ?1 AND platform = ?2 AND (status = 'done' OR (status = 'sent' AND created_at > ?3))"
+    ).bind(item.id, platform, new Date(Date.now() - 20 * 60e3).toISOString()).first();
+    if (busy) { results.push({ platform, skipped: "Already sent to Make." }); continue; }
+    const tags = (v.hashtags || []).filter((t) => !(v.caption || "").includes(t)).join(" ");
+    const caption = [v.caption || "", tags].filter(Boolean).join("\n\n").slice(0, 2200);
+    const isPhoto = item.media && item.media.type === "image";
+    const key = String(item.media.fileUrl).split("/").pop().split("?")[0];
+    const job = {
+      id: "job_" + crypto.randomUUID().slice(0, 12), token: crypto.randomUUID() + crypto.randomUUID().slice(0, 8),
+      platform, contentId: item.id,
+    };
+    const payload = {
+      token: job.token, jobId: job.id, contentId: item.id, platform,
+      kind: isPhoto ? "photo" : platform === "youtube" ? "short" : "reel",
+      title: String(v.title || item.title || "Sanjugo").replace(/[<>]/g, "").slice(0, 100),
+      caption: platform === "youtube" ? String(v.description || caption).replace(/[<>]/g, "") : caption,
+      mediaUrl, fileName: key || (isPhoto ? "photo.jpg" : "video.mp4"), privacy: "public",
+    };
+    const now = new Date().toISOString();
+    await env.DB.prepare(
+      `INSERT INTO make_jobs (id, kind, content_id, platform, token, status, requested_by, trigger, scheduled_for, detail, created_at, updated_at)
+       VALUES (?1, 'publish', ?2, ?3, ?4, 'sent', ?5, ?6, ?7, ?8, ?9, ?9)`
+    ).bind(job.id, item.id, platform, job.token, userId || null, trigger, v.scheduledAt || null, JSON.stringify({ title: item.title }), now).run();
+    try {
+      await callHook(cfg.publishHook, payload);
+      results.push({ platform, jobId: job.id, status: "sent" });
+    } catch (e) {
+      await env.DB.prepare("UPDATE make_jobs SET status = 'failed', error = ?2, updated_at = ?3 WHERE id = ?1").bind(job.id, e.message, new Date().toISOString()).run();
+      results.push({ platform, jobId: job.id, status: "failed", error: e.message });
+    }
+  }
+  return results;
+}
+
+async function triggerAnalyticsPull(env, { trigger, force }) {
+  const cfg = await makeConfig(env);
+  if (!cfg.analyticsHook) throw new HttpError(400, "Add the Make analytics webhook in Settings → Make.com first.");
+  await ensureMakeTables(env);
+  const recent = await env.DB.prepare("SELECT created_at FROM make_jobs WHERE kind = 'analytics' AND status != 'failed' ORDER BY created_at DESC LIMIT 1").first();
+  if (!force && recent && Date.now() - Date.parse(recent.created_at) < 10 * 60e3) {
+    throw new HttpError(429, "Stats were requested less than 10 minutes ago — give Make a moment to finish.");
+  }
+  const id = "pull_" + crypto.randomUUID().slice(0, 12);
+  const token = crypto.randomUUID() + crypto.randomUUID().slice(0, 8);
+  const now = new Date().toISOString();
+  await env.DB.prepare(
+    "INSERT INTO make_jobs (id, kind, token, status, trigger, detail, created_at, updated_at) VALUES (?1, 'analytics', ?2, 'sent', ?3, '{}', ?4, ?4)"
+  ).bind(id, token, trigger, now).run();
+  try {
+    await callHook(cfg.analyticsHook, { token, platforms: MAKE_PLATFORMS.join(",") });
+  } catch (e) {
+    await env.DB.prepare("UPDATE make_jobs SET status = 'failed', error = ?2 WHERE id = ?1").bind(id, e.message).run();
+    throw e;
+  }
+  return { id, requestedAt: now };
+}
+
+const num = (v) => { const n = Number(v); return Number.isFinite(n) ? Math.round(n) : 0; };
+const dec = (s) => { try { return decodeURIComponent(String(s || "").replace(/\+/g, " ")); } catch (e) { return String(s || ""); } };
+const normLink = (u) => String(u || "").split("?")[0].replace(/\/+$/, "").toLowerCase();
+
+async function handleMakeCallback(request, env, ctx) {
+  const body = await request.json().catch(() => null);
+  if (!body || !body.token) return json({ error: "token required" }, 400);
+  await ensureMakeTables(env);
+  const job = await env.DB.prepare("SELECT * FROM make_jobs WHERE token = ?1").bind(String(body.token)).first();
+  if (!job) return json({ error: "Unknown or expired token" }, 403);
+  const now = new Date().toISOString();
+
+  if (job.kind === "analytics") {
+    if (Date.now() - Date.parse(job.created_at) > 60 * 60e3) return json({ error: "Expired" }, 403);
+    const platform = String(body.platform || "");
+    if (!MAKE_PLATFORMS.includes(platform)) return json({ error: "Unknown platform" }, 400);
+    const posts = Array.isArray(body.posts) ? body.posts.slice(0, 100) : [];
+    // Link stats to Creator Studio posts: by the post id Make returned when it published, or by the saved live link.
+    const { results: done } = await env.DB.prepare("SELECT content_id, post_id, permalink FROM make_jobs WHERE kind = 'publish' AND status = 'done' AND platform = ?1").bind(platform).all();
+    const state = await readState(env);
+    const byLink = new Map();
+    for (const it of state.contentItems || []) {
+      const v = (it.variants || {})[platform];
+      if (v && v.postUrl) byLink.set(normLink(v.postUrl), it.id);
+    }
+    const day = londonDay();
+    for (const p of posts) {
+      if (!p || !p.id) continue;
+      const m = p.m || {};
+      const row = {
+        id: String(p.id).slice(0, 80), permalink: String(p.permalink || "").slice(0, 300), caption: dec(p.caption).slice(0, 500),
+        type: String(p.type || p.mediaType || "").slice(0, 20), thumb: dec(p.thumb).slice(0, 1000), at: p.at ? new Date(p.at).toISOString() : null,
+        likes: num(p.likes), comments: num(p.comments), shares: num(m.shares ?? p.shares), saves: num(m.saved ?? p.saves),
+        reach: num(m.reach ?? p.reach), views: num(m.views ?? p.views),
+      };
+      const link = normLink(row.permalink);
+      const match = (done || []).find((d) => d.post_id && (d.post_id === row.id || link.includes(String(d.post_id).toLowerCase()) || (d.permalink && normLink(d.permalink) === link)));
+      const contentId = match ? match.content_id : byLink.get(link) || null;
+      await env.DB.prepare(
+        `INSERT INTO social_posts (platform, post_id, content_id, permalink, caption, type, thumb, published_at, likes, comments, shares, saves, reach, views, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+         ON CONFLICT(platform, post_id) DO UPDATE SET content_id = COALESCE(excluded.content_id, social_posts.content_id), permalink = excluded.permalink,
+           caption = excluded.caption, type = excluded.type, thumb = excluded.thumb, published_at = excluded.published_at, likes = excluded.likes,
+           comments = excluded.comments, shares = excluded.shares, saves = excluded.saves, reach = excluded.reach, views = excluded.views, updated_at = excluded.updated_at`
+      ).bind(platform, row.id, contentId, row.permalink, row.caption, row.type, row.thumb, row.at, row.likes, row.comments, row.shares, row.saves, row.reach, row.views, now).run();
+      await env.DB.prepare(
+        `INSERT INTO social_snapshots (platform, post_id, day, likes, comments, shares, saves, reach, views) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         ON CONFLICT(platform, post_id, day) DO UPDATE SET likes = excluded.likes, comments = excluded.comments, shares = excluded.shares,
+           saves = excluded.saves, reach = excluded.reach, views = excluded.views`
+      ).bind(platform, row.id, day, row.likes, row.comments, row.shares, row.saves, row.reach, row.views).run();
+    }
+    let detail = {};
+    try { detail = JSON.parse(job.detail || "{}"); } catch (e) {}
+    detail[platform] = posts.length;
+    await env.DB.prepare("UPDATE make_jobs SET status = 'done', detail = ?2, updated_at = ?3 WHERE id = ?1").bind(job.id, JSON.stringify(detail), now).run();
+    await kvSet(env, "make_last_pull", { at: now, jobId: job.id, platforms: detail });
+    return json({ ok: true, saved: posts.length });
+  }
+
+  // Publish result
+  if (job.status !== "sent") return json({ ok: true, duplicate: true });
+  const ok = body.ok === true || body.ok === "true";
+  const permalink = String(body.permalink || "").slice(0, 300) || null;
+  const postId = String(body.postId || "").slice(0, 80) || null;
+  const error = ok ? null : (dec(body.error) || "Make reported an error").slice(0, 500);
+  await env.DB.prepare("UPDATE make_jobs SET status = ?2, post_id = ?3, permalink = ?4, error = ?5, updated_at = ?6 WHERE id = ?1")
+    .bind(job.id, ok ? "done" : "failed", postId, permalink, error, now).run();
+
+  // Tell the team straight away (Team Chat + push), even if nobody has Creator Studio open.
+  ctx.waitUntil((async () => {
+    const state = await readState(env);
+    const item = (state.contentItems || []).find((i) => i.id === job.content_id) || {};
+    const { members } = await listTeam(env);
+    const byId = new Map(members.map((m) => [m.id, m]));
+    const nameOf = (id) => (byId.get(id) || {}).name || "someone";
+    const title = item.title || (JSON.parse(job.detail || "{}").title) || "a post";
+    const where = PLATFORM_NAMES[job.platform] || job.platform;
+    const who = [...new Set([item.creator, item.approver, job.requested_by].filter((id) => id && byId.has(id)))];
+    const text = ok
+      ? `🚀 “${title}” is live on ${where} — published automatically via Make.${permalink ? "\n" + permalink : ""}`
+      : `⚠️ Publishing “${title}” to ${where} failed: ${error}\nOpen the post to try again, or publish it by hand.`;
+    const posted = await postSystemChat(env, { text: text + (who.length ? " " + who.map((id) => "@" + nameOf(id)).join(" ") : ""), mentions: who, contentId: job.content_id, eventId: "make_" + job.id });
+    if (posted && who.length) await pushToUsers(env, who, { title: ok ? "Published" : "Publishing failed", body: text.split("\n")[0].slice(0, 200), url: "/#/chat", tag: "make-" + job.id });
+  })().catch((e) => console.error("make notify", e)));
+  return json({ ok: true });
+}
+
+// Every 5 minutes (when switched on): send approved posts whose scheduled time has arrived.
+async function autoPublishDue(env) {
+  const cfg = await makeConfig(env);
+  if (!cfg.autoPublish || !cfg.publishHook) return { sent: 0 };
+  await ensureMakeTables(env);
+  const state = await readState(env);
+  const now = Date.now();
+  let sent = 0;
+  for (const item of state.contentItems || []) {
+    if (!["approved", "scheduled", "publishing"].includes(item.status)) continue;
+    const due = [];
+    for (const platform of MAKE_PLATFORMS) {
+      const v = (item.variants || {})[platform];
+      if (!v || v.publishStatus === "published" || !v.scheduledAt) continue;
+      const at = londonTime(v.scheduledAt);
+      if (!(at <= now) || now - at > 6 * 3600e3) continue; // not yet, or too old to post without someone checking
+      // A failed attempt for this same time isn't retried automatically — someone decides from the post.
+      const tried = await env.DB.prepare("SELECT id FROM make_jobs WHERE kind = 'publish' AND content_id = ?1 AND platform = ?2 AND scheduled_for = ?3").bind(item.id, platform, v.scheduledAt).first();
+      if (!tried) due.push(platform);
+    }
+    if (!due.length) continue;
+    const r = await sendPublishJobs(env, { item, platforms: due, origin: env.PUBLIC_URL || DEFAULT_PUBLIC_URL, userId: null, trigger: "schedule" });
+    sent += r.filter((x) => x.status === "sent").length;
+  }
+  return { sent };
+}
+
+async function realAnalytics(env) {
+  await ensureMakeTables(env);
+  const { results: posts } = await env.DB.prepare("SELECT * FROM social_posts ORDER BY published_at DESC LIMIT 1000").all();
+  const { results: snaps } = await env.DB.prepare("SELECT * FROM social_snapshots WHERE day >= ?1 ORDER BY day ASC").bind(londonDay(Date.now() - 400 * 86400e3)).all();
+  const byPost = new Map();
+  for (const s of snaps || []) {
+    const k = s.platform + ":" + s.post_id;
+    if (!byPost.has(k)) byPost.set(k, []);
+    byPost.get(k).push({ day: s.day, likes: s.likes, comments: s.comments, shares: s.shares, saves: s.saves, reach: s.reach, views: s.views });
+  }
+  return {
+    lastPull: await kvGet(env, "make_last_pull"),
+    posts: (posts || []).map((p) => ({
+      platform: p.platform, postId: p.post_id, contentId: p.content_id, permalink: p.permalink, caption: p.caption, type: p.type,
+      thumb: p.thumb, publishedAt: p.published_at, likes: p.likes, comments: p.comments, shares: p.shares, saves: p.saves,
+      reach: p.reach, views: p.views, updatedAt: p.updated_at, snapshots: byPost.get(p.platform + ":" + p.post_id) || [],
+    })),
+  };
+}
+
+async function makeRoute(request, env, url, viewer, ctx) {
+  const origin = url.origin;
+  if (url.pathname === "/api/make/callback" && request.method === "POST") return await handleMakeCallback(request, env, ctx);
+  await ensureMakeTables(env);
+  if (url.pathname === "/api/make" && request.method === "GET") {
+    const cfg = await makeConfig(env);
+    const { results } = await env.DB.prepare("SELECT * FROM make_jobs WHERE kind = 'publish' ORDER BY created_at DESC LIMIT 60").all();
+    return json({
+      publish: { configured: !!cfg.publishHook, hook: hookLabel(cfg.publishHook) },
+      analytics: { configured: !!cfg.analyticsHook, hook: hookLabel(cfg.analyticsHook) },
+      autoPublish: !!cfg.autoPublish, platforms: MAKE_PLATFORMS,
+      lastPull: await kvGet(env, "make_last_pull"), jobs: (results || []).map(jobOut),
+    });
+  }
+  if (url.pathname === "/api/make/jobs" && request.method === "GET") {
+    const since = url.searchParams.get("since") || new Date(Date.now() - 7 * 86400e3).toISOString();
+    const { results } = await env.DB.prepare("SELECT * FROM make_jobs WHERE kind = 'publish' AND updated_at > ?1 ORDER BY updated_at ASC LIMIT 200").bind(since).all();
+    return json({ jobs: (results || []).map(jobOut), now: new Date().toISOString() });
+  }
+  if (url.pathname === "/api/make/config" && request.method === "POST") {
+    requireAdmin(viewer);
+    const b = await request.json().catch(() => ({}));
+    const cfg = await makeConfig(env);
+    for (const k of ["publishHook", "analyticsHook"]) {
+      if (b[k] === undefined) continue;
+      const v = String(b[k] || "").trim();
+      if (v && !MAKE_HOOK_RE.test(v)) throw new HttpError(400, "That doesn't look like a Make webhook address (https://hook.eu1.make.com/…).");
+      cfg[k] = v;
+    }
+    if (b.autoPublish !== undefined) cfg.autoPublish = !!b.autoPublish;
+    cfg.updatedAt = new Date().toISOString();
+    await kvSet(env, "make_config", cfg);
+    return json({ ok: true, publish: { configured: !!cfg.publishHook, hook: hookLabel(cfg.publishHook) }, analytics: { configured: !!cfg.analyticsHook, hook: hookLabel(cfg.analyticsHook) }, autoPublish: cfg.autoPublish });
+  }
+  if (url.pathname === "/api/make/publish" && request.method === "POST") {
+    const b = await request.json().catch(() => ({}));
+    const state = await readState(env);
+    const item = (state.contentItems || []).find((i) => i.id === b.contentId);
+    if (!item) throw new HttpError(404, "Post not found — wait a moment for your changes to save, then try again.");
+    if (!["approved", "scheduled", "publishing", "failed"].includes(item.status)) throw new HttpError(400, "Only approved posts can be published.");
+    const userId = viewer.member ? viewer.member.id : String(b.userId || "").slice(0, 64);
+    const platforms = (Array.isArray(b.platforms) ? b.platforms : []).map(String);
+    return json({ results: await sendPublishJobs(env, { item, platforms, origin, userId, trigger: "manual" }) });
+  }
+  if (url.pathname === "/api/make/pull" && request.method === "POST") {
+    return json(await triggerAnalyticsPull(env, { trigger: "manual" }));
+  }
+  if (url.pathname === "/api/make/analytics" && request.method === "GET") {
+    return json(await realAnalytics(env));
+  }
+  return json({ error: "Not found" }, 404);
 }

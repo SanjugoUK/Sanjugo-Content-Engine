@@ -4,11 +4,13 @@ compatibility_date = "2024-09-23"
 
 # Nightly storage clean-up (03:30 UTC) — see "Storage lifecycle" in src/worker.js.
 [triggers]
-crons = ["30 3 * * *"]
+crons = ["30 3 * * *", "*/5 * * * *"]
 
 # The Google Drive folder that holds the content library ("Sanjugo Marketing Contents Final").
 [vars]
 LIBRARY_FOLDER_ID = "11YpaH0QMfCekJEH3oiqEAvO3Cc-wTaqO"
+# Public address Make downloads media from when auto-publishing on a schedule.
+PUBLIC_URL = "https://sanjugo-content-engine.rapid-dust-8baf.workers.dev"
 # Sign-in (Cloudflare Access). Leave ACCESS_* empty to keep the site open; fill both to require sign-in.
 ACCESS_TEAM_DOMAIN = ""
 ACCESS_AUD = ""

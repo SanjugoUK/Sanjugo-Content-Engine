@@ -1044,6 +1044,26 @@ function reducer(state, action){
       return {...state, contentItems:items, activityLog:[log, ...state.activityLog],
         toasts:[...state.toasts, {id:uid("toast"), message: all? "Published — "+item.title : "Marked "+platforms.length+" platform"+(platforms.length>1?"s":"")+" as published", variant:"ok"}]};
     }
+    case "MAKE_JOB_RESULT": {
+      // A Make publishing job moved on: sending → live (with the link) or failed (with the reason).
+      const {job} = action;
+      const item = state.contentItems.find(i=>i.id===job.contentId);
+      const v = item && item.variants && item.variants[job.platform];
+      if(!v || v.publishStatus==="published") return state;
+      const nv = job.status==="done" ? {...v, publishStatus:"published", publishedAt: job.updatedAt, postUrl: job.permalink || v.postUrl || null, makeJobId: job.id, errorMessage:null}
+        : job.status==="failed" ? {...v, publishStatus:"failed", makeJobId: job.id, errorMessage: job.error || "Make reported an error"}
+        : {...v, publishStatus:"publishing", makeJobId: job.id, errorMessage:null};
+      const variants = {...item.variants, [job.platform]: nv};
+      const all = Object.values(variants).every(x=>x.publishStatus==="published");
+      const anyFailed = Object.values(variants).some(x=>x.publishStatus==="failed");
+      const status = all ? "published" : anyFailed ? "failed" : job.status==="sent" ? "publishing" : item.status==="failed" ? "approved" : item.status;
+      const items = state.contentItems.map(i=> i.id===item.id ? {...i, variants, status} : i);
+      // Server already posted the Team Chat update for this; the "act_make_" id keeps it from posting a second one.
+      const logId = "act_make_"+job.id;
+      const log = job.status==="done" && !state.activityLog.some(a=>a.id===logId) ? [{id:logId, at:job.updatedAt, type:"published", contentId:item.id, contentTitle:item.title,
+        user: job.requestedBy || item.approver || item.creator, detail:"Published automatically via Make — "+PLATFORM_META[job.platform].label}] : [];
+      return {...state, contentItems:items, activityLog:[...log, ...state.activityLog]};
+    }
     case "SET_ADMIN_EMAILS": return {...state, adminEmails: action.emails};
     case "SET_CHAT_UPDATES": return {...state, chatUpdates: !!action.on};
     case "ADD_CAMPAIGN": return {...state, campaigns:[...state.campaigns, action.campaign]};
@@ -1282,6 +1302,275 @@ function ScheduleEditor({item, platform, scheduledAt}){
     </div>
   );
 }
+// ---------- Make.com: auto-publishing + real analytics ----------
+// Creator Studio hands approved posts to a Make scenario, which posts them and reports back the live link; another
+// scenario brings back real post stats. Instagram, Facebook and YouTube go through Make; TikTok and Google Business
+// are still marked as published by hand.
+const MAKE_PLATFORMS = ["instagram","facebook","youtube"];
+const makeStore = {info:null, jobs:[], since:null, rev:0, listeners:new Set()};
+function makeEmit(){ makeStore.rev++; makeStore.listeners.forEach(f=>f()); }
+function mergeMakeJobs(list){
+  if(!list || !list.length) return;
+  const m = new Map(makeStore.jobs.map(j=>[j.id, j]));
+  list.forEach(j=>m.set(j.id, j));
+  makeStore.jobs = [...m.values()].sort((a,b)=>a.createdAt.localeCompare(b.createdAt));
+}
+async function loadMakeInfo(){
+  try{
+    const r = await fetch("/api/make", {cache:"no-store"});
+    const d = await r.json().catch(()=>({}));
+    if(!r.ok) throw new Error(d.error || "Make status unavailable");
+    makeStore.info = d; mergeMakeJobs(d.jobs);
+  }catch(e){ makeStore.info = {error: e.message}; }
+  makeEmit();
+  return makeStore.info;
+}
+function useMakeStore(){
+  const [, force] = useState(0);
+  useEffect(()=>{
+    const f = ()=>force(x=>x+1);
+    makeStore.listeners.add(f);
+    if(!makeStore.info) loadMakeInfo();
+    return ()=>{ makeStore.listeners.delete(f); };
+  }, []);
+  return makeStore;
+}
+// The newest Make job for each post × platform.
+function latestMakeJobs(contentId){
+  const out = {};
+  makeStore.jobs.forEach(j=>{ if(j.contentId===contentId) out[j.platform] = j; });
+  return out;
+}
+async function publishViaMake(contentId, platforms, userId){
+  const r = await fetch("/api/make/publish", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({contentId, platforms, userId})});
+  const d = await r.json().catch(()=>({}));
+  if(!r.ok) throw new Error(d.error || "Couldn't reach Make");
+  makeStore.since = null; // make the poller pick the new jobs up straight away
+  return d.results || [];
+}
+
+function MakePublishSection({item, onDone}){
+  const {state, dispatch} = useApp();
+  const mk = useMakeStore();
+  const jobs = latestMakeJobs(item.id);
+  const pending = MAKE_PLATFORMS.filter(p=> item.variants && item.variants[p] && item.variants[p].publishStatus!=="published" && !(jobs[p] && jobs[p].status==="sent"));
+  const [sel, setSel] = useState(pending);
+  const [busy, setBusy] = useState(false);
+  const [results, setResults] = useState(null);
+  const cantMedia = !(item.media && item.media.fileUrl);
+  if(!mk.info || mk.info.error || !mk.info.publish || !mk.info.publish.configured) return null;
+  if(!pending.length && !results) return null;
+  async function go(){
+    setBusy(true);
+    try{
+      const r = await publishViaMake(item.id, sel, state.currentUserId);
+      setResults(r);
+      const sent = r.filter(x=>x.status==="sent").length;
+      dispatch({type:"ADD_TOAST", message: sent ? "Sent to Make — you'll get a Team Chat update when it's live" : "Nothing was sent — see the notes", variant: sent? "ok" : "warn"});
+      syncMakeJobsNow();
+      if(sent && r.every(x=>x.status==="sent")) onDone && onDone();
+    }catch(e){ dispatch({type:"ADD_TOAST", message:e.message, variant:"danger"}); }
+    setBusy(false);
+  }
+  return (
+    <div style={{border:"1px solid var(--accent)", background:"var(--accent-soft)", borderRadius:10, padding:12, marginBottom:16}}>
+      <div style={{fontSize:13.5, fontWeight:600, marginBottom:4, display:"flex", alignItems:"center", gap:6}}><Icon name="send" size={14}/> Publish now with Make</div>
+      <div style={{fontSize:12, color:"var(--ink-soft)", lineHeight:1.5, marginBottom:10}}>Posts straight to the accounts connected in Make — publicly, right away. You'll see the live link here and in Team Chat.</div>
+      {cantMedia && <div style={{fontSize:12.5, color:"var(--red)", marginBottom:8}}>This post's file isn't stored in Creator Studio yet, so Make can't fetch it. Re-upload or import the file first.</div>}
+      {pending.map(p=>(
+        <label key={p} style={{display:"flex", alignItems:"center", gap:8, fontSize:13, fontWeight:600, cursor:"pointer", padding:"4px 0"}}>
+          <input type="checkbox" checked={sel.includes(p)} onChange={e=>setSel(s=> e.target.checked? [...s,p] : s.filter(x=>x!==p))}/>
+          <PlatformIcon platform={p} size={12}/>{PLATFORM_META[p].label}
+          {jobs[p] && jobs[p].status==="failed" && <span style={{fontWeight:400, color:"var(--red)", fontSize:12}}>· last try failed</span>}
+        </label>
+      ))}
+      {results && results.filter(r=>r.skipped || r.error).map(r=>(
+        <div key={r.platform} style={{fontSize:12, color:"var(--ink-soft)", marginTop:4}}><strong>{PLATFORM_META[r.platform].label}:</strong> {r.skipped || r.error}</div>
+      ))}
+      {pending.length>0 && <div style={{marginTop:10}}><Button variant="primary" size="sm" icon="send" disabled={busy || !sel.length || cantMedia} onClick={go}>{busy? "Sending…" : "Publish now"}</Button></div>}
+    </div>
+  );
+}
+
+function MakeStatusLine({item}){
+  const {state, dispatch} = useApp();
+  const mk = useMakeStore();
+  const jobs = latestMakeJobs(item.id);
+  const list = Object.values(jobs);
+  const [busy, setBusy] = useState(null);
+  if(!list.length) return null;
+  async function retry(p){
+    setBusy(p);
+    try{ await publishViaMake(item.id, [p], state.currentUserId); syncMakeJobsNow(); dispatch({type:"ADD_TOAST", message:"Sent to Make again"}); }
+    catch(e){ dispatch({type:"ADD_TOAST", message:e.message, variant:"danger"}); }
+    setBusy(null);
+  }
+  return (
+    <div style={{display:"flex", flexDirection:"column", gap:6, marginTop:12}}>
+      {list.map(j=>(
+        <div key={j.id} style={{display:"flex", alignItems:"center", gap:8, fontSize:12.5, flexWrap:"wrap"}}>
+          <PlatformIcon platform={j.platform} size={12}/>
+          {j.status==="sent" && <span style={{color:"var(--blue)"}}>Publishing via Make…</span>}
+          {j.status==="done" && <span style={{color:"var(--green)", fontWeight:600}}>Live{j.permalink && <> · <a href={j.permalink} target="_blank" rel="noopener" style={{color:"var(--accent)"}}>open post</a></>}</span>}
+          {j.status==="failed" && <>
+            <span style={{color:"var(--red)", minWidth:0, flex:"1 1 200px"}}>Failed: {j.error || "Make reported an error"}</span>
+            {(item.variants[j.platform]||{}).publishStatus!=="published" && <Button size="sm" variant="ghost" icon="refresh" disabled={busy===j.platform} onClick={()=>retry(j.platform)}>{busy===j.platform? "Sending…" : "Try again"}</Button>}
+          </>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Keeps Make job results flowing into the posts: live links, "Published", or the error to fix.
+let makeSyncTimer = null, makeSyncKick = null;
+function syncMakeJobsNow(){ if(makeSyncKick) makeSyncKick(); }
+function useMakeSync(state, dispatch){
+  const mk = useMakeStore();
+  useEffect(()=>{
+    let stop = false;
+    const tick = async ()=>{
+      clearTimeout(makeSyncTimer);
+      try{
+        const r = await fetch("/api/make/jobs"+(makeStore.since? "?since="+encodeURIComponent(makeStore.since) : ""), {cache:"no-store"});
+        if(r.ok){ const d = await r.json(); makeStore.since = d.now; if(d.jobs && d.jobs.length){ mergeMakeJobs(d.jobs); makeEmit(); } }
+      }catch(e){}
+      if(stop) return;
+      const pending = makeStore.jobs.some(j=>j.status==="sent");
+      makeSyncTimer = setTimeout(tick, pending? 6000 : 60000);
+    };
+    makeSyncKick = ()=>{ setTimeout(tick, 1500); };
+    tick();
+    return ()=>{ stop = true; clearTimeout(makeSyncTimer); makeSyncKick = null; };
+  }, []);
+  useEffect(()=>{
+    if(!state.serverLoaded) return;
+    const latest = {};
+    makeStore.jobs.forEach(j=>{ if(j.contentId) latest[j.contentId+"|"+j.platform] = j; });
+    Object.values(latest).forEach(j=>{
+      const item = state.contentItems.find(i=>i.id===j.contentId);
+      const v = item && item.variants && item.variants[j.platform];
+      if(!v || v.publishStatus==="published") return;
+      const want = j.status==="done" ? "published" : j.status==="failed" ? "failed" : "publishing";
+      if(v.publishStatus!==want || v.makeJobId!==j.id) dispatch({type:"MAKE_JOB_RESULT", job:j});
+    });
+  }, [mk.rev, state.serverLoaded, state.contentItems]);
+}
+
+function MakeSettings(){
+  const {dispatch, viewerIsRealAdmin, state} = useApp();
+  const mk = useMakeStore();
+  const info = mk.info;
+  const canEdit = viewerIsRealAdmin || (PERMS[(USERS.find(u=>u.id===state.currentUserId)||{}).role]||{}).manageSettings;
+  const [pub, setPub] = useState(""); const [ana, setAna] = useState("");
+  const [busy, setBusy] = useState(false);
+  const toast = (message, variant)=>dispatch({type:"ADD_TOAST", message, variant});
+  async function save(patch){
+    setBusy(true);
+    try{
+      const r = await fetch("/api/make/config", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(patch)});
+      const d = await r.json().catch(()=>({}));
+      if(!r.ok) throw new Error(d.error || "Couldn't save");
+      setPub(""); setAna(""); toast("Make settings saved"); await loadMakeInfo();
+    }catch(e){ toast(e.message, "danger"); }
+    setBusy(false);
+  }
+  async function pull(){
+    setBusy(true);
+    try{
+      const r = await fetch("/api/make/pull", {method:"POST"});
+      const d = await r.json().catch(()=>({}));
+      if(!r.ok) throw new Error(d.error || "Couldn't reach Make");
+      toast("Asked Make for the latest stats — they'll appear in Analytics within a minute or two");
+      setTimeout(()=>{ loadRealAnalytics(true); loadMakeInfo(); }, 45000);
+    }catch(e){ toast(e.message, "danger"); }
+    setBusy(false);
+  }
+  if(!info) return <Skeleton h={90}/>;
+  if(info.error) return <div style={{fontSize:12.5, color:"var(--ink-mute)"}}>{info.error} — Make settings are available on the live site.</div>;
+  const row = (label, st)=>(
+    <div style={{display:"flex", alignItems:"center", gap:8, fontSize:13, padding:"6px 0"}}>
+      <span style={{width:9, height:9, borderRadius:9, background: st.configured? "var(--green)" : "var(--ink-mute)", flexShrink:0}}/>
+      <strong style={{fontWeight:600}}>{label}</strong>
+      <span style={{color:"var(--ink-mute)", minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>{st.configured? st.hook : "not connected"}</span>
+    </div>
+  );
+  const input = {padding:"8px 10px", borderRadius:8, border:"1px solid var(--border)", fontSize:13, background:"var(--surface)", color:"var(--ink)", flex:"1 1 220px", minWidth:0};
+  const recent = [...mk.jobs].reverse().slice(0, 6);
+  return (
+    <div>
+      <div style={{fontSize:12.5, color:"var(--ink-soft)", lineHeight:1.55, marginBottom:10}}>Make posts approved content to <strong>Instagram, Facebook and YouTube</strong> and brings back real stats for Analytics. Which accounts it uses is set inside Make, so switching from test accounts to Sanjugo's doesn't change anything here. TikTok and Google Business are still marked as published by hand.</div>
+      {row("Publishing", info.publish)}
+      {row("Analytics", info.analytics)}
+      {canEdit && <div style={{display:"flex", flexDirection:"column", gap:8, marginTop:10}}>
+        <div style={{display:"flex", gap:8, flexWrap:"wrap"}}><input value={pub} onChange={e=>setPub(e.target.value)} placeholder="Publish webhook — https://hook.eu1.make.com/…" style={input}/><Button size="sm" disabled={busy || !pub.trim()} onClick={()=>save({publishHook: pub.trim()})}>Save</Button></div>
+        <div style={{display:"flex", gap:8, flexWrap:"wrap"}}><input value={ana} onChange={e=>setAna(e.target.value)} placeholder="Analytics webhook — https://hook.eu1.make.com/…" style={input}/><Button size="sm" disabled={busy || !ana.trim()} onClick={()=>save({analyticsHook: ana.trim()})}>Save</Button></div>
+      </div>}
+      <label style={{display:"flex", gap:10, alignItems:"flex-start", cursor: canEdit? "pointer":"default", marginTop:14, opacity: info.publish.configured? 1 : .5}}>
+        <input type="checkbox" checked={!!info.autoPublish} disabled={!canEdit || busy || !info.publish.configured} onChange={e=>save({autoPublish: e.target.checked})} style={{marginTop:3}}/>
+        <span style={{fontSize:13, lineHeight:1.55}}><strong>Auto-publish at the scheduled time</strong><br/><span style={{color:"var(--ink-soft)"}}>Every 5 minutes, approved posts whose time has come are sent to Make. Leave this off while testing and use "Publish now" on a post instead.</span></span>
+      </label>
+      <div style={{display:"flex", alignItems:"center", gap:10, flexWrap:"wrap", marginTop:14}}>
+        <Button size="sm" icon="refresh" disabled={busy || !info.analytics.configured} onClick={pull}>Get latest stats now</Button>
+        <span style={{fontSize:12, color:"var(--ink-mute)"}}>{info.lastPull ? "Last stats: "+fmtDateTime(info.lastPull.at)+" · "+Object.entries(info.lastPull.platforms||{}).map(([p,n])=>n+" "+(PLATFORM_META[p]||{label:p}).label).join(", ") : "No stats pulled yet"} · also runs nightly</span>
+      </div>
+      {recent.length>0 && <div style={{marginTop:14, borderTop:"1px solid var(--border)", paddingTop:10}}>
+        <div style={{fontSize:12, fontWeight:600, color:"var(--ink-mute)", marginBottom:6}}>Recent publishing</div>
+        {recent.map(j=>{
+          const it = state.contentItems.find(i=>i.id===j.contentId);
+          return <div key={j.id} style={{display:"flex", alignItems:"center", gap:8, fontSize:12.5, padding:"4px 0"}}>
+            <PlatformIcon platform={j.platform} size={11}/>
+            <span style={{flex:1, minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>{(it && it.title) || (j.detail && j.detail.title) || "Post"}</span>
+            <span style={{color: j.status==="done"? "var(--green)" : j.status==="failed"? "var(--red)" : "var(--blue)", whiteSpace:"nowrap"}}>{j.status==="done"? "Live" : j.status==="failed"? "Failed" : "Sending…"}</span>
+            <span style={{color:"var(--ink-mute)", whiteSpace:"nowrap"}}>{fmtDate(j.createdAt,{day:"numeric", month:"short"})}</span>
+          </div>;
+        })}
+      </div>}
+    </div>
+  );
+}
+
+// Real post stats from Make, shaped like the analytics posts the reports already use.
+const realAnalyticsStore = {data:null, loading:null, listeners:new Set()};
+async function loadRealAnalytics(force){
+  if(realAnalyticsStore.loading && !force) return realAnalyticsStore.loading;
+  realAnalyticsStore.loading = fetch("/api/make/analytics", {cache:"no-store"}).then(r=> r.ok ? r.json() : null).catch(()=>null).then(d=>{
+    realAnalyticsStore.data = d || {posts:[], lastPull:null};
+    realAnalyticsStore.listeners.forEach(f=>f());
+    return realAnalyticsStore.data;
+  });
+  return realAnalyticsStore.loading;
+}
+function useRealAnalytics(){
+  const [, force] = useState(0);
+  useEffect(()=>{
+    const f = ()=>force(x=>x+1);
+    realAnalyticsStore.listeners.add(f);
+    if(!realAnalyticsStore.data) loadRealAnalytics();
+    return ()=>{ realAnalyticsStore.listeners.delete(f); };
+  }, []);
+  return realAnalyticsStore.data;
+}
+function realAnalyticsPosts(data, items){
+  if(!data || !data.posts) return [];
+  const byId = new Map((items||[]).map(i=>[i.id, i]));
+  return data.posts.filter(p=>p.publishedAt).map(p=>{
+    const item = p.contentId ? byId.get(p.contentId) : null;
+    const title = item ? item.title : ((p.caption||"").split("\n")[0].slice(0, 70) || "Untitled post");
+    const views = p.views || p.reach || 0;
+    const eng = (p.likes||0)+(p.comments||0)+(p.shares||0)+(p.saves||0);
+    const t0 = new Date(p.publishedAt).getTime();
+    return {
+      id:"rp_"+p.platform+"_"+p.postId, real:true, contentId: item? item.id : "ext_"+p.platform+"_"+p.postId, contentTitle:title,
+      brand:"sanjugo", campaign: item? (item.campaign||"") : "", pillar: item? item.pillar : "", platform:p.platform,
+      account: (BRANDS[0].accounts||{})[p.platform] || "", publishedAt:p.publishedAt, gradient:grad(title), thumb:p.thumb || null, permalink:p.permalink,
+      views, reach:p.reach||0, likes:p.likes||0, comments:p.comments||0, shares:p.shares||0, saves:p.saves||0,
+      engagementRate: views? eng/views*100 : 0, followsGained:0, analyticsUpdatedAt:p.updatedAt,
+      snapshots:(p.snapshots||[]).map(s=>{ const hrs = Math.max(1, Math.round((new Date(s.day+"T21:00:00").getTime()-t0)/3600e3)); return {label:fmtDate(s.day+"T12:00:00",{day:"numeric", month:"short"}), hours:hrs, views:s.views||s.reach||0, likes:s.likes||0, comments:s.comments||0, shares:s.shares||0, saves:s.saves||0}; }),
+    };
+  });
+}
+
 function MarkPublishedModal({item, open, onClose}){
   const {dispatch} = useApp();
   const pending = Object.values(item.variants||{}).filter(v=>v.publishStatus!=="published").map(v=>v.platform);
@@ -1293,6 +1582,7 @@ function MarkPublishedModal({item, open, onClose}){
   return (
     <Modal open={open} onClose={onClose} width={460}>
       <div style={{padding:20}}>
+        {open && <MakePublishSection item={item} onDone={onClose}/>}
         <div style={{fontSize:16, fontWeight:600, marginBottom:4}}>Mark as published</div>
         <div style={{fontSize:12.5, color:"var(--ink-soft)", lineHeight:1.5, marginBottom:14}}>Record where this post went live. Links are optional but make it easy to find later. {item.libraryRef ? "The file stays viewable from the Drive library." : "7 days after every platform is published, the file moves to the Creator Studio Archive folder in Google Drive to free up storage — links keep working."}</div>
         {pending.length===0 ? <div style={{fontSize:13, color:"var(--ink-mute)", marginBottom:14}}>Every platform is already marked as published.</div> :
@@ -1339,7 +1629,8 @@ function ContentDetailDrawer({item, onClose}){
           <button onClick={onClose} style={{width:32,height:32,borderRadius:9,border:"1px solid var(--border)",background:"var(--surface)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><Icon name="x" size={16}/></button>
         </div>
         <div style={{display:"flex", gap:8, marginTop:10, flexWrap:"wrap"}}><StatusBadge status={item.status}/><PriorityDot priority={item.priority}/><Badge label={"v"+item.currentVersion} color="var(--accent)" soft="var(--accent-soft)"/></div>
-        {canMarkPublished && <div style={{marginTop:12}}><Button variant="success" size="sm" icon="check" onClick={()=>setPublishing(true)}>Mark as published</Button></div>}
+        {canMarkPublished && <div style={{marginTop:12}}><Button variant="success" size="sm" icon="check" onClick={()=>setPublishing(true)}>Publish…</Button></div>}
+        <MakeStatusLine item={item}/>
         <MarkPublishedModal item={item} open={publishing} onClose={()=>setPublishing(false)}/>
         <div style={{display:"flex", gap:6, marginTop:14}}>
           {["overview","platforms","versions","activity"].map(t=>(
@@ -2637,7 +2928,9 @@ function insightsData(state){
   const count = st => items.filter(i=>i.status===st);
   const now = new Date(TODAY);
   const daysAgo = iso => Math.max(0, Math.round((now - new Date(iso))/86400000));
-  const all = [...state.publishedPosts, ...SAMPLE_HISTORY];
+  // Real stats from Make once there are any; otherwise the labelled sample history.
+  const real = realAnalyticsPosts(realAnalyticsStore.data, items);
+  const all = real.length ? real : [...state.publishedPosts, ...SAMPLE_HISTORY];
   const since = d => { const x = new Date(now); x.setDate(x.getDate()-d); return x; };
   const cur = all.filter(p=> new Date(p.publishedAt) > since(30) && new Date(p.publishedAt) <= now);
   const prev = all.filter(p=> new Date(p.publishedAt) > since(60) && new Date(p.publishedAt) <= since(30));
@@ -4492,7 +4785,11 @@ function AnalyticsPage(){
   const [openPost, setOpenPost] = useState(null);
   const setF = patch => setFilters(f=>({...f, ...patch}));
 
-  const allPosts = useMemo(()=>[...state.publishedPosts, ...SAMPLE_HISTORY], [state.publishedPosts]);
+  const realData = useRealAnalytics();
+  const realPosts = useMemo(()=>realAnalyticsPosts(realData, state.contentItems), [realData, state.contentItems]);
+  const [source, setSource] = useState(null); // "real" | "sample"; defaults to real as soon as Make has sent any stats
+  const src = source || (realPosts.length ? "real" : "sample");
+  const allPosts = useMemo(()=> src==="real" ? realPosts : [...state.publishedPosts, ...SAMPLE_HISTORY], [src, realPosts, state.publishedPosts]);
   const hasSample = allPosts.some(p=>p.sample);
 
   const {rangeStart, rangeEnd, days} = useMemo(()=>{
@@ -4568,10 +4865,16 @@ function AnalyticsPage(){
   return (
     <div>
       <PageHeader title="Analytics" subtitle={"Performance across every platform · "+rangeText}/>
-      {hasSample && <div style={{display:"flex", gap:10, alignItems:"flex-start", padding:"10px 14px", borderRadius:10, border:"1px solid var(--border)", background:"var(--surface)", marginBottom:14, fontSize:12.5, color:"var(--ink-soft)", lineHeight:1.5}}>
-        <span style={{flexShrink:0, marginTop:1, fontSize:10.5, fontWeight:700, letterSpacing:".4px", padding:"2px 7px", borderRadius:5, background:"var(--amber-soft)", color:"var(--amber)"}}>SAMPLE DATA</span>
-        <span>These figures are realistic sample numbers so you can explore the reports and forecaster. Once Instagram, TikTok, Facebook and YouTube stats are connected, the same views fill with your real results.</span>
-      </div>}
+      <div style={{display:"flex", gap:10, alignItems:"center", flexWrap:"wrap", padding:"10px 14px", borderRadius:10, border:"1px solid var(--border)", background:"var(--surface)", marginBottom:14, fontSize:12.5, color:"var(--ink-soft)", lineHeight:1.5}}>
+        <div style={{display:"inline-flex", border:"1px solid var(--border)", borderRadius:8, overflow:"hidden", flexShrink:0}}>
+          {[["real","Real data"],["sample","Sample data"]].map(([k,l])=>(
+            <button key={k} onClick={()=>setSource(k)} disabled={k==="real" && !realPosts.length} style={{padding:"5px 10px", fontSize:12, fontWeight:600, border:"none", background: src===k? (k==="real"? "var(--green)" : "var(--amber)") : "var(--surface)", color: src===k? "#fff" : "var(--ink-soft)", cursor: k==="real" && !realPosts.length? "not-allowed" : "pointer", opacity: k==="real" && !realPosts.length? .5 : 1}}>{l}</button>
+          ))}
+        </div>
+        <span style={{flex:"1 1 260px"}}>{src==="real"
+          ? <>Real results from Make for {realPosts.length} post{realPosts.length===1?"":"s"} (Instagram, Facebook, YouTube){realData && realData.lastPull? " · updated "+fmtDateTime(realData.lastPull.at) : ""}. TikTok stats aren't connected yet. Facebook only reports reactions, so its views and engagement rate show as 0.</>
+          : <>These are realistic sample numbers so you can explore the reports and forecaster.{realPosts.length? "" : " Connect Make in Settings and pull stats to see your real results here."}</>}</span>
+      </div>
 
       {/* Filters */}
       <Card style={{padding:12, marginBottom:16}}>
@@ -5205,34 +5508,156 @@ function TeamPage(){
 }
 
 /* ============================== SETTINGS ============================== */
-const INTEGRATIONS = [
-  {id:"make", name:"Make.com", desc:"Automation scenarios for cross-posting and alerts.", state:"connection_required"},
-  {id:"instagram", name:"Instagram", desc:"Publish Reels, posts and stories.", state:"demo"},
-  {id:"facebook", name:"Facebook", desc:"Publish page posts and Reels.", state:"demo"},
-  {id:"tiktok", name:"TikTok", desc:"Publish videos to connected accounts.", state:"not_connected"},
-  {id:"youtube", name:"YouTube", desc:"Publish Shorts and manage playlists.", state:"demo"},
-  {id:"gbp", name:"Google Business Profile", desc:"Publish updates across locations.", state:"not_connected"},
-  {id:"supabase", name:"Supabase", desc:"Backing database for production content records.", state:"connection_required"},
-];
-const INTEGRATION_STATE_META = {
-  demo:{label:"Demo", color:"var(--blue)", soft:"var(--blue-soft)"},
-  not_connected:{label:"Not connected", color:"var(--ink-mute)", soft:"var(--surface-2)"},
-  connection_required:{label:"Connection required", color:"var(--amber)", soft:"var(--amber-soft)"},
+// Where each platform's posts go out: through Make (see Settings → Make.com) or marked as published by hand.
+function PlatformConnections(){
+  const mk = useMakeStore();
+  const viaMake = !!(mk.info && mk.info.publish && mk.info.publish.configured);
+  const rows = [
+    ["instagram","Reels and photo posts"], ["facebook","Page reels and photo posts"], ["youtube","Shorts"],
+    ["tiktok","Make can't post organic TikToks — publish in the app, then mark as published"], ["gbp","Post in Google Business, then mark as published"],
+  ];
+  return (
+    <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(220px,1fr))", gap:12, marginBottom:26}}>
+      {rows.map(([p, desc])=>{
+        const auto = MAKE_PLATFORMS.includes(p) && viaMake;
+        const badge = auto ? ["Auto via Make","var(--green)","var(--green-soft)"] : MAKE_PLATFORMS.includes(p) ? ["Not connected","var(--ink-mute)","var(--surface-2)"] : ["Manual","var(--amber)","var(--amber-soft)"];
+        return (
+          <Card key={p} style={{padding:14}}>
+            <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", gap:8, marginBottom:6}}>
+              <div style={{display:"flex", alignItems:"center", gap:7, fontWeight:700, fontSize:13.5}}><PlatformIcon platform={p} size={13}/>{PLATFORM_META[p].label}</div>
+              <Badge label={badge[0]} color={badge[1]} soft={badge[2]}/>
+            </div>
+            <div style={{fontSize:12, color:"var(--ink-mute)", lineHeight:1.5}}>{desc}</div>
+          </Card>
+        );
+      })}
+    </div>
+  );
+}
+
+// ---------- Push alerts (lock screen / desktop notifications) ----------
+// Each device opts in once; the server then sends approval requests, decisions and @mentions to it even when
+// Creator Studio is closed. iPhone/iPad only allow this for the Home Screen app (iOS 16.4+).
+const pushEnv = ()=>{
+  const ua = navigator.userAgent || "";
+  const ios = /iPhone|iPad|iPod/.test(ua) || (navigator.platform==="MacIntel" && navigator.maxTouchPoints>1);
+  const standalone = (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) || navigator.standalone===true;
+  const supported = "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+  return {ios, standalone, supported};
 };
+function pushDeviceName(){
+  const ua = navigator.userAgent || "";
+  const os = /iPhone/.test(ua)? "iPhone" : /iPad/.test(ua) || (navigator.platform==="MacIntel" && navigator.maxTouchPoints>1)? "iPad" : /Android/.test(ua)? "Android" : /Mac/.test(ua)? "Mac" : /Windows/.test(ua)? "Windows" : "Computer";
+  const br = /Edg\//.test(ua)? "Edge" : /Firefox\//.test(ua)? "Firefox" : /Chrome\//.test(ua)? "Chrome" : /Safari\//.test(ua)? "Safari" : "";
+  return os + (br && !pushEnv().standalone ? " · "+br : " · app");
+}
+async function pushRegistration(){
+  if(!("serviceWorker" in navigator)) return null;
+  return (await navigator.serviceWorker.getRegistration()) || await navigator.serviceWorker.register("/sw.js");
+}
+async function currentPushSub(){
+  const reg = await pushRegistration();
+  return reg && reg.pushManager ? await reg.pushManager.getSubscription() : null;
+}
+async function savePushSub(sub, userId){
+  const r = await fetch("/api/push/subscribe", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({subscription: sub.toJSON(), userId, device: pushDeviceName()})});
+  if(!r.ok) throw new Error((await r.json().catch(()=>({}))).error || "Couldn't save this device");
+  // Remembered so the service worker can re-register if the browser rotates the subscription.
+  try{ const c = await caches.open("contentflow-push"); await c.put("/push-owner", new Response(userId)); }catch(e){}
+}
+async function enablePush(userId){
+  // Must run straight from a tap — browsers only show the permission prompt for a user gesture.
+  const perm = await Notification.requestPermission();
+  if(perm!=="granted") throw new Error(perm==="denied" ? "Alerts are blocked for this site — allow notifications in your browser or phone settings, then try again." : "Alerts weren't allowed.");
+  const reg = await pushRegistration();
+  await navigator.serviceWorker.ready;
+  const kr = await fetch("/api/push/key", {cache:"no-store"});
+  const {publicKey} = await kr.json().catch(()=>({}));
+  if(!kr.ok || !publicKey) throw new Error("Alerts need the live site — the server isn't reachable.");
+  const raw = atob(publicKey.replace(/-/g,"+").replace(/_/g,"/") + "===".slice((publicKey.length+3)%4));
+  const key = Uint8Array.from(raw, c=>c.charCodeAt(0));
+  let sub = await reg.pushManager.getSubscription();
+  if(sub){
+    // A subscription made with a different server key can't receive our pushes — replace it.
+    const old = sub.options && sub.options.applicationServerKey ? new Uint8Array(sub.options.applicationServerKey) : null;
+    if(old && (old.length!==key.length || old.some((b,i)=>b!==key[i]))){ await sub.unsubscribe(); sub = null; }
+  }
+  if(!sub) sub = await reg.pushManager.subscribe({userVisibleOnly:true, applicationServerKey:key});
+  await savePushSub(sub, userId);
+  return sub;
+}
+
+function PushSettings(){
+  const {state, dispatch} = useApp();
+  const env = useMemo(pushEnv, []);
+  const [sub, setSub] = useState(undefined); // undefined = checking
+  const [busy, setBusy] = useState(false);
+  const [perm, setPerm] = useState(()=> ("Notification" in window) ? Notification.permission : "default");
+  useEffect(()=>{ if(env.supported) currentPushSub().then(setSub).catch(()=>setSub(null)); else setSub(null); }, []);
+  const toast = (message, variant)=>dispatch({type:"ADD_TOAST", message, variant});
+
+  async function turnOn(){
+    setBusy(true);
+    try{ const s = await enablePush(state.currentUserId); setSub(s); toast("Alerts are on for this device"); }
+    catch(e){ toast(e.message || "Couldn't turn on alerts", "danger"); }
+    setPerm(Notification.permission); setBusy(false);
+  }
+  async function turnOff(){
+    setBusy(true);
+    try{
+      const s = await currentPushSub();
+      if(s){ await fetch("/api/push/unsubscribe", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({endpoint:s.endpoint})}).catch(()=>{}); await s.unsubscribe(); }
+      setSub(null); toast("Alerts are off for this device");
+    }catch(e){ toast(e.message || "Couldn't turn off alerts", "danger"); }
+    setBusy(false);
+  }
+  async function test(){
+    setBusy(true);
+    try{
+      const r = await fetch("/api/push/test", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({endpoint: sub.endpoint})});
+      const d = await r.json().catch(()=>({}));
+      if(!r.ok) throw new Error(d.error || "Test failed");
+      toast("Test sent — it should pop up in a few seconds");
+    }catch(e){ toast(e.message, "danger"); }
+    setBusy(false);
+  }
+
+  const note = (text)=> <div style={{fontSize:12.5, color:"var(--ink-soft)", lineHeight:1.55, marginTop:10}}>{text}</div>;
+  let body;
+  if(env.ios && !env.standalone){
+    body = note(<>On iPhone and iPad, alerts only work in the Home Screen app. In Safari tap <strong>Share</strong> → <strong>Add to Home Screen</strong>, open <strong>Creator Studio</strong> from the new icon, and turn alerts on here. (Needs iOS 16.4 or later.)</>);
+  }else if(!env.supported){
+    body = note("This browser can't show alerts. Use Chrome, Edge, Safari or Firefox on a computer, Chrome on Android, or the Home Screen app on iPhone.");
+  }else if(sub===undefined){
+    body = <Skeleton h={36}/>;
+  }else if(sub){
+    body = <>
+      <div style={{display:"flex", gap:8, flexWrap:"wrap", alignItems:"center", marginTop:10}}>
+        <Badge label="On for this device" color="var(--green)" soft icon="check"/>
+        <Button size="sm" icon="send" onClick={test} disabled={busy}>Send a test</Button>
+        <Button size="sm" variant="subtle" onClick={turnOff} disabled={busy}>Turn off</Button>
+      </div>
+      {note("Alerts on this device go to "+((USERS.find(u=>u.id===state.currentUserId)||{}).name||"you")+". Turn them on separately on each phone and computer you use.")}
+    </>;
+  }else if(perm==="denied"){
+    body = note("Alerts are blocked for this site. Allow notifications for it in your browser's site settings (or the phone's Settings → Notifications), then come back and turn them on.");
+  }else{
+    body = <div style={{marginTop:10}}><Button variant="primary" size="sm" icon="bell" onClick={turnOn} disabled={busy}>{busy? "Turning on…" : "Turn on alerts on this device"}</Button></div>;
+  }
+  return (
+    <div style={{borderTop:"1px solid var(--border)", marginTop:14, paddingTop:14}}>
+      <div style={{fontSize:13, lineHeight:1.55}}><strong>Phone &amp; desktop alerts</strong><br/><span style={{color:"var(--ink-soft)"}}>Get a notification — even with Creator Studio closed — when a post is waiting for your approval, when there's a decision on your post, or when someone @mentions you.</span></div>
+      {body}
+    </div>
+  );
+}
 
 function SettingsPage(){
   const {state, dispatch, caps, viewerIsRealAdmin} = useApp();
   const user = USERS.find(u=>u.id===state.currentUserId);
   const perms = PERMS[user.role];
-  const [webhookUrl, setWebhookUrl] = useState("");
-  const [testState, setTestState] = useState("idle");
   const canManage = perms.manageSettings || viewerIsRealAdmin;
 
-  function testWebhook(){
-    if(!webhookUrl){ dispatch({type:"ADD_TOAST", message:"Enter a webhook URL first", variant:"warn"}); return; }
-    setTestState("testing");
-    setTimeout(()=>{ setTestState("success"); dispatch({type:"ADD_TOAST", message:"Simulated test payload sent (demo only)"}); }, 1200);
-  }
 
   function saveConfig(patch){
     const next = {adminEmails: state.adminEmails, calendarTemplate: state.calendarTemplate, ...patch, updatedAt:new Date().toISOString()};
@@ -5262,32 +5687,8 @@ function SettingsPage(){
       <Card style={{padding:18, marginBottom:26}}><InsightsSettings/></Card>
       <SectionTitle>Campaigns</SectionTitle>
       <Card style={{padding:18, marginBottom:26}}><CampaignManager/></Card>
-      <SectionTitle>Integrations</SectionTitle>
-      <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(240px,1fr))", gap:14, marginBottom:26}}>
-        {INTEGRATIONS.map(it=>{
-          const meta = INTEGRATION_STATE_META[it.state];
-          return (
-            <Card key={it.id} style={{padding:16}}>
-              <div style={{display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:8}}>
-                <div style={{fontWeight:700, fontSize:14}}>{it.name}</div>
-                <Badge label={meta.label} color={meta.color} soft={meta.soft}/>
-              </div>
-              <div style={{fontSize:12.5, color:"var(--ink-mute)", lineHeight:1.5, marginBottom:14}}>{it.desc}</div>
-              <Button variant="ghost" size="sm" style={{width:"100%", justifyContent:"center"}} onClick={()=>dispatch({type:"ADD_TOAST", message:it.name+" connection is simulated in this prototype.", variant:"warn"})}>{it.state==="demo"?"View demo details":"Connect"}</Button>
-            </Card>
-          );
-        })}
-      </div>
-
-      <SectionTitle>Test webhook</SectionTitle>
-      <Card style={{padding:18, marginBottom:26}}>
-        <div style={{fontSize:12.5, color:"var(--ink-mute)", marginBottom:12, lineHeight:1.5}}>Enter a Make.com webhook URL to send a simulated test payload. Production authentication and secret storage must happen in a secure backend — this prototype never sends real requests.</div>
-        <div style={{display:"flex", gap:10, flexWrap:"wrap"}}>
-          <input value={webhookUrl} onChange={e=>{setWebhookUrl(e.target.value); setTestState("idle");}} placeholder="https://hook.make.com/…" style={{flex:1, minWidth:220, padding:"9px 12px", borderRadius:9, border:"1px solid var(--border)", fontSize:13, background:"var(--surface)", color:"var(--ink)"}}/>
-          <Button variant="primary" icon="zap" onClick={testWebhook} disabled={testState==="testing"}>{testState==="testing"?"Sending…":"Test webhook"}</Button>
-        </div>
-        {testState==="success" && <div style={{marginTop:12, display:"flex", gap:7, alignItems:"center", fontSize:12.5, color:"var(--green)", fontWeight:700}}><Icon name="check" size={14}/>Simulated payload delivered (demo only — no real request was sent).</div>}
-      </Card>
+      <SectionTitle>Platforms</SectionTitle>
+      <PlatformConnections/>
 
       <SectionTitle>Workflow</SectionTitle>
       <Card style={{padding:18, marginBottom:26}}>
@@ -5322,12 +5723,16 @@ function SettingsPage(){
         <TemplateEditor template={state.calendarTemplate} onChange={t=>saveConfig({calendarTemplate:t})}/>
       </Card>
 
+      <SectionTitle>Make.com <span style={{fontWeight:500, color:"var(--ink-mute)", fontSize:12}}>(auto-publishing &amp; real stats)</span></SectionTitle>
+      <Card style={{padding:18, marginBottom:26}}><MakeSettings/></Card>
+
       <SectionTitle>Notifications</SectionTitle>
       <Card style={{padding:18, marginBottom:26}}>
         <label style={{display:"flex", gap:10, alignItems:"flex-start", cursor:"pointer"}}>
           <input type="checkbox" checked={state.chatUpdates!==false} onChange={e=>dispatch({type:"SET_CHAT_UPDATES", on:e.target.checked})} style={{marginTop:3}}/>
-          <span style={{fontSize:13, lineHeight:1.55}}><strong>Post workflow updates in Team Chat</strong><br/><span style={{color:"var(--ink-soft)"}}>Creator Studio posts when a post is sent for approval, resubmitted, approved, sent back, rejected or published, and @mentions whoever needs to act — so they get the badge and a pop-up.</span></span>
+          <span style={{fontSize:13, lineHeight:1.55}}><strong>Post workflow updates in Team Chat</strong><br/><span style={{color:"var(--ink-soft)"}}>Creator Studio posts when a post is sent for approval, resubmitted, approved, sent back, rejected or published, and @mentions whoever needs to act — so they get the badge, a pop-up and a phone/desktop alert.</span></span>
         </label>
+        <PushSettings/>
       </Card>
       <SectionTitle>Team &amp; access <span style={{fontWeight:500, color:"var(--ink-mute)", fontSize:12}}>(who can open Creator Studio)</span></SectionTitle>
       <Card style={{padding:18, marginBottom:6}}><TeamAccessSettings/></Card>
@@ -5422,21 +5827,33 @@ function App(){
     return ()=>{ cancelled = true; clearTimeout(fallback); };
   }, []);
 
-  // Deep links from outside the app (e.g. the Drive content library page): #/library?q=G219, #/create?barcode=G219
+  // Deep links from outside the app (e.g. the Drive content library page, push alerts): #/library?q=G219, #/create?barcode=G219, #/chat, #/queue?tab=changes
   useEffect(()=>{
     const openFromHash = ()=>{
-      const m = /^#\/(library|create|settings)(?:\?(.*))?$/.exec(window.location.hash || "");
+      const m = /^#\/(library|create|settings|chat|queue)(?:\?(.*))?$/.exec(window.location.hash || "");
       if(!m) return;
       const params = new URLSearchParams(m[2] || "");
-      if(m[1]==="settings") dispatch({type:"SET_ROUTE", route:"settings", driveReturn: params.get("drive") ? {drive: params.get("drive"), msg: params.get("msg")} : null});
+      if(m[1]==="chat") dispatch({type:"SET_ROUTE", route:"chat"});
+      else if(m[1]==="queue") dispatch({type:"SET_ROUTE", route:"queue", queueTab: params.get("tab") || null});
+      else if(m[1]==="settings") dispatch({type:"SET_ROUTE", route:"settings", driveReturn: params.get("drive") ? {drive: params.get("drive"), msg: params.get("msg")} : null});
       else if(m[1]==="library") dispatch({type:"SET_ROUTE", route:"library", libraryQuery: params.get("q") || ""});
       else dispatch({type:"SET_ROUTE", route:"create", createPrefill: params.get("barcode") ? {libraryBarcode: params.get("barcode")} : null});
       try{ history.replaceState(null, "", window.location.pathname + window.location.search); }catch(e){}
     };
     openFromHash();
     window.addEventListener("hashchange", openFromHash);
-    return ()=>window.removeEventListener("hashchange", openFromHash);
+    const onSwMessage = e=>{ if(e.data && e.data.type==="open"){ try{ window.location.hash = new URL(e.data.url).hash; }catch(err){} } };
+    if("serviceWorker" in navigator) navigator.serviceWorker.addEventListener("message", onSwMessage);
+    return ()=>{ window.removeEventListener("hashchange", openFromHash); if("serviceWorker" in navigator) navigator.serviceWorker.removeEventListener("message", onSwMessage); };
   }, []);
+
+  useMakeSync(state, dispatch);
+
+  // If this device has alerts on, make sure they go to whoever is using it now (e.g. after switching name).
+  useEffect(()=>{
+    if(!state.bootDone || !("Notification" in window) || Notification.permission!=="granted") return;
+    currentPushSub().then(sub=>{ if(sub) return savePushSub(sub, state.currentUserId); }).catch(()=>{});
+  }, [state.currentUserId, state.bootDone]);
 
   useEffect(()=>{ savePersisted(state); }, [state.contentItems, state.activityLog, state.currentUserId, state.currentBrandId, state.decisionHistory, state.theme, state.campaigns]);
 
@@ -5496,7 +5913,7 @@ function App(){
   }, [state.route, user.role]);
 
   const pages = {
-    dashboard: <DashboardPage/>, calendar: <ContentCalendarPage/>, queue: <ApprovalQueuePage/>,
+    dashboard: <DashboardPage/>, calendar: <ContentCalendarPage/>, queue: <ApprovalQueuePage key={state.queueTab||""}/>,
     create: <CreateContentPage key={JSON.stringify(state.createPrefill||{})}/>, published: <PublishedContentPage/>, analytics: <AnalyticsPage/>,
     team: <TeamPage/>, settings: <SettingsPage/>, chat: <ChatPage/>, library: <LibraryPage key={state.libraryQuery||""}/>,
   };

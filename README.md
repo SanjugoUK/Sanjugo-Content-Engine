@@ -111,6 +111,47 @@ app either way, so everyone stays in sync in real time, just like opening the In
 
 Tell me once you've deployed (or if any step errors) and I'll help from there.
 
+## Make.com — auto-publishing and real analytics
+
+Two Make scenarios (team "My Team", eu1 zone) do the talking to the social platforms:
+
+| Scenario | Webhook | What it does |
+|---|---|---|
+| **Creator Studio — Publish** | `Creator Studio — publish` | Gets one post × platform from Creator Studio, posts it (Instagram reel/photo, Facebook reel/photo, YouTube Short) and calls back `/api/make/callback` with the live link or the error. |
+| **Creator Studio — Analytics** | `Creator Studio — analytics` | Fetches the latest ~15 posts per platform with likes, comments, reach, saves, shares and views and calls back once per platform. |
+
+- **Connect:** paste both webhook addresses into Settings → Make.com (admins). Nothing else to configure here.
+- **Publishing:** on an approved post, *Publish…* → *Publish now with Make*. The post shows "Publishing via Make…", then
+  the live link (or the error with *Try again*). Team Chat and push alerts announce the result.
+- **On a schedule:** Settings → Make.com → *Auto-publish at the scheduled time*. A cron checks every 5 minutes and sends
+  approved posts whose (London) time has arrived, up to 6 hours late. Failed attempts are not retried automatically.
+- **Stats:** nightly at 03:30 (UK), or *Get latest stats now*. Analytics switches to "Real data" once any arrive.
+- **Which accounts:** chosen inside the Make scenarios (the Instagram account / Facebook Page / YouTube connection on each
+  module). To move from test accounts to Sanjugo's, change those modules in Make — Creator Studio doesn't change.
+- **Not through Make:** TikTok (Make only has TikTok *ads*) and Google Business stay "Mark as published" by hand.
+- **Security:** every request carries a one-time random token that the callback must return; `/api/make/callback`
+  accepts nothing else. If Cloudflare Access is switched on, add a *Bypass* policy for `/api/make/callback` so Make can reach it.
+- **Media:** Make downloads the file from `/api/media/…`, so it must be stored in Creator Studio (uploaded or imported).
+  Instagram reels: MP4/MOV, H.264/HEVC, ≤1920 px wide, ≤5 Mbps, 3 s–15 min. Facebook reels: 9:16, 3–90 s.
+- **Operations:** roughly 5 per post per platform, and ~60–100 per stats pull (≈2–3k a month nightly) on the 10k Core plan.
+- Tables: `make_jobs`, `social_posts`, `social_snapshots` (D1, created automatically); settings in `app_kv` → `make_config`.
+
+## Phone & desktop alerts (push notifications)
+
+Creator Studio can send real notifications — lock screen on phones, notification centre on computers — even
+when the app is closed. They go out for the same moments as the Team Chat updates (a post waiting for your
+approval, a decision on your post, a resubmission) and for chat @mentions.
+
+- **Turn on per device:** Settings → Notifications → *Turn on alerts on this device*, then allow notifications.
+  Do it on each phone and computer. *Send a test* checks it end to end.
+- **iPhone / iPad:** only the Home Screen app can get alerts (iOS 16.4+). In Safari: Share → Add to Home Screen,
+  open Creator Studio from that icon, then turn alerts on there.
+- **Android & computers:** works in Chrome, Edge, Firefox and Safari (macOS 13+) straight from the browser.
+- **Nothing to configure:** the server creates its own signing (VAPID) key on first use and keeps it in D1
+  (`app_kv` → `vapid_keys`). Don't delete that row — every device would have to turn alerts on again.
+- Devices are stored in the D1 `push_subs` table against the team member; ones that stop working are removed
+  automatically. Alerts follow the "Post workflow updates in Team Chat" switch.
+
 ## Connecting the Google Drive content library
 
 ContentFlow's **Content Library** lists every file in the "Sanjugo Marketing Contents Final" Drive folder.

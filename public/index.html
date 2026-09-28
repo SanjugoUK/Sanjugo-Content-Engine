@@ -1751,10 +1751,16 @@ function buildQueue(items, mode, filters){
   if(filters.campaign) pool = pool.filter(i=>matchCampaign(filters.campaign, i.campaign));
   if(filters.priority) pool = pool.filter(i=>i.priority===filters.priority);
   if(filters.platform) pool = pool.filter(i=>i.platforms.includes(filters.platform));
-  if(mode==="package") return pool.map(it=>({key:it.id, contentId:it.id, item:it, platform:null}));
+  // Soonest publish date first (overdue at the top); posts without a date after, oldest submission first.
+  const when = v => { const t = v && v.scheduledAt ? new Date(v.scheduledAt).getTime() : NaN; return isNaN(t) ? Infinity : t; };
+  const submittedAt = it => { const last = (it.versions||[]).slice(-1)[0]; return new Date((last && last.date) || it.createdAt || 0).getTime() || 0; };
+  const byDate = (a, b) => (a.t - b.t) || (a.s - b.s);
+  if(mode==="package") return pool
+    .map(it=>({key:it.id, contentId:it.id, item:it, platform:null, t: Math.min(...it.platforms.map(p=>when((it.variants||{})[p]))), s: submittedAt(it)}))
+    .sort(byDate);
   const flat = [];
-  pool.forEach(it=> it.platforms.forEach(p=> filters.platform && filters.platform!==p ? null : flat.push({key:it.id+"_"+p, contentId:it.id, item:it, platform:p})));
-  return flat;
+  pool.forEach(it=> it.platforms.forEach(p=> filters.platform && filters.platform!==p ? null : flat.push({key:it.id+"_"+p, contentId:it.id, item:it, platform:p, t: when((it.variants||{})[p]), s: submittedAt(it)})));
+  return flat.sort(byDate);
 }
 
 /* -------- phone-accurate per-platform previews: what the approver sees is what gets published -------- */

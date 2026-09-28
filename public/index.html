@@ -80,6 +80,7 @@
   @keyframes cf-fade-in{from{opacity:0;} to{opacity:1;}}
   body.cf-immersive .cf-toasts{top:calc(16px + env(safe-area-inset-top, 0px)); bottom:auto !important; left:16px; right:16px !important; margin:0 auto;}
   @media (max-width:700px){ .cf-hide-narrow{display:none !important;} }
+  @media (max-width:640px){ .cf-make-row{grid-template-columns:1fr !important; gap:8px !important;} }
   .cf-clickcard{transition:border-color .12s, box-shadow .12s, transform .12s;} .cf-clickcard:hover{border-color:var(--ink-mute) !important; box-shadow:var(--shadow-md) !important;} .cf-clickcard:active{transform:scale(.99);}
   .cf-noscrollbar{scrollbar-width:none;} .cf-noscrollbar::-webkit-scrollbar{display:none;}
   @keyframes cf-spin{to{transform:rotate(360deg);}}
@@ -1303,10 +1304,11 @@ function ScheduleEditor({item, platform, scheduledAt}){
   );
 }
 // ---------- Make.com: auto-publishing + real analytics ----------
-// Creator Studio hands approved posts to a Make scenario, which posts them and reports back the live link; another
-// scenario brings back real post stats. Instagram, Facebook and YouTube go through Make; TikTok and Google Business
-// are still marked as published by hand.
-const MAKE_PLATFORMS = ["instagram","facebook","youtube"];
+// Each platform has its own Make scenarios — "Publish · <platform>" posts approved content and reports back the live
+// link, "Pull · <platform>" brings back real stats — each with its own webhook saved in Settings → Make.com.
+// A platform without a Publish webhook is published by hand ("Mark as published").
+const MAKE_PLATFORMS = ["instagram","facebook","tiktok","youtube","gbp"];
+const makeReady = (dir, p)=> !!(makeStore.info && makeStore.info.platforms && makeStore.info.platforms[p] && makeStore.info.platforms[p][dir].configured);
 const makeStore = {info:null, jobs:[], since:null, rev:0, listeners:new Set()};
 function makeEmit(){ makeStore.rev++; makeStore.listeners.forEach(f=>f()); }
 function mergeMakeJobs(list){
@@ -1353,12 +1355,12 @@ function MakePublishSection({item, onDone}){
   const {state, dispatch} = useApp();
   const mk = useMakeStore();
   const jobs = latestMakeJobs(item.id);
-  const pending = MAKE_PLATFORMS.filter(p=> item.variants && item.variants[p] && item.variants[p].publishStatus!=="published" && !(jobs[p] && jobs[p].status==="sent"));
+  const pending = MAKE_PLATFORMS.filter(p=> makeReady("publish", p) && item.variants && item.variants[p] && item.variants[p].publishStatus!=="published" && !(jobs[p] && jobs[p].status==="sent"));
   const [sel, setSel] = useState(pending);
   const [busy, setBusy] = useState(false);
   const [results, setResults] = useState(null);
   const cantMedia = !(item.media && item.media.fileUrl);
-  if(!mk.info || mk.info.error || !mk.info.publish || !mk.info.publish.configured) return null;
+  if(!mk.info || mk.info.error || !mk.info.platforms) return null;
   if(!pending.length && !results) return null;
   async function go(){
     setBusy(true);
@@ -1457,23 +1459,45 @@ function useMakeSync(state, dispatch){
   }, [mk.rev, state.serverLoaded, state.contentItems]);
 }
 
+const MAKE_PLATFORM_ALIASES = {instagram:"instagram", ig:"instagram", facebook:"facebook", fb:"facebook", tiktok:"tiktok", youtube:"youtube", yt:"youtube", gbp:"gbp", google:"gbp", "google business":"gbp", "google business profile":"gbp"};
+// Reads lines like "Publish · Instagram  https://hook.eu1.make.com/…" (any order, one per line).
+function parseMakeSetup(text){
+  const hooks = {publish:{}, pull:{}}; let n = 0;
+  String(text||"").split(/\n+/).forEach(line=>{
+    const url = (line.match(/https:\/\/hook\.[a-z0-9]+\.make\.com\/[A-Za-z0-9]+/)||[])[0];
+    if(!url) return;
+    const l = line.replace(url, "").toLowerCase();
+    const dir = /pull|stats|analytics/.test(l) ? "pull" : /publish|post/.test(l) ? "publish" : null;
+    const key = Object.keys(MAKE_PLATFORM_ALIASES).sort((x,y)=>y.length-x.length).find(k=> new RegExp("(^|[^a-z])"+k+"([^a-z]|$)").test(l));
+    if(dir && key){ hooks[dir][MAKE_PLATFORM_ALIASES[key]] = url; n++; }
+  });
+  return {hooks, n};
+}
+
 function MakeSettings(){
   const {dispatch, viewerIsRealAdmin, state} = useApp();
   const mk = useMakeStore();
   const info = mk.info;
   const canEdit = viewerIsRealAdmin || (PERMS[(USERS.find(u=>u.id===state.currentUserId)||{}).role]||{}).manageSettings;
-  const [pub, setPub] = useState(""); const [ana, setAna] = useState("");
+  const [edit, setEdit] = useState(null); // {dir, platform, value}
+  const [setup, setSetup] = useState("");
+  const [showSetup, setShowSetup] = useState(false);
   const [busy, setBusy] = useState(false);
   const toast = (message, variant)=>dispatch({type:"ADD_TOAST", message, variant});
-  async function save(patch){
+  async function save(patch, okMsg){
     setBusy(true);
     try{
       const r = await fetch("/api/make/config", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(patch)});
       const d = await r.json().catch(()=>({}));
       if(!r.ok) throw new Error(d.error || "Couldn't save");
-      setPub(""); setAna(""); toast("Make settings saved"); await loadMakeInfo();
-    }catch(e){ toast(e.message, "danger"); }
-    setBusy(false);
+      toast(okMsg || "Make settings saved"); setEdit(null); await loadMakeInfo(); return true;
+    }catch(e){ toast(e.message, "danger"); return false; }
+    finally{ setBusy(false); }
+  }
+  async function saveSetup(){
+    const {hooks, n} = parseMakeSetup(setup);
+    if(!n){ toast("No Make webhook addresses found — each line needs the platform, Publish or Pull, and the https://hook… address", "warn"); return; }
+    if(await save({hooks}, "Saved "+n+" webhook"+(n===1?"":"s"))){ setSetup(""); setShowSetup(false); }
   }
   async function pull(){
     setBusy(true);
@@ -1481,38 +1505,67 @@ function MakeSettings(){
       const r = await fetch("/api/make/pull", {method:"POST"});
       const d = await r.json().catch(()=>({}));
       if(!r.ok) throw new Error(d.error || "Couldn't reach Make");
-      toast("Asked Make for the latest stats — they'll appear in Analytics within a minute or two");
-      setTimeout(()=>{ loadRealAnalytics(true); loadMakeInfo(); }, 45000);
+      const failed = d.failed || [];
+      toast("Asked Make for stats from "+(d.requested||[]).map(p=>PLATFORM_META[p].label).join(", ")+(failed.length? " — couldn't reach "+failed.map(f=>PLATFORM_META[f.platform].label).join(", ") : "")+". They'll appear in Analytics shortly.", failed.length? "warn" : "ok");
+      [20000, 45000, 90000].forEach(ms=>setTimeout(()=>{ loadRealAnalytics(true); loadMakeInfo(); }, ms));
     }catch(e){ toast(e.message, "danger"); }
     setBusy(false);
   }
   if(!info) return <Skeleton h={90}/>;
   if(info.error) return <div style={{fontSize:12.5, color:"var(--ink-mute)"}}>{info.error} — Make settings are available on the live site.</div>;
-  const row = (label, st)=>(
-    <div style={{display:"flex", alignItems:"center", gap:8, fontSize:13, padding:"6px 0"}}>
-      <span style={{width:9, height:9, borderRadius:9, background: st.configured? "var(--green)" : "var(--ink-mute)", flexShrink:0}}/>
-      <strong style={{fontWeight:600}}>{label}</strong>
-      <span style={{color:"var(--ink-mute)", minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>{st.configured? st.hook : "not connected"}</span>
-    </div>
-  );
-  const input = {padding:"8px 10px", borderRadius:8, border:"1px solid var(--border)", fontSize:13, background:"var(--surface)", color:"var(--ink)", flex:"1 1 220px", minWidth:0};
+  const P = info.platforms || {};
+  const anyPull = MAKE_PLATFORMS.some(p=>P[p] && P[p].pull.configured);
+  const anyPublish = MAKE_PLATFORMS.some(p=>P[p] && P[p].publish.configured);
+  const byPlat = (info.lastPull && info.lastPull.byPlatform) || {};
+  const input = {padding:"7px 9px", borderRadius:8, border:"1px solid var(--border)", fontSize:12.5, background:"var(--surface)", color:"var(--ink)", width:"100%", minWidth:0};
+  const cell = (dir, p)=>{
+    const st = (P[p]||{})[dir] || {};
+    const editing = edit && edit.dir===dir && edit.platform===p;
+    if(editing) return (
+      <div style={{display:"flex", gap:6}}>
+        <input autoFocus value={edit.value} onChange={e=>setEdit({...edit, value:e.target.value})} placeholder="https://hook.eu1.make.com/…" style={input}/>
+        <Button size="sm" variant="primary" disabled={busy || !edit.value.trim()} onClick={()=>save({hooks:{[dir]:{[p]: edit.value.trim()}}})}>Save</Button>
+        <Button size="sm" variant="subtle" onClick={()=>setEdit(null)}>Cancel</Button>
+      </div>
+    );
+    return (
+      <div style={{display:"flex", alignItems:"center", gap:6, minWidth:0, flexWrap:"wrap"}}>
+        <span style={{width:8, height:8, borderRadius:8, background: st.configured? "var(--green)" : "var(--border)", flexShrink:0}}/>
+        <span style={{fontSize:12.5, color: st.configured? "var(--ink)" : "var(--ink-mute)", whiteSpace:"nowrap"}}>{st.configured? "Connected" : "Not set"}</span>
+        {dir==="pull" && byPlat[p] && <span style={{fontSize:11.5, color:"var(--ink-mute)", whiteSpace:"nowrap"}}>· {byPlat[p].count} posts · {fmtDate(byPlat[p].at,{day:"numeric", month:"short"})}</span>}
+        {canEdit && <span style={{marginLeft:"auto", display:"inline-flex", gap:10}}>
+          <button onClick={()=>setEdit({dir, platform:p, value:""})} style={{border:"none", background:"none", color:"var(--accent)", fontSize:12, fontWeight:600, cursor:"pointer", padding:0}}>{st.configured? "Change" : "Add"}</button>
+          {st.configured && <button onClick={()=>save({hooks:{[dir]:{[p]:""}}}, PLATFORM_META[p].label+" "+(dir==="pull"? "stats" : "publish")+" webhook removed")} style={{border:"none", background:"none", color:"var(--ink-mute)", fontSize:12, cursor:"pointer", padding:0}}>Remove</button>}
+        </span>}
+      </div>
+    );
+  };
   const recent = [...mk.jobs].reverse().slice(0, 6);
   return (
     <div>
-      <div style={{fontSize:12.5, color:"var(--ink-soft)", lineHeight:1.55, marginBottom:10}}>Make posts approved content to <strong>Instagram, Facebook and YouTube</strong> and brings back real stats for Analytics. Which accounts it uses is set inside Make, so switching from test accounts to Sanjugo's doesn't change anything here. TikTok and Google Business are still marked as published by hand.</div>
-      {row("Publishing", info.publish)}
-      {row("Analytics", info.analytics)}
-      {canEdit && <div style={{display:"flex", flexDirection:"column", gap:8, marginTop:10}}>
-        <div style={{display:"flex", gap:8, flexWrap:"wrap"}}><input value={pub} onChange={e=>setPub(e.target.value)} placeholder="Publish webhook — https://hook.eu1.make.com/…" style={input}/><Button size="sm" disabled={busy || !pub.trim()} onClick={()=>save({publishHook: pub.trim()})}>Save</Button></div>
-        <div style={{display:"flex", gap:8, flexWrap:"wrap"}}><input value={ana} onChange={e=>setAna(e.target.value)} placeholder="Analytics webhook — https://hook.eu1.make.com/…" style={input}/><Button size="sm" disabled={busy || !ana.trim()} onClick={()=>save({analyticsHook: ana.trim()})}>Save</Button></div>
+      <div style={{fontSize:12.5, color:"var(--ink-soft)", lineHeight:1.55, marginBottom:12}}>Every platform has its own Make scenarios — <strong>Publish · …</strong> and <strong>Pull · …</strong> — so one can be fixed, paused or moved to another account without touching the rest. Which account each one uses is set inside Make. Platforms without a Publish webhook are marked as published by hand.</div>
+      <div style={{border:"1px solid var(--border)", borderRadius:10, overflow:"hidden"}}>
+        {MAKE_PLATFORMS.map((p,i)=>(
+          <div key={p} className="cf-make-row" style={{display:"grid", gridTemplateColumns:"150px 1fr 1fr", gap:14, alignItems:"center", padding:"10px 12px", borderTop: i? "1px solid var(--border)" : "none"}}>
+            <div style={{display:"flex", alignItems:"center", gap:7, fontWeight:600, fontSize:13}}><PlatformIcon platform={p} size={12}/>{PLATFORM_META[p].label}</div>
+            <div style={{minWidth:0}}><div style={{fontSize:10.5, fontWeight:700, letterSpacing:".3px", color:"var(--ink-mute)", marginBottom:3}}>PUBLISH</div>{cell("publish", p)}</div>
+            <div style={{minWidth:0}}><div style={{fontSize:10.5, fontWeight:700, letterSpacing:".3px", color:"var(--ink-mute)", marginBottom:3}}>PULL STATS</div>{cell("pull", p)}</div>
+          </div>
+        ))}
+      </div>
+      {canEdit && <div style={{marginTop:10}}>
+        {!showSetup ? <Button size="sm" variant="ghost" onClick={()=>setShowSetup(true)}>Paste all webhooks at once</Button> : <div>
+          <textarea value={setup} onChange={e=>setSetup(e.target.value)} rows={6} placeholder={"One per line, e.g.\nPublish · Instagram  https://hook.eu1.make.com/…\nPull · Instagram  https://hook.eu1.make.com/…"} style={{...input, fontFamily:"ui-monospace, Menlo, monospace", fontSize:12, resize:"vertical"}}/>
+          <div style={{display:"flex", gap:8, marginTop:6}}><Button size="sm" variant="primary" disabled={busy || !setup.trim()} onClick={saveSetup}>Save webhooks</Button><Button size="sm" variant="subtle" onClick={()=>{setShowSetup(false); setSetup("");}}>Cancel</Button></div>
+        </div>}
       </div>}
-      <label style={{display:"flex", gap:10, alignItems:"flex-start", cursor: canEdit? "pointer":"default", marginTop:14, opacity: info.publish.configured? 1 : .5}}>
-        <input type="checkbox" checked={!!info.autoPublish} disabled={!canEdit || busy || !info.publish.configured} onChange={e=>save({autoPublish: e.target.checked})} style={{marginTop:3}}/>
-        <span style={{fontSize:13, lineHeight:1.55}}><strong>Auto-publish at the scheduled time</strong><br/><span style={{color:"var(--ink-soft)"}}>Every 5 minutes, approved posts whose time has come are sent to Make. Leave this off while testing and use "Publish now" on a post instead.</span></span>
+      <label style={{display:"flex", gap:10, alignItems:"flex-start", cursor: canEdit? "pointer":"default", marginTop:14, opacity: anyPublish? 1 : .5}}>
+        <input type="checkbox" checked={!!info.autoPublish} disabled={!canEdit || busy || !anyPublish} onChange={e=>save({autoPublish: e.target.checked})} style={{marginTop:3}}/>
+        <span style={{fontSize:13, lineHeight:1.55}}><strong>Auto-publish at the scheduled time</strong><br/><span style={{color:"var(--ink-soft)"}}>Every 5 minutes, approved posts whose time has come go to each platform's Publish scenario. Leave this off while testing and use "Publish now" on a post instead.</span></span>
       </label>
       <div style={{display:"flex", alignItems:"center", gap:10, flexWrap:"wrap", marginTop:14}}>
-        <Button size="sm" icon="refresh" disabled={busy || !info.analytics.configured} onClick={pull}>Get latest stats now</Button>
-        <span style={{fontSize:12, color:"var(--ink-mute)"}}>{info.lastPull ? "Last stats: "+fmtDateTime(info.lastPull.at)+" · "+Object.entries(info.lastPull.platforms||{}).map(([p,n])=>n+" "+(PLATFORM_META[p]||{label:p}).label).join(", ") : "No stats pulled yet"} · also runs nightly</span>
+        <Button size="sm" icon="refresh" disabled={busy || !anyPull} onClick={pull}>Get latest stats now</Button>
+        <span style={{fontSize:12, color:"var(--ink-mute)"}}>{info.lastPull ? "Last stats: "+fmtDateTime(info.lastPull.at) : "No stats pulled yet"} · also runs nightly at 03:30</span>
       </div>
       {recent.length>0 && <div style={{marginTop:14, borderTop:"1px solid var(--border)", paddingTop:10}}>
         <div style={{fontSize:12, fontWeight:600, color:"var(--ink-mute)", marginBottom:6}}>Recent publishing</div>
@@ -4872,7 +4925,7 @@ function AnalyticsPage(){
           ))}
         </div>
         <span style={{flex:"1 1 260px"}}>{src==="real"
-          ? <>Real results from Make for {realPosts.length} post{realPosts.length===1?"":"s"} (Instagram, Facebook, YouTube){realData && realData.lastPull? " · updated "+fmtDateTime(realData.lastPull.at) : ""}. TikTok stats aren't connected yet. Facebook only reports reactions, so its views and engagement rate show as 0.</>
+          ? <>Real results from Make for {realPosts.length} post{realPosts.length===1?"":"s"} ({[...new Set(realPosts.map(p=>p.platform))].map(p=>PLATFORM_META[p].label).join(", ")}){realData && realData.lastPull? " · updated "+fmtDateTime(realData.lastPull.at) : ""}.{realPosts.some(p=>p.platform==="facebook")? " Facebook only reports reactions, so its views and engagement rate show as 0." : ""}</>
           : <>These are realistic sample numbers so you can explore the reports and forecaster.{realPosts.length? "" : " Connect Make in Settings and pull stats to see your real results here."}</>}</span>
       </div>
 
@@ -5511,23 +5564,19 @@ function TeamPage(){
 // Where each platform's posts go out: through Make (see Settings → Make.com) or marked as published by hand.
 function PlatformConnections(){
   const mk = useMakeStore();
-  const viaMake = !!(mk.info && mk.info.publish && mk.info.publish.configured);
-  const rows = [
-    ["instagram","Reels and photo posts"], ["facebook","Page reels and photo posts"], ["youtube","Shorts"],
-    ["tiktok","Make can't post organic TikToks — publish in the app, then mark as published"], ["gbp","Post in Google Business, then mark as published"],
-  ];
+  const desc = {instagram:"Reels and photo posts", facebook:"Page reels and photo posts", tiktok:"Videos", youtube:"Shorts", gbp:"Updates on your listing"};
   return (
     <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(220px,1fr))", gap:12, marginBottom:26}}>
-      {rows.map(([p, desc])=>{
-        const auto = MAKE_PLATFORMS.includes(p) && viaMake;
-        const badge = auto ? ["Auto via Make","var(--green)","var(--green-soft)"] : MAKE_PLATFORMS.includes(p) ? ["Not connected","var(--ink-mute)","var(--surface-2)"] : ["Manual","var(--amber)","var(--amber-soft)"];
+      {MAKE_PLATFORMS.map(p=>{
+        const pub = makeReady("publish", p), pull = makeReady("pull", p);
+        const badge = pub ? ["Auto via Make","var(--green)","var(--green-soft)"] : ["Manual","var(--amber)","var(--amber-soft)"];
         return (
           <Card key={p} style={{padding:14}}>
             <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", gap:8, marginBottom:6}}>
               <div style={{display:"flex", alignItems:"center", gap:7, fontWeight:700, fontSize:13.5}}><PlatformIcon platform={p} size={13}/>{PLATFORM_META[p].label}</div>
               <Badge label={badge[0]} color={badge[1]} soft={badge[2]}/>
             </div>
-            <div style={{fontSize:12, color:"var(--ink-mute)", lineHeight:1.5}}>{desc}</div>
+            <div style={{fontSize:12, color:"var(--ink-mute)", lineHeight:1.5}}>{desc[p]} · {pub? "published by Make" : "publish in the app, then mark as published"} · stats {pull? "from Make" : "not connected"}</div>
           </Card>
         );
       })}

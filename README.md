@@ -113,14 +113,18 @@ Tell me once you've deployed (or if any step errors) and I'll help from there.
 
 ## Make.com — auto-publishing and real analytics
 
-Two Make scenarios (team "My Team", eu1 zone) do the talking to the social platforms:
+Each platform has its **own** Make scenarios (team "My Team", eu1 zone), in two folders, so one can be fixed, paused or
+moved to another account without touching the others:
 
-| Scenario | Webhook | What it does |
+| Folder | Scenarios | What each does |
 |---|---|---|
-| **Creator Studio — Publish** | `Creator Studio — publish` | Gets one post × platform from Creator Studio, posts it (Instagram reel/photo, Facebook reel/photo, YouTube Short) and calls back `/api/make/callback` with the live link or the error. |
-| **Creator Studio — Analytics** | `Creator Studio — analytics` | Fetches the latest ~15 posts per platform with likes, comments, reach, saves, shares and views and calls back once per platform. |
+| **Creator Studio · Publish** | Publish · Instagram / Facebook / YouTube / Google Business | Gets one post from Creator Studio, publishes it, and calls back `/api/make/callback` with the live link or the error. |
+| **Creator Studio · Pull (stats)** | Pull · Instagram / Facebook / YouTube / TikTok / Google Business | Sends back the latest ~15 posts with likes, comments, reach, saves, shares and views. |
 
-- **Connect:** paste both webhook addresses into Settings → Make.com (admins). Nothing else to configure here.
+Each scenario starts with its own webhook (named `CS Publish · …` / `CS Pull · …`). Creator Studio keeps one address per
+platform and direction in Settings → Make.com (admins; *Paste all webhooks at once* accepts lines like
+`Publish · Instagram https://hook.eu1.make.com/…`). A platform without a Publish webhook is published by hand.
+
 - **Publishing:** on an approved post, *Publish…* → *Publish now with Make*. The post shows "Publishing via Make…", then
   the live link (or the error with *Try again*). Team Chat and push alerts announce the result.
 - **On a schedule:** Settings → Make.com → *Auto-publish at the scheduled time*. A cron checks every 5 minutes and sends
@@ -128,7 +132,7 @@ Two Make scenarios (team "My Team", eu1 zone) do the talking to the social platf
 - **Stats:** nightly at 03:30 (UK), or *Get latest stats now*. Analytics switches to "Real data" once any arrive.
 - **Which accounts:** chosen inside the Make scenarios (the Instagram account / Facebook Page / YouTube connection on each
   module). To move from test accounts to Sanjugo's, change those modules in Make — Creator Studio doesn't change.
-- **Not through Make:** TikTok (Make only has TikTok *ads*) and Google Business stay "Mark as published" by hand.
+- **TikTok publishing:** Make has no module for posting organic TikToks, so TikTok stays "Mark as published" by hand (stats can still be pulled).
 - **Security:** every request carries a one-time random token that the callback must return; `/api/make/callback`
   accepts nothing else. If Cloudflare Access is switched on, add a *Bypass* policy for `/api/make/callback` so Make can reach it.
 - **Media:** Make downloads the file from `/api/media/…`, so it must be stored in Creator Studio (uploaded or imported).

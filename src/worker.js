@@ -10,7 +10,7 @@ export default {
     if (event.cron === "30 3 * * *") {
       ctx.waitUntil(runCleanup(env, { trigger: "nightly" }).catch((e) => console.error("cleanup failed", e)));
       // Nightly stats from Make (skipped quietly if the analytics webhook isn't set up yet).
-      ctx.waitUntil(makeConfig(env).then((c) => c.analyticsHook && triggerAnalyticsPull(env, { trigger: "nightly", force: true })).catch((e) => console.error("analytics pull failed", e)));
+      ctx.waitUntil(makeConfig(env).then((c) => pullPlatforms(c).length && triggerAnalyticsPull(env, { trigger: "nightly", force: true })).catch((e) => console.error("analytics pull failed", e)));
     } else {
       ctx.waitUntil(autoPublishDue(env).catch((e) => console.error("auto-publish failed", e)));
     }
@@ -1287,16 +1287,16 @@ async function pushRoute(request, env, url, viewer) {
 
 // ---------------------------------------------------------------------------
 // Make.com — auto-publishing and real analytics.
-// Creator Studio talks to two Make scenarios through their webhooks (URLs saved by an admin in Settings → Make.com):
-//   • "Creator Studio — Publish": one request per post × platform. Make posts it and calls /api/make/callback with
-//     the live link (or the error).
-//   • "Creator Studio — Analytics": asks Make for the latest post stats; Make calls back once per platform.
+// Every platform has its own pair of Make scenarios (folders "Creator Studio · Publish" and "Creator Studio · Pull"),
+// each with its own webhook saved by an admin in Settings → Make.com — so one platform can be fixed, paused or
+// switched to another account without touching the others:
+//   • "Publish · <platform>": gets one post, publishes it and calls /api/make/callback with the live link (or error).
+//   • "Pull · <platform>": sends back the latest posts with their stats.
 // Every request carries a one-time random token and the callback must return it, so nothing else can report
-// results. Which Instagram / Facebook / YouTube accounts are used is chosen inside Make, so moving from the test
-// accounts to Sanjugo's is only a change in Make. TikTok and Google Business stay manual ("Mark as published").
+// results. Which accounts are used is chosen inside Make. A platform without a publish webhook stays manual.
 // ---------------------------------------------------------------------------
 
-const MAKE_PLATFORMS = ["instagram", "facebook", "youtube"];
+const MAKE_PLATFORMS = ["instagram", "facebook", "tiktok", "youtube", "gbp"];
 const MAKE_HOOK_RE = /^https:\/\/hook\.[a-z0-9]+\.make\.com\/[A-Za-z0-9]+$/;
 const DEFAULT_PUBLIC_URL = "https://sanjugo-content-engine.rapid-dust-8baf.workers.dev";
 const PLATFORM_NAMES = { instagram: "Instagram", facebook: "Facebook", youtube: "YouTube Shorts", tiktok: "TikTok", gbp: "Google Business" };
@@ -1316,8 +1316,23 @@ async function ensureMakeTables(env) {
 }
 
 async function makeConfig(env) {
-  return { publishHook: "", analyticsHook: "", autoPublish: false, ...((await kvGet(env, "make_config")) || {}) };
+  const c = (await kvGet(env, "make_config")) || {};
+  const hooks = { publish: { ...((c.hooks || {}).publish || {}) }, pull: { ...((c.hooks || {}).pull || {}) } };
+  return { hooks, autoPublish: !!c.autoPublish, updatedAt: c.updatedAt || null };
 }
+const publishHookFor = (cfg, p) => cfg.hooks.publish[p] || "";
+const pullPlatforms = (cfg) => MAKE_PLATFORMS.filter((p) => cfg.hooks.pull[p]);
+function makeStatus(cfg) {
+  const out = {};
+  for (const p of MAKE_PLATFORMS) {
+    out[p] = {
+      publish: { configured: !!cfg.hooks.publish[p], hook: hookLabel(cfg.hooks.publish[p]) },
+      pull: { configured: !!cfg.hooks.pull[p], hook: hookLabel(cfg.hooks.pull[p]) },
+    };
+  }
+  return out;
+}
+const GBP_CTA = { "learn more": "LEARN_MORE", book: "BOOK", "order online": "ORDER", order: "ORDER", shop: "SHOP", buy: "SHOP", "sign up": "SIGN_UP", call: "CALL", "call now": "CALL" };
 const hookLabel = (u) => (u ? u.replace(/^(https:\/\/hook\.[^/]+\/)(.{4}).*$/, "$1$2…") : "");
 
 // Scheduled times are saved from the browser as London wall-clock time without a zone ("2026-09-28T18:00:00").
@@ -1371,13 +1386,13 @@ function absoluteMediaUrl(u, origin) {
 // Send one post to Make for the given platforms. Returns the jobs created (or reasons they weren't).
 async function sendPublishJobs(env, { item, platforms, origin, userId, trigger }) {
   const cfg = await makeConfig(env);
-  if (!cfg.publishHook) throw new HttpError(400, "Add the Make publish webhook in Settings → Make.com first.");
   await ensureMakeTables(env);
   const results = [];
   const mediaUrl = absoluteMediaUrl(item.media && item.media.fileUrl, origin);
   for (const platform of platforms) {
     const v = (item.variants || {})[platform];
-    if (!MAKE_PLATFORMS.includes(platform)) { results.push({ platform, skipped: "Publish this one by hand — Make can't post to " + (PLATFORM_NAMES[platform] || platform) + "." }); continue; }
+    const hook = publishHookFor(cfg, platform);
+    if (!hook) { results.push({ platform, skipped: (PLATFORM_NAMES[platform] || platform) + " isn't connected to Make — publish it by hand, then mark it as published." }); continue; }
     if (!v) { results.push({ platform, skipped: "This post isn't set up for " + PLATFORM_NAMES[platform] + "." }); continue; }
     if (v.publishStatus === "published") { results.push({ platform, skipped: "Already published." }); continue; }
     if (!mediaUrl) { results.push({ platform, skipped: "The video or photo hasn't finished uploading to Creator Studio." }); continue; }
@@ -1393,12 +1408,16 @@ async function sendPublishJobs(env, { item, platforms, origin, userId, trigger }
       id: "job_" + crypto.randomUUID().slice(0, 12), token: crypto.randomUUID() + crypto.randomUUID().slice(0, 8),
       platform, contentId: item.id,
     };
+    const cta = GBP_CTA[String(v.cta || "").trim().toLowerCase()] || (v.url ? "LEARN_MORE" : "CALL");
     const payload = {
       token: job.token, jobId: job.id, contentId: item.id, platform,
-      kind: isPhoto ? "photo" : platform === "youtube" ? "short" : "reel",
+      kind: isPhoto ? "photo" : platform === "youtube" ? "short" : platform === "gbp" ? "update" : "reel",
       title: String(v.title || item.title || "Sanjugo").replace(/[<>]/g, "").slice(0, 100),
-      caption: platform === "youtube" ? String(v.description || caption).replace(/[<>]/g, "") : caption,
+      caption: platform === "youtube" ? String(v.description || caption).replace(/[<>]/g, "") : platform === "gbp" ? caption.slice(0, 1500) : caption,
       mediaUrl, fileName: key || (isPhoto ? "photo.jpg" : "video.mp4"), privacy: "public",
+      mediaFormat: isPhoto ? "PHOTO" : "VIDEO",
+      // Google Business button: needs a link unless it's "Call" (which uses the listing's phone number).
+      ctaType: !v.url ? "CALL" : cta, ctaUrl: v.url || "",
     };
     const now = new Date().toISOString();
     await env.DB.prepare(
@@ -1406,7 +1425,7 @@ async function sendPublishJobs(env, { item, platforms, origin, userId, trigger }
        VALUES (?1, 'publish', ?2, ?3, ?4, 'sent', ?5, ?6, ?7, ?8, ?9, ?9)`
     ).bind(job.id, item.id, platform, job.token, userId || null, trigger, v.scheduledAt || null, JSON.stringify({ title: item.title }), now).run();
     try {
-      await callHook(cfg.publishHook, payload);
+      await callHook(hook, payload);
       results.push({ platform, jobId: job.id, status: "sent" });
     } catch (e) {
       await env.DB.prepare("UPDATE make_jobs SET status = 'failed', error = ?2, updated_at = ?3 WHERE id = ?1").bind(job.id, e.message, new Date().toISOString()).run();
@@ -1418,7 +1437,8 @@ async function sendPublishJobs(env, { item, platforms, origin, userId, trigger }
 
 async function triggerAnalyticsPull(env, { trigger, force }) {
   const cfg = await makeConfig(env);
-  if (!cfg.analyticsHook) throw new HttpError(400, "Add the Make analytics webhook in Settings → Make.com first.");
+  const platforms = pullPlatforms(cfg);
+  if (!platforms.length) throw new HttpError(400, "Add at least one Pull webhook in Settings → Make.com first.");
   await ensureMakeTables(env);
   const recent = await env.DB.prepare("SELECT created_at FROM make_jobs WHERE kind = 'analytics' AND status != 'failed' ORDER BY created_at DESC LIMIT 1").first();
   if (!force && recent && Date.now() - Date.parse(recent.created_at) < 10 * 60e3) {
@@ -1430,13 +1450,16 @@ async function triggerAnalyticsPull(env, { trigger, force }) {
   await env.DB.prepare(
     "INSERT INTO make_jobs (id, kind, token, status, trigger, detail, created_at, updated_at) VALUES (?1, 'analytics', ?2, 'sent', ?3, '{}', ?4, ?4)"
   ).bind(id, token, trigger, now).run();
-  try {
-    await callHook(cfg.analyticsHook, { token, platforms: MAKE_PLATFORMS.join(",") });
-  } catch (e) {
-    await env.DB.prepare("UPDATE make_jobs SET status = 'failed', error = ?2 WHERE id = ?1").bind(id, e.message).run();
-    throw e;
-  }
-  return { id, requestedAt: now };
+  // Each platform's Pull scenario runs on its own, so one broken platform doesn't stop the others.
+  const sent = [], failed = [];
+  await Promise.all(platforms.map(async (p) => {
+    try { await callHook(cfg.hooks.pull[p], { token, platforms: p }); sent.push(p); }
+    catch (e) { failed.push({ platform: p, error: e.message }); }
+  }));
+  await env.DB.prepare("UPDATE make_jobs SET status = ?2, error = ?3, detail = ?4 WHERE id = ?1")
+    .bind(id, sent.length ? "sent" : "failed", failed.length ? failed.map((f) => PLATFORM_NAMES[f.platform] + ": " + f.error).join(" · ") : null, JSON.stringify({ requested: sent })).run();
+  if (!sent.length) throw new HttpError(502, failed.map((f) => PLATFORM_NAMES[f.platform] + ": " + f.error).join(" · "));
+  return { id, requestedAt: now, requested: sent, failed };
 }
 
 const num = (v) => { const n = Number(v); return Number.isFinite(n) ? Math.round(n) : 0; };
@@ -1490,11 +1513,15 @@ async function handleMakeCallback(request, env, ctx) {
            saves = excluded.saves, reach = excluded.reach, views = excluded.views`
       ).bind(platform, row.id, day, row.likes, row.comments, row.shares, row.saves, row.reach, row.views).run();
     }
+    // Re-read: other platforms report back in parallel.
+    const fresh = await env.DB.prepare("SELECT detail FROM make_jobs WHERE id = ?1").bind(job.id).first();
     let detail = {};
-    try { detail = JSON.parse(job.detail || "{}"); } catch (e) {}
-    detail[platform] = posts.length;
+    try { detail = JSON.parse((fresh && fresh.detail) || "{}"); } catch (e) {}
+    detail.counts = { ...(detail.counts || {}), [platform]: posts.length };
     await env.DB.prepare("UPDATE make_jobs SET status = 'done', detail = ?2, updated_at = ?3 WHERE id = ?1").bind(job.id, JSON.stringify(detail), now).run();
-    await kvSet(env, "make_last_pull", { at: now, jobId: job.id, platforms: detail });
+    const prev = (await kvGet(env, "make_last_pull")) || {};
+    await kvSet(env, "make_last_pull", { at: now, jobId: job.id, platforms: { ...(prev.jobId === job.id ? prev.platforms : {}), [platform]: posts.length },
+      byPlatform: { ...(prev.byPlatform || {}), [platform]: { at: now, count: posts.length } } });
     return json({ ok: true, saved: posts.length });
   }
 
@@ -1529,7 +1556,7 @@ async function handleMakeCallback(request, env, ctx) {
 // Every 5 minutes (when switched on): send approved posts whose scheduled time has arrived.
 async function autoPublishDue(env) {
   const cfg = await makeConfig(env);
-  if (!cfg.autoPublish || !cfg.publishHook) return { sent: 0 };
+  if (!cfg.autoPublish) return { sent: 0 };
   await ensureMakeTables(env);
   const state = await readState(env);
   const now = Date.now();
@@ -1539,7 +1566,7 @@ async function autoPublishDue(env) {
     const due = [];
     for (const platform of MAKE_PLATFORMS) {
       const v = (item.variants || {})[platform];
-      if (!v || v.publishStatus === "published" || !v.scheduledAt) continue;
+      if (!publishHookFor(cfg, platform) || !v || v.publishStatus === "published" || !v.scheduledAt) continue;
       const at = londonTime(v.scheduledAt);
       if (!(at <= now) || now - at > 6 * 3600e3) continue; // not yet, or too old to post without someone checking
       // A failed attempt for this same time isn't retried automatically — someone decides from the post.
@@ -1581,9 +1608,7 @@ async function makeRoute(request, env, url, viewer, ctx) {
     const cfg = await makeConfig(env);
     const { results } = await env.DB.prepare("SELECT * FROM make_jobs WHERE kind = 'publish' ORDER BY created_at DESC LIMIT 60").all();
     return json({
-      publish: { configured: !!cfg.publishHook, hook: hookLabel(cfg.publishHook) },
-      analytics: { configured: !!cfg.analyticsHook, hook: hookLabel(cfg.analyticsHook) },
-      autoPublish: !!cfg.autoPublish, platforms: MAKE_PLATFORMS,
+      platforms: makeStatus(cfg), autoPublish: !!cfg.autoPublish,
       lastPull: await kvGet(env, "make_last_pull"), jobs: (results || []).map(jobOut),
     });
   }
@@ -1596,16 +1621,20 @@ async function makeRoute(request, env, url, viewer, ctx) {
     requireAdmin(viewer);
     const b = await request.json().catch(() => ({}));
     const cfg = await makeConfig(env);
-    for (const k of ["publishHook", "analyticsHook"]) {
-      if (b[k] === undefined) continue;
-      const v = String(b[k] || "").trim();
-      if (v && !MAKE_HOOK_RE.test(v)) throw new HttpError(400, "That doesn't look like a Make webhook address (https://hook.eu1.make.com/…).");
-      cfg[k] = v;
+    // hooks: { publish: { instagram: "https://hook…" }, pull: { … } } — only the given entries change; "" removes one.
+    for (const dir of ["publish", "pull"]) {
+      const given = (b.hooks || {})[dir] || {};
+      for (const [p, raw] of Object.entries(given)) {
+        if (!MAKE_PLATFORMS.includes(p)) throw new HttpError(400, "Unknown platform: " + p);
+        const v = String(raw || "").trim();
+        if (v && !MAKE_HOOK_RE.test(v)) throw new HttpError(400, `The ${dir} address for ${PLATFORM_NAMES[p]} doesn't look like a Make webhook (https://hook.eu1.make.com/…).`);
+        if (v) cfg.hooks[dir][p] = v; else delete cfg.hooks[dir][p];
+      }
     }
     if (b.autoPublish !== undefined) cfg.autoPublish = !!b.autoPublish;
     cfg.updatedAt = new Date().toISOString();
     await kvSet(env, "make_config", cfg);
-    return json({ ok: true, publish: { configured: !!cfg.publishHook, hook: hookLabel(cfg.publishHook) }, analytics: { configured: !!cfg.analyticsHook, hook: hookLabel(cfg.analyticsHook) }, autoPublish: cfg.autoPublish });
+    return json({ ok: true, platforms: makeStatus(cfg), autoPublish: cfg.autoPublish });
   }
   if (url.pathname === "/api/make/publish" && request.method === "POST") {
     const b = await request.json().catch(() => ({}));

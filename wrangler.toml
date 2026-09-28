@@ -30,3 +30,7 @@ database_id = "32fd6952-121c-4f8f-8676-aaaa76c6dc55"
 [[r2_buckets]]
 binding = "MEDIA"
 bucket_name = "contentflow-media"
+
+# Cloudflare Workers AI — powers the "AI Dev +" Team Chat assistant when no Claude key is set (free daily allowance).
+[ai]
+binding = "AI"

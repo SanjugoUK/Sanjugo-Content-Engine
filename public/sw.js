@@ -3,8 +3,8 @@
 // and only fall back to the cached shell if the network is actually unreachable. This avoids
 // the classic PWA bug where people get stuck on a stale cached version after an update.
 
-const CACHE_NAME = "contentflow-shell-v2";
-const SHELL_FILES = ["/", "/manifest.json", "/icon-192.png", "/icon-512.png"];
+const CACHE_NAME = "contentflow-shell-v3";
+const SHELL_FILES = ["/", "/manifest.json", "/favicon-32.png", "/icon-192.png", "/icon-512.png"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(

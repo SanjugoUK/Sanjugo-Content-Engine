@@ -41,8 +41,9 @@ export default {
         }
       }
       // Admin-only actions (only enforced once sign-in is on — before that everyone is effectively an admin).
+      // (Refreshing the Drive library list is allowed for everyone — creators need new files to show up.)
       const adminOnly = (url.pathname === "/api/storage/cleanup") || (url.pathname === "/api/google/disconnect") ||
-        (url.pathname === "/api/google/connect") || (url.pathname === "/api/library/refresh");
+        (url.pathname === "/api/google/connect");
       if (adminOnly) {
         try { requireAdmin(viewer); } catch (e) { return json({ error: e.message }, e.status || 403); }
       }
@@ -73,6 +74,11 @@ export default {
 
     if (url.pathname === "/api/upload" && request.method === "POST") {
       return uploadFile(request, env);
+    }
+
+    if (url.pathname === "/api/chat/bot" && request.method === "POST") {
+      try { return await handleBotQuestion(request, env, ctx); }
+      catch (e) { return json({ error: e.message || "AI Dev + error" }, e.status || 500); }
     }
 
     if (url.pathname === "/api/chat") {
@@ -1679,4 +1685,189 @@ async function makeRoute(request, env, url, viewer, ctx) {
     return json(await realAnalytics(env));
   }
   return json({ error: "Not found" }, 404);
+}
+
+// ---------------------------------------------------------------------------
+// "AI Dev +" — the Team Chat assistant. Tag @AI Dev + with a question (about Creator Studio or anything else) and
+// it answers in the chat, tagging whoever asked. It sees a snapshot of the live workspace (posts, approvals, schedule,
+// team, Make connections, real stats) and the recent conversation. It runs on Claude (with web search) when the
+// ANTHROPIC_API_KEY secret is set, otherwise on Cloudflare Workers AI (the AI binding — no key, free daily allowance).
+// The asker's app calls /api/chat/bot right after sending; a claim in app_kv makes sure each question is answered once.
+// ---------------------------------------------------------------------------
+
+const BOT_ID = "ai_bot";
+const BOT_NAME = "AI Dev +";
+const BOT_RE = /@ai\s?dev\s?\+/i;
+const WORKERS_AI_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+
+const BOT_SYSTEM = `You are "AI Dev +", the AI assistant inside Sanjugo Creator Studio's Team Chat. Sanjugo is a Japanese restaurant group in London (branches: Shoreditch, Angel, Victoria). The team uses Creator Studio to plan, approve and publish social media content (Instagram, Facebook, TikTok, YouTube Shorts, Google Business). People tag you in chat with questions — about how to use Creator Studio, about their own content and results, or about anything else (marketing ideas, captions, hashtags, social trends, general knowledge).
+
+How to answer:
+- Answer the actual question directly, then add only what helps. Be specific, practical and friendly; UK English.
+- Keep it chat-sized: usually under 150 words. Go longer only when they ask for detail, a plan, or several captions/ideas.
+- Plain text only — this chat does not render Markdown. No **bold**, no # headings, no tables. Short paragraphs; for lists use "- " at the start of a line.
+- For questions about their posts, schedule, approvals or stats, use the workspace snapshot you are given and quote real titles and numbers. Never invent posts, people or figures; if the snapshot doesn't have it, say so and say where in Creator Studio to look.
+- Use web search for anything current or factual you aren't sure of (trends, platform rule changes, events, news). Mention the source briefly in words (e.g. "according to Meta's help centre"), not long URLs.
+- You can't click anything or change data yourself — explain exactly which buttons to use instead.
+- If a question is ambiguous, make a sensible assumption, say it in a few words, and answer.
+
+What Creator Studio can do (use this to explain how things work):
+- Dashboard: counts of posts awaiting approval, changes requested, scheduled this week, published, failed; views and engagement from real stats (last 30 days); Smart insights (Claude's read of the pipeline); upcoming content; recent approvals. Tiles are clickable.
+- Create Content: upload a video/photo, or pick one from the Content Library by barcode (e.g. G219). Choose platforms, write a caption per platform, pick a campaign (or "No campaign"), priority, and the approver — one person, or "Cyrus or Yan Yan (either can approve)" (the default: both are notified and whoever decides first moves it on). Then submit for approval.
+- Content Library: the Google Drive folder "Sanjugo Marketing Contents Final" (about 1,600 files). File names end with a barcode like G219; search by barcode, dish or stage, watch videos, see where a file has already been used (post, platform, date), and start a post from it.
+- Approval Queue: tabs To review / Needs changes / Rejected. Posts are previewed exactly as they'll look on each app (Reels, TikTok, Shorts, Facebook, Google Business), with full-screen playback. Swipe or tap: right/✓ approve, left/✕ reject, up/Request Edits for changes (with feedback tags and a due date). "Full package" reviews the whole post; "Per platform" reviews each platform separately. Undo Last Decision exists. Creators fix posts from Needs changes / Rejected and resubmit, optionally telling the approver in chat. Approved posts are auto-placed into the next free slot of the recurring calendar template (Settings) if they have no time.
+- Content Calendar: month, week and list views; filter by platform, campaign, status; tap a date to see that day or create content for it; drag or edit times.
+- Team Chat: @name mentions (with a badge, pop-up and phone/desktop alert), @everyone, attach a post, Mentions and Updates filters. "Creator Studio" posts automatic updates when something is sent for approval, resubmitted, approved, sent back, rejected, published, or fails to publish.
+- Publishing: on an approved post, "Publish…" → "Publish now with Make" posts to the platforms connected in Make (Instagram reel/photo, Facebook reel/photo, YouTube Short, Google Business update); the live link comes back to the post and Team Chat. Or switch on "Auto-publish at the scheduled time" (Settings → Make.com; checks every 5 minutes). TikTok can't be posted through Make — post it in the TikTok app, then use "Mark as published". Instagram reels need MP4/MOV, H.264/HEVC, max 1920 px wide, max 5 Mbps; Facebook reels 9:16, 3–90 s; best to export 1080p vertical.
+- Stats: Make pulls the latest posts with likes, comments, shares, saves, reach and views every night at 03:30, or any time with "Get latest stats now" (Settings → Make.com). TikTok stats come from the public @sanjugouk profile via HasData. Each platform has its own Make scenario ("Pull · Instagram", "Publish · Facebook", …) so one can be fixed without touching the others; "Clear stats" removes a platform's stats (e.g. after switching accounts).
+- Analytics: Real data (from Make) or Sample data; ranges 7/30/90 days, 12 months, All time, custom; filters by platform, campaign, content pillar, post; per-platform and per-post views, reach, likes, comments, shares, saves, engagement rate; best time to post; top posts; a growth forecaster.
+- Published Content: every live post on the connected accounts with its stats and a link to it.
+- Team: workload per person and real approval turnaround.
+- Settings (admins — Cyrus, Yan Yan): Make.com webhooks per platform, auto-publish, stats; Platforms; Notifications (chat workflow updates, and "Turn on alerts on this device" for phone/desktop push — on iPhone this only works from the Home Screen app: Safari → Share → Add to Home Screen, iOS 16.4+); Team & access (add people by email with a role: Creator, Approver, Admin); Google Drive connection; Storage (files move to a Drive archive 7 days after publishing, keeping 10 GB of Cloudflare storage free); Smart insights; Campaigns; recurring calendar template.
+- Roles: Creator — create, edit, submit. Approver — approve and schedule. Admin — everything including team and settings.`;
+
+async function botSnapshot(env, askerId) {
+  const state = await readState(env);
+  const { members } = await listTeam(env);
+  const byId = new Map(members.map((m) => [m.id, m]));
+  const name = (id) => (id === "any" ? "Cyrus or Yan Yan (either)" : (byId.get(id) || {}).name || id || "—");
+  const items = Array.isArray(state.contentItems) ? state.contentItems : [];
+  const counts = {};
+  for (const i of items) counts[i.status] = (counts[i.status] || 0) + 1;
+  const campaigns = new Map((state.campaigns || []).map((c) => [c.id, c.name]));
+  const lines = [];
+  const now = Date.now();
+  lines.push(`Now: ${new Date(now).toLocaleString("en-GB", { timeZone: "Europe/London", dateStyle: "full", timeStyle: "short" })} (London).`);
+  lines.push(`Asked by: ${name(askerId)}${byId.get(askerId) ? " (" + byId.get(askerId).role + ")" : ""}.`);
+  lines.push(`Team: ${members.filter((m) => m.active).map((m) => `${m.name} (${m.role})`).join(", ")}.`);
+  lines.push(`Posts: ${items.length} total — ${Object.entries(counts).map(([k, v]) => `${v} ${k.replace("_", " ")}`).join(", ") || "none yet"}.`);
+  const recent = [...items].sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || ""))).slice(0, 30);
+  if (recent.length) {
+    lines.push("Posts (newest first):");
+    for (const i of recent) {
+      const sched = Object.values(i.variants || {}).filter((v) => v.scheduledAt || v.publishStatus === "published")
+        .map((v) => `${v.platform} ${v.publishStatus === "published" ? "published" + (v.postUrl ? " " + v.postUrl : "") : "at " + v.scheduledAt}`).join("; ");
+      const fb = (i.versions || []).map((v) => v.feedback).filter(Boolean).slice(-1)[0];
+      lines.push(`- "${i.title}" — ${i.status}; ${(i.platforms || []).join(", ")}; by ${name(i.creator)}; approver ${name(i.approver)}; campaign ${campaigns.get(i.campaign) || "none"}; created ${String(i.createdAt || "").slice(0, 10)}${sched ? "; " + sched : ""}${fb ? `; last feedback: "${String(fb).slice(0, 160)}"` : ""}`);
+    }
+  }
+  const live = (state.campaigns || []).filter((c) => !c.archived);
+  if (live.length) {
+    lines.push("Campaigns running (use these facts for captions and offers):");
+    for (const c of live) lines.push(`- ${c.name}${c.details ? ": " + String(c.details).slice(0, 300) : ""}`);
+  }
+  const cfg = await makeConfig(env);
+  const pub = MAKE_PLATFORMS.filter((p) => cfg.hooks.publish[p]).map((p) => PLATFORM_NAMES[p]);
+  const pul = MAKE_PLATFORMS.filter((p) => cfg.hooks.pull[p]).map((p) => PLATFORM_NAMES[p]);
+  lines.push(`Make: publishes to ${pub.join(", ") || "nothing yet"}; pulls stats from ${pul.join(", ") || "nothing yet"}; auto-publish ${cfg.autoPublish ? "on" : "off"}.`);
+  await ensureMakeTables(env);
+  const last = await kvGet(env, "make_last_pull");
+  lines.push(`Stats last pulled: ${last ? last.at : "never"}.`);
+  const { results: posts } = await env.DB.prepare("SELECT * FROM social_posts ORDER BY published_at DESC LIMIT 400").all();
+  for (const p of MAKE_PLATFORMS) {
+    const ps = (posts || []).filter((x) => x.platform === p);
+    if (!ps.length) continue;
+    const since30 = ps.filter((x) => x.published_at && now - Date.parse(x.published_at) < 30 * 86400e3);
+    const sum = (arr, k) => arr.reduce((s, x) => s + (x[k] || 0), 0);
+    lines.push(`${PLATFORM_NAMES[p]} stats — ${ps.length} recent posts tracked; last 30 days: ${since30.length} posts, ${sum(since30, "views")} views, ${sum(since30, "likes")} likes, ${sum(since30, "comments")} comments, ${sum(since30, "shares")} shares, ${sum(since30, "saves")} saves.`);
+    for (const x of [...ps].sort((a, b) => (b.views || b.likes) - (a.views || a.likes)).slice(0, 5)) {
+      lines.push(`  - ${String(x.published_at || "").slice(0, 10)} "${String(x.caption || "").replace(/\s+/g, " ").slice(0, 70)}" views ${x.views}, reach ${x.reach}, likes ${x.likes}, comments ${x.comments}, shares ${x.shares}, saves ${x.saves} ${x.permalink || ""}`);
+    }
+  }
+  return lines.join("\n").slice(0, 24000);
+}
+
+async function botAnswer(env, msg) {
+  const { members } = await listTeam(env);
+  const byId = new Map(members.map((m) => [m.id, m.name]));
+  const who = (a) => (a === "system" ? "Creator Studio (automatic update)" : a === BOT_ID ? BOT_NAME : byId.get(a) || "Someone");
+  const { results } = await env.DB.prepare("SELECT * FROM chat_messages WHERE id <= ?1 ORDER BY id DESC LIMIT 25").bind(msg.id).all();
+  const history = (results || []).reverse().filter((m) => m.id !== msg.id)
+    .map((m) => `${who(m.author)} (${String(m.created_at).slice(0, 16).replace("T", " ")}): ${String(m.text).slice(0, 800)}`).join("\n");
+  const useClaude = !!env.ANTHROPIC_API_KEY;
+  // Workers AI has a smaller context window, so it gets a trimmed snapshot and conversation.
+  const snapshot = (await botSnapshot(env, msg.author)).slice(0, useClaude ? 24000 : 9000);
+  const question = String(msg.text).replace(BOT_RE, "").trim() || "(no question — just tagged you)";
+  const chatContext = useClaude ? history : history.split("\n").slice(-12).join("\n").slice(-3000);
+  const content = `<workspace_snapshot>\n${snapshot}\n</workspace_snapshot>\n\n<recent_team_chat>\n${chatContext || "(no earlier messages)"}\n</recent_team_chat>\n\n${who(msg.author)} asks: ${question}`;
+
+  if (!useClaude) {
+    const out = await env.AI.run(WORKERS_AI_MODEL, {
+      messages: [
+        { role: "system", content: BOT_SYSTEM.replace(/- Use web search[^\n]*\n/, "- You can't browse the web. For things that change often (trends, platform rules, news), give your best general knowledge and say it may be out of date.\n") },
+        { role: "user", content },
+      ],
+      max_tokens: 900,
+      temperature: 0.4,
+    });
+    const text = String((out && (out.response ?? out.result?.response)) || "").trim();
+    return tidyBotText(text);
+  }
+
+  const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
+  let messages = [{ role: "user", content }];
+  let final = null;
+  // Web search runs on Anthropic's side; a long search turn can pause — resume it a couple of times.
+  for (let turn = 0; turn < 3; turn++) {
+    final = await client.beta.messages.stream({
+      model: "claude-opus-5",
+      max_tokens: 8000,
+      output_config: { effort: "medium" },
+      betas: ["server-side-fallback-2026-07-01"],
+      fallbacks: "default",
+      system: BOT_SYSTEM,
+      tools: [{ type: "web_search_20260209", name: "web_search", max_uses: 3 }],
+      messages,
+    }).finalMessage();
+    if (final.stop_reason !== "pause_turn") break;
+    messages = [...messages, { role: "assistant", content: final.content }];
+  }
+  if (!final || final.stop_reason === "refusal") return "Sorry — I can't help with that one.";
+  return tidyBotText(final.content.filter((b) => b.type === "text").map((b) => b.text).join("").trim());
+}
+
+// Strip the Markdown the chat can't show.
+function tidyBotText(text) {
+  return (text || "Sorry — I couldn't come up with an answer. Try asking another way.")
+    .replace(/\*\*(.+?)\*\*/g, "$1").replace(/^#{1,6}\s+/gm, "").replace(/^\s*\*\s+/gm, "- ").slice(0, 3900);
+}
+
+async function handleBotQuestion(request, env, ctx) {
+  const b = await request.json().catch(() => ({}));
+  const id = Number(b.messageId);
+  await ensureChatTable(env);
+  const msg = id ? await env.DB.prepare("SELECT * FROM chat_messages WHERE id = ?1").bind(id).first() : null;
+  if (!msg || msg.author === BOT_ID || msg.author === "system" || !BOT_RE.test(msg.text)) return json({ error: "That message isn't a question for AI Dev +." }, 400);
+  const eventId = "bot_" + id;
+  const existing = await env.DB.prepare("SELECT * FROM chat_messages WHERE event_id = ?1").bind(eventId).first();
+  if (existing) return json({ message: rowToMessage(existing) });
+  await ensureStorageTables(env);
+  const claim = await env.DB.prepare("INSERT OR IGNORE INTO app_kv (k, v) VALUES (?1, ?2)").bind("botlock_" + id, JSON.stringify(Date.now())).run();
+  if (!claim.meta || !claim.meta.changes) return json({ pending: true }, 202);
+
+  const work = (async () => {
+    let text;
+    if (!env.ANTHROPIC_API_KEY && !env.AI) {
+      text = "I'm not switched on yet — Creator Studio needs either Cloudflare Workers AI (the AI binding) or a Claude API key (the ANTHROPIC_API_KEY secret). Once that's done, tag me again!";
+    } else {
+      try { text = await botAnswer(env, msg); }
+      catch (e) {
+        console.error("AI Dev + error", e);
+        text = e instanceof Anthropic.AuthenticationError ? "My Claude API key was rejected — an admin should check the ANTHROPIC_API_KEY secret."
+          : e instanceof Anthropic.RateLimitError ? "I'm a bit busy right now — ask me again in a minute."
+          : /neuron|quota|limit/i.test(String(e && e.message)) ? "I've used up today's free AI allowance on Cloudflare — ask me again tomorrow."
+          : "Sorry, I couldn't answer just now (" + (e && e.status ? "error " + e.status : "connection problem") + "). Try again in a moment.";
+      }
+    }
+    const row = await env.DB.prepare(
+      "INSERT OR IGNORE INTO chat_messages (author, text, mentions, content_id, created_at, event_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6) RETURNING *"
+    ).bind(BOT_ID, text, JSON.stringify([msg.author]), msg.content_id || null, new Date().toISOString(), eventId).first();
+    await env.DB.prepare("DELETE FROM app_kv WHERE k = ?1").bind("botlock_" + id).run();
+    if (row) await pushToUsers(env, [msg.author], { title: BOT_NAME, body: text.split("\n")[0].slice(0, 180), url: "/#/chat", tag: "bot-" + id }).catch(() => {});
+    return row ? rowToMessage(row) : null;
+  })();
+  // Keep going even if the asker closes the app before the answer is ready.
+  ctx.waitUntil(work.catch(() => {}));
+  const message = await work;
+  return json({ message });
 }

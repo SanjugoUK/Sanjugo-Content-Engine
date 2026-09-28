@@ -111,6 +111,23 @@ app either way, so everyone stays in sync in real time, just like opening the In
 
 Tell me once you've deployed (or if any step errors) and I'll help from there.
 
+## AI Dev + (Team Chat assistant)
+
+Tag **@AI Dev +** in Team Chat with any question — how to do something in Creator Studio, what's waiting for approval,
+which posts did best, caption ideas, or anything general — and it answers in the chat, tagging whoever asked (plus a push
+alert). It sees a live snapshot of the workspace (posts, approvals, schedule, team, Make connections, real stats), the
+recent chat messages. It runs on **Cloudflare Workers AI** (`[ai]` binding in wrangler.toml, Llama 3.3 70B — no key,
+free daily allowance of roughly a few dozen answers) and switches to **Claude** (`claude-opus-5`, with web search)
+automatically if the `ANTHROPIC_API_KEY` secret is ever added.
+Server: `POST /api/chat/bot` (called by the asker's app right after sending); each question is answered once.
+
+## Who sees what in Settings
+
+Everyone (Creators, Approvers, Admins): their account and role, Notifications (their own phone/desktop alerts), the
+Google Drive library (Refresh library now, Open library folder), Get latest stats now, and read-only Platforms,
+Workflow and Roles. Admins only: connecting/disconnecting Drive, Make.com, Storage clean-up, Smart insights, Campaigns,
+the calendar template, the team-wide chat-updates switch, and Team & access.
+
 ## Approvers
 
 A post's approver is one person, or **"Cyrus or Yan Yan (either can approve)"** (stored as `approver: "any"` — every

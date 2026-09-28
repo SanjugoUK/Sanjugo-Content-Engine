@@ -3,7 +3,8 @@
 <meta name="description" content="Sanjugo Creator Studio — plan, approve and publish Sanjugo's social media content.">
 <link rel="manifest" href="/manifest.json">
 <meta name="theme-color" content="#FFFFFF">
-<link rel="icon" href="/icon-192.png">
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png">
+<link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -80,6 +81,8 @@
   @keyframes cf-fade-in{from{opacity:0;} to{opacity:1;}}
   body.cf-immersive .cf-toasts{top:calc(16px + env(safe-area-inset-top, 0px)); bottom:auto !important; left:16px; right:16px !important; margin:0 auto;}
   @media (max-width:700px){ .cf-hide-narrow{display:none !important;} }
+  .cf-dots span{animation:cfdot 1.2s infinite both;} .cf-dots span:nth-child(2){animation-delay:.2s;} .cf-dots span:nth-child(3){animation-delay:.4s;}
+  @keyframes cfdot{0%,80%,100%{opacity:.2} 40%{opacity:1}}
   @media (max-width:640px){ .cf-make-row{grid-template-columns:1fr !important; gap:8px !important;} }
   .cf-clickcard{transition:border-color .12s, box-shadow .12s, transform .12s;} .cf-clickcard:hover{border-color:var(--ink-mute) !important; box-shadow:var(--shadow-md) !important;} .cf-clickcard:active{transform:scale(.99);}
   .cf-noscrollbar{scrollbar-width:none;} .cf-noscrollbar::-webkit-scrollbar{display:none;}
@@ -221,15 +224,14 @@ function approverOptions(){
 const BRANDS = [
   {id:"sanjugo", name:"Sanjugo", color:"#D9642A", logo:true, accounts:{instagram:"@sanjugo", facebook:"Sanjugo", tiktok:"@sanjugo", youtube:"Sanjugo", gbp:"Sanjugo — Shoreditch, Angel, Victoria"}},
 ];
+// Sanjugo's live campaigns (from sanjugo.co.uk/campaign). Editable in Settings → Campaigns; "details" feeds AI Dev +.
 const CAMPAIGNS_ALL = [
-  {id:"c_autumn", brand:"lumen", name:"Autumn Roast Launch"},
-  {id:"c_loyalty", brand:"lumen", name:"Loyalty App Push"},
-  {id:"c_newyear", brand:"verve", name:"New Year, New You"},
-  {id:"c_classes", brand:"verve", name:"Class Spotlight"},
-  {id:"c_wedding", brand:"petal", name:"Wedding Season"},
-  {id:"c_everyday", brand:"petal", name:"Everyday Blooms"},
-  {id:"c_augshoot", brand:"sanjugo", name:"August Shoot 2026"},
-  {id:"c_evergreen", brand:"sanjugo", name:"Always-On / Evergreen"},
+  {id:"c_angel_giveaway", brand:"sanjugo", name:"Angel Reopening Giveaway — Free Wagyu Beef Roll", details:"From 14 Sept 2026, may end any time. Free Wagyu Beef Roll (4 pieces) to celebrate SANJUGO Angel reopening; 20 portions a day, first come first served; booking recommended."},
+  {id:"c_angel_delivery", brand:"sanjugo", name:"Angel Reopening Offer — £5 Off Delivery", details:"Until 31 Dec 2026. Spend £20+ on SANJUGO Angel menu items, get £5 off delivery. Deliveroo code ANGEL, Uber Eats code ANGEL5OFF20."},
+  {id:"c_lottery", brand:"sanjugo", name:"Monthly In-Store Lottery — Win Dinner for 2", details:"From Aug 2026. Dine at any SANJUGO restaurant for a chance to win dinner for two worth £150; winners chosen every month."},
+  {id:"c_chefs_creation_3", brand:"sanjugo", name:"Chef's Creation III", details:"Mar–Sep 2026, in store. Special menu handcrafted by our chefs: five brand-new dishes."},
+  {id:"c_lunch_999", brand:"sanjugo", name:"£9.99 Lunch of the Day", details:"From Apr 2026, in store. £9.99 lunch of the day offer."},
+  {id:"c_lunch_999_shoreditch", brand:"sanjugo", name:"£9.99 Lunch of the Day — Shoreditch", details:"From Apr 2026, in store at SANJUGO Shoreditch. £9.99 lunch of the day offer."},
 ];
 const CAMPAIGNS = CAMPAIGNS_ALL.filter(c=>c.brand==="sanjugo");
 /* Campaigns are editable in Settings, so the live list lives in state.campaigns — CAMPAIGNS is only the starting set.
@@ -3737,7 +3739,7 @@ function LibraryPicker({onPick}){
   );
 }
 
-function DriveSettings(){
+function DriveSettings({canManage=true}){
   const {state, dispatch} = useApp();
   const [st, setSt] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -3783,12 +3785,19 @@ function DriveSettings(){
       <div style={{display:"flex", gap:8, flexWrap:"wrap"}}>
         <Button variant="primary" icon="refresh" onClick={()=>refresh()} disabled={busy}>{busy? "Working…" : "Refresh library now"}</Button>
         {st.rootFolderId && <a href={driveFolderUrl(st.rootFolderId)} target="_blank" rel="noopener noreferrer" style={{textDecoration:"none"}}><Button variant="ghost" icon="external">Open library folder</Button></a>}
-        {st.method==="google_signin" && <ConfirmButton size="md" disabled={busy} confirmLabel="Yes, disconnect Drive" onConfirm={disconnect}>Disconnect</ConfirmButton>}
+        {canManage && st.method==="google_signin" && <ConfirmButton size="md" disabled={busy} confirmLabel="Yes, disconnect Drive" onConfirm={disconnect}>Disconnect</ConfirmButton>}
       </div>
-      {st.method==="google_signin" && !st.canArchive && <div style={{marginTop:12, padding:"10px 12px", borderRadius:8, background:"var(--amber-soft)", fontSize:12.5, lineHeight:1.5, display:"flex", gap:10, alignItems:"center", flexWrap:"wrap"}}>
+      {!canManage && <div style={{fontSize:12, color:"var(--ink-mute)", marginTop:10}}>Refresh after adding new files to the Drive folder so they show up in the Content Library.</div>}
+      {canManage && st.method==="google_signin" && !st.canArchive && <div style={{marginTop:12, padding:"10px 12px", borderRadius:8, background:"var(--amber-soft)", fontSize:12.5, lineHeight:1.5, display:"flex", gap:10, alignItems:"center", flexWrap:"wrap"}}>
         <span style={{flex:1, minWidth:220}}><strong>One more permission needed</strong> so Creator Studio can move published uploads into a "Creator Studio Archive" folder in Drive (it can only touch files it creates).</span>
         <a href="/api/google/connect" style={{textDecoration:"none"}}><Button variant="primary" size="sm">Reconnect Google Drive</Button></a>
       </div>}
+    </div>
+  );
+  if(!canManage) return (
+    <div>
+      <div style={{display:"flex", alignItems:"center", gap:8, fontSize:13.5, fontWeight:600, marginBottom:6}}><span style={{width:8, height:8, borderRadius:99, background:"var(--amber)"}}/>Not connected{st.offline? " (server not reachable here)":""}</div>
+      <div style={{fontSize:12.5, color:"var(--ink-soft)", lineHeight:1.6}}>Google Drive isn't connected yet — ask an admin{st.offline? "" : " to connect it in Settings"}. The Content Library still shows the last saved file list.</div>
     </div>
   );
   if(st.signInConfigured) return (
@@ -4075,6 +4084,10 @@ function CampaignManager(){
               <Button variant="ghost" size="sm" onClick={()=>dispatch({type:"UPDATE_CAMPAIGN", id:c.id, patch:{archived:!c.archived}})}>{c.archived? "Restore":"Archive"}</Button>
               <Button variant="ghost" size="sm" onClick={()=>setConfirmDelete(c)} style={{color:"var(--red)"}}>Delete</Button>
             </div>
+            <textarea defaultValue={c.details||""} key={"d"+(c.details||"")} rows={1} placeholder="Dates, rules, codes — AI Dev + uses this when writing captions"
+              onBlur={e=>{ const v=e.target.value.trim(); if(v!==(c.details||"")) dispatch({type:"UPDATE_CAMPAIGN", id:c.id, patch:{details:v}}); }}
+              style={{...inputStyle, flexBasis:"100%", fontSize:12, color:"var(--ink-soft)", border:"1px solid transparent", background:"transparent", resize:"vertical", padding:"2px 10px", fontFamily:"inherit", opacity:c.archived?.6:1}}
+              onFocus={e=>{ e.target.style.border="1px solid var(--border)"; e.target.style.background="var(--surface)"; }}/>
           </div>
         ))}
       </div>
@@ -5110,7 +5123,11 @@ function readSeen(userId){ try{ return Number(localStorage.getItem("contentflow_
 function writeSeen(userId, id){ try{ localStorage.setItem("contentflow_chat_seen_"+userId, String(id)); }catch(e){} }
 function readLocalChat(){ try{ return JSON.parse(localStorage.getItem(CHAT_LOCAL_KEY)||"[]"); }catch(e){ return []; } }
 const EVERYONE_RE = /(^|\s)@(everyone|all|team)\b/i;
+// "AI Dev +" — the Team Chat AI assistant (answers on the server). Its tag is kept apart from the real "AI Dev".
+const BOT_ID = "ai_bot", BOT_NAME = "AI Dev +";
+const BOT_RE = /@ai\s?dev\s?\+/i;
 function findMentions(text){
+  text = text.replace(new RegExp(BOT_RE.source, "gi"), " ");
   if(EVERYONE_RE.test(text)) return activeUsers().map(u=>u.id);
   const t = text.toLowerCase();
   return USERS.filter(u=> t.includes("@"+u.name.toLowerCase())).map(u=>u.id);
@@ -5120,6 +5137,7 @@ function useChat(currentUserId, dispatch){
   const [messages, setMessages] = useState([]);
   const [mode, setMode] = useState("loading"); // loading | server | local
   const [seen, setSeen] = useState(()=>readSeen(currentUserId));
+  const [botPending, setBotPending] = useState([]); // ids of my questions AI Dev + is still answering
   const lastId = useRef(0);
   const loadedOnce = useRef(false);
   const modeRef = useRef("loading");
@@ -5139,7 +5157,7 @@ function useChat(currentUserId, dispatch){
       incoming.filter(m=>m.author!==userRef.current && (m.mentions||[]).includes(userRef.current)).forEach(m=>{
         const who = USERS.find(u=>u.id===m.author);
         const short = m.text.replace(/\s@[^\n]*$/, "").split("\n")[0];
-        dispatch({type:"ADD_TOAST", message: m.author==="system" ? short.slice(0,110) : (who? who.name : "Someone")+" mentioned you in Team Chat: “"+m.text.slice(0,60)+(m.text.length>60?"…":"")+"”"});
+        dispatch({type:"ADD_TOAST", message: m.author==="system" ? short.slice(0,110) : m.author===BOT_ID ? BOT_NAME+" replied: “"+m.text.slice(0,70)+(m.text.length>70?"…":"")+"”" : (who? who.name : "Someone")+" mentioned you in Team Chat: “"+m.text.slice(0,60)+(m.text.length>60?"…":"")+"”"});
       });
     }
   }, [dispatch]);
@@ -5179,6 +5197,7 @@ function useChat(currentUserId, dispatch){
         const data = await res.json();
         merge([data.message]);
         writeSeen(userRef.current, data.message.id); setSeen(data.message.id);
+        if(BOT_RE.test(body.text)) askBot(data.message.id);
         return true;
       }catch(e){
         dispatch({type:"ADD_TOAST", message:"Message not sent — check your connection and try again.", variant:"danger"});
@@ -5191,6 +5210,17 @@ function useChat(currentUserId, dispatch){
     return true;
   }, [merge, dispatch]);
 
+  async function askBot(messageId){
+    setBotPending(p=>[...p, messageId]);
+    try{
+      const res = await fetch("/api/chat/bot", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({messageId})});
+      const data = await res.json().catch(()=>({}));
+      if(data.message){ merge([data.message]); setBotPending(p=>p.filter(x=>x!==messageId)); return; }
+      if(!res.ok && res.status!==202) dispatch({type:"ADD_TOAST", message: data.error || "AI Dev + couldn't answer — try again.", variant:"danger"});
+    }catch(e){ /* the answer still arrives through the normal chat refresh */ }
+    setTimeout(()=>setBotPending(p=>p.filter(x=>x!==messageId)), 1500);
+  }
+
   const newestId = messages.length ? messages[messages.length-1].id : 0;
   const markSeen = useCallback(()=>{
     if(newestId > readSeen(userRef.current)){ writeSeen(userRef.current, newestId); setSeen(newestId); }
@@ -5198,11 +5228,11 @@ function useChat(currentUserId, dispatch){
   const unreadList = messages.filter(m=> m.id>seen && m.author!==currentUserId);
   const unread = unreadList.length;
   const mentionUnread = unreadList.filter(m=>(m.mentions||[]).includes(currentUserId)).length;
-  return useMemo(()=>({messages, mode, send, markSeen, unread, mentionUnread, seen}), [messages, mode, send, markSeen, unread, mentionUnread, seen]);
+  return useMemo(()=>({messages, mode, send, markSeen, unread, mentionUnread, seen, botPending}), [messages, mode, send, markSeen, unread, mentionUnread, seen, botPending]);
 }
 
 function escapeRe(s){ return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
-const mentionRe = () => new RegExp("(@(?:"+[...USERS.map(u=>u.name)].sort((a,b)=>b.length-a.length).map(escapeRe).join("|")+"|everyone|all|team)\\b)", "i");
+const mentionRe = () => new RegExp("(@ai\\s?dev\\s?\\+|@(?:"+[...USERS.map(u=>u.name)].sort((a,b)=>b.length-a.length).map(escapeRe).join("|")+"|everyone|all|team)\\b)", "i");
 function ChatText({text, me}){
   const meName = (USERS.find(u=>u.id===me)||{}).name||"";
   return text.split(mentionRe()).map((part,i)=>{
@@ -5244,7 +5274,7 @@ function ChatPage(){
     el.scrollTop = el.scrollHeight;
   }, [shown.length, view]);
 
-  const candidates = mention ? [...activeUsers().filter(u=>u.id!==me).map(u=>({key:u.id, label:u.name, sub:ROLE_META[u.role].label, user:u})), {key:"everyone", label:"everyone", sub:"Notify the whole team"}]
+  const candidates = mention ? [{key:BOT_ID, label:BOT_NAME, sub:"AI assistant — ask it anything", bot:true}, ...activeUsers().filter(u=>u.id!==me).map(u=>({key:u.id, label:u.name, sub:ROLE_META[u.role].label, user:u})), {key:"everyone", label:"everyone", sub:"Notify the whole team"}]
       .filter(c=>c.label.toLowerCase().startsWith(mention.query.toLowerCase())) : [];
 
   function onChange(e){
@@ -5305,8 +5335,8 @@ function ChatPage(){
           {shown.length===0 ? (
             <EmptyState icon="chat" title={view==="mentions"? "No mentions yet" : view==="updates"? "No updates yet" : "No messages yet"} subtitle={view==="mentions"? "When someone @mentions you, it shows up here." : view==="updates"? "Creator Studio posts here when something is sent for approval, approved, sent back or published." : "Say hello — e.g. “@Cyrus I've made the changes, ready for approval.”"}/>
           ) : shown.map(m=>{
-            const isUpdate = m.author==="system";
-            const author = isUpdate ? {id:"system", name:"Creator Studio"} : (USERS.find(u=>u.id===m.author) || {name:"Unknown", avatarColor:"#888", id:m.author});
+            const isUpdate = m.author==="system", isBot = m.author===BOT_ID;
+            const author = isUpdate ? {id:"system", name:"Creator Studio"} : isBot ? {id:BOT_ID, name:BOT_NAME} : (USERS.find(u=>u.id===m.author) || {name:"Unknown", avatarColor:"#888", id:m.author});
             const day = dayLabel(m.createdAt);
             const showDay = day!==lastDay; lastDay = day;
             const grouped = !showDay && prev && prev.author===m.author && (new Date(m.createdAt)-new Date(prev.createdAt) < 5*60000);
@@ -5319,10 +5349,10 @@ function ChatPage(){
                 {showDay && <div style={{display:"flex", alignItems:"center", gap:10, padding:"12px 16px 6px", fontSize:11.5, fontWeight:600, color:"var(--ink-mute)"}}><span style={{flex:1, height:1, background:"var(--border)"}}/>{day}<span style={{flex:1, height:1, background:"var(--border)"}}/></div>}
                 {showUnreadLine && <div style={{display:"flex", alignItems:"center", gap:10, padding:"4px 16px", fontSize:11, fontWeight:700, color:"var(--red)"}}><span style={{flex:1, height:1, background:"var(--red)", opacity:.4}}/>New</div>}
                 <div style={{display:"flex", gap:10, padding: grouped? "1px 16px" : "8px 16px 1px", background: mentionsMe? "var(--accent-soft)" : "transparent", borderLeft: mentionsMe? "3px solid var(--accent)" : "3px solid transparent"}}>
-                  <div style={{width:32, flexShrink:0}}>{!grouped && (isUpdate ? <img src={LOGO_SANJUGO} alt="" style={{width:32, height:32, borderRadius:99}}/> : <Avatar user={author} size={32}/>)}</div>
+                  <div style={{width:32, flexShrink:0}}>{!grouped && (isUpdate ? <img src={LOGO_SANJUGO} alt="" style={{width:32, height:32, borderRadius:99}}/> : isBot ? <BotAvatar size={32}/> : <Avatar user={author} size={32}/>)}</div>
                   <div style={{flex:1, minWidth:0}}>
                     {!grouped && <div style={{display:"flex", alignItems:"baseline", gap:8, marginBottom:1}}>
-                      <span style={{fontSize:13.5, fontWeight:700}}>{author.name}</span>{isUpdate && <span style={{fontSize:10, fontWeight:700, letterSpacing:".4px", padding:"1px 6px", borderRadius:4, background:"var(--surface-2)", color:"var(--ink-mute)"}}>UPDATE</span>}
+                      <span style={{fontSize:13.5, fontWeight:700}}>{author.name}</span>{isUpdate && <span style={{fontSize:10, fontWeight:700, letterSpacing:".4px", padding:"1px 6px", borderRadius:4, background:"var(--surface-2)", color:"var(--ink-mute)"}}>UPDATE</span>}{isBot && <span style={{fontSize:10, fontWeight:700, letterSpacing:".4px", padding:"1px 6px", borderRadius:4, background:"var(--violet-soft)", color:"var(--violet)"}}>AI</span>}
                       <span style={{fontSize:11.5, color:"var(--ink-mute)"}}>{new Date(m.createdAt).toLocaleTimeString("en-GB",{hour:"2-digit", minute:"2-digit"})}</span>
                     </div>}
                     <div style={{fontSize:13.5, lineHeight:1.5, whiteSpace:"pre-wrap", wordBreak:"break-word", color:"var(--ink)"}}><ChatText text={m.text} me={me}/></div>
@@ -5338,6 +5368,10 @@ function ChatPage(){
               </React.Fragment>
             );
           })}
+          {chat.botPending.length>0 && view!=="updates" && <div style={{display:"flex", gap:10, padding:"8px 16px", alignItems:"center"}}>
+            <BotAvatar size={32}/>
+            <span style={{fontSize:13, color:"var(--ink-mute)", display:"flex", alignItems:"center", gap:6}}><strong style={{color:"var(--ink)"}}>{BOT_NAME}</strong> is thinking<span className="cf-dots"><span>.</span><span>.</span><span>.</span></span></span>
+          </div>}
         </div>
 
         <div style={{borderTop:"1px solid var(--border)", padding:"10px 12px", position:"relative", background:"var(--surface)"}}>
@@ -5347,7 +5381,7 @@ function ChatPage(){
               {candidates.map((c,i)=>(
                 <button key={c.key} onMouseDown={e=>{ e.preventDefault(); pick(c); }} onMouseEnter={()=>setMIndex(i)}
                   style={{width:"100%", display:"flex", alignItems:"center", gap:9, padding:"8px 11px", border:"none", background: i===mIndex? "var(--surface-2)":"transparent", cursor:"pointer", textAlign:"left", color:"var(--ink)"}}>
-                  {c.user ? <Avatar user={c.user} size={24}/> : <span style={{width:24, height:24, borderRadius:99, background:"var(--surface-2)", display:"flex", alignItems:"center", justifyContent:"center"}}><Icon name="team" size={13}/></span>}
+                  {c.bot ? <BotAvatar size={24}/> : c.user ? <Avatar user={c.user} size={24}/> : <span style={{width:24, height:24, borderRadius:99, background:"var(--surface-2)", display:"flex", alignItems:"center", justifyContent:"center"}}><Icon name="team" size={13}/></span>}
                   <span style={{flex:1}}><span style={{display:"block", fontSize:13, fontWeight:600}}>{c.label}</span><span style={{display:"block", fontSize:11, color:"var(--ink-mute)"}}>{c.sub}</span></span>
                 </button>
               ))}
@@ -5368,11 +5402,15 @@ function ChatPage(){
               <Icon name="send" size={15}/>{!narrow && "Send"}
             </button>
           </div>
-          {!narrow && <div style={{fontSize:11, color:"var(--ink-mute)", marginTop:6}}>Enter to send · Shift+Enter for a new line · @everyone notifies the whole team</div>}
+          {!narrow && <div style={{fontSize:11, color:"var(--ink-mute)", marginTop:6}}>Enter to send · Shift+Enter for a new line · @everyone notifies the whole team · @AI Dev + answers questions</div>}
         </div>
       </Card>
     </div>
   );
+}
+
+function BotAvatar({size=32}){
+  return <span style={{width:size, height:size, borderRadius:99, flexShrink:0, display:"inline-flex", alignItems:"center", justifyContent:"center", background:"linear-gradient(135deg, #7A5AF8, #D9642A)", color:"#fff", fontSize:size*0.36, fontWeight:800, letterSpacing:"-.5px"}}>AI+</span>;
 }
 
 /* ============================== TEAM ============================== */
@@ -5569,28 +5607,66 @@ function SettingsPage(){
     else dispatch({type:"ADD_TOAST", message:"Saved locally — connect this artifact's db capability to sync across devices.", variant:"warn"});
   }
 
-  if(!canManage){
-    return (
-      <div>
-        <PageHeader title="Settings" subtitle="Integrations, workflows and account management."/>
-        <Card style={{padding:0}}><EmptyState icon="settings" title="Administrator access required" subtitle="Switch to Cyrus (Admin) from the sidebar to manage integrations and workflows, or sign in with an email on the admin list below."/></Card>
-      </div>
-    );
-  }
-
+  // Everyone gets their own account info, notifications, the Drive library refresh and stats; the settings that
+  // change things for the whole team (integrations, team, campaigns, storage, calendar template) stay with admins.
+  const admins = activeUsers().filter(u=>PERMS[u.role] && PERMS[u.role].manageSettings).map(u=>u.name);
+  const yes = v => v ? <Icon name="check" size={15} style={{color:"var(--green)"}}/> : <Icon name="x" size={15} style={{color:"var(--ink-mute)"}}/>;
   return (
     <div>
-      <PageHeader title="Settings" subtitle="Integrations, workflows and account management."/>
+      <PageHeader title="Settings" subtitle={canManage ? "Integrations, workflows and account management." : "Your account, notifications and everyday tools."}/>
+
+      <SectionTitle>Your account</SectionTitle>
+      <Card style={{padding:18, marginBottom:26}}>
+        <div style={{display:"flex", alignItems:"center", gap:12, flexWrap:"wrap"}}>
+          <Avatar user={user} size={40}/>
+          <div style={{flex:1, minWidth:180}}>
+            <div style={{fontSize:15, fontWeight:700}}>{user.name}</div>
+            <div style={{fontSize:12.5, color:"var(--ink-mute)"}}>{ROLE_META[user.role].label}{user.email? " · "+user.email : ""}</div>
+          </div>
+        </div>
+        <div style={{display:"flex", gap:8, flexWrap:"wrap", marginTop:12}}>
+          {[["Create & edit", perms.create||perms.edit], ["Submit for approval", perms.submit], ["Approve", perms.approve], ["Schedule", perms.schedule], ["Manage team", perms.manageTeam], ["Manage settings", perms.manageSettings]].map(([l,v])=>(
+            <span key={l} style={{display:"inline-flex", alignItems:"center", gap:5, fontSize:12, padding:"4px 9px", borderRadius:99, border:"1px solid var(--border)", color: v? "var(--ink)" : "var(--ink-mute)", background: v? "var(--surface)" : "var(--surface-2)"}}>{yes(v)}{l}</span>
+          ))}
+        </div>
+        <div style={{fontSize:12, color:"var(--ink-mute)", marginTop:10}}>To switch person, tap your name at the bottom of the menu.{!canManage && admins.length? " Admins ("+admins.join(", ")+") manage the team-wide settings." : ""}</div>
+      </Card>
+
+      <SectionTitle>Notifications</SectionTitle>
+      <Card style={{padding:18, marginBottom:26}}>
+        <label style={{display:"flex", gap:10, alignItems:"flex-start", cursor: canManage? "pointer" : "default", opacity: canManage? 1 : .75}}>
+          <input type="checkbox" checked={state.chatUpdates!==false} disabled={!canManage} onChange={e=>dispatch({type:"SET_CHAT_UPDATES", on:e.target.checked})} style={{marginTop:3}}/>
+          <span style={{fontSize:13, lineHeight:1.55}}><strong>Post workflow updates in Team Chat</strong>{!canManage && <span style={{fontWeight:500, color:"var(--ink-mute)"}}> · set by admins for the whole team</span>}<br/><span style={{color:"var(--ink-soft)"}}>Creator Studio posts when a post is sent for approval, resubmitted, approved, sent back, rejected or published, and @mentions whoever needs to act — so they get the badge, a pop-up and a phone/desktop alert.</span></span>
+        </label>
+        <PushSettings/>
+      </Card>
+
       <SectionTitle>Google Drive content library</SectionTitle>
-      <Card style={{padding:18, marginBottom:26}}><DriveSettings/></Card>
-      <SectionTitle>Storage</SectionTitle>
-      <Card style={{padding:18, marginBottom:26}}><StorageSettings/></Card>
-      <SectionTitle>Smart insights</SectionTitle>
-      <Card style={{padding:18, marginBottom:26}}><InsightsSettings/></Card>
-      <SectionTitle>Campaigns</SectionTitle>
-      <Card style={{padding:18, marginBottom:26}}><CampaignManager/></Card>
+      <Card style={{padding:18, marginBottom:26}}><DriveSettings canManage={canManage}/></Card>
+
+      {!canManage && <>
+        <SectionTitle>Stats</SectionTitle>
+        <Card style={{padding:18, marginBottom:26}}><StatsRefresh/></Card>
+      </>}
+
       <SectionTitle>Platforms</SectionTitle>
       <PlatformConnections/>
+
+      {canManage && <>
+        <SectionTitle>Make.com <span style={{fontWeight:500, color:"var(--ink-mute)", fontSize:12}}>(auto-publishing &amp; real stats)</span></SectionTitle>
+        <Card style={{padding:18, marginBottom:26}}><MakeSettings/></Card>
+        <SectionTitle>Storage</SectionTitle>
+        <Card style={{padding:18, marginBottom:26}}><StorageSettings/></Card>
+        <SectionTitle>Smart insights</SectionTitle>
+        <Card style={{padding:18, marginBottom:26}}><InsightsSettings/></Card>
+        <SectionTitle>Campaigns</SectionTitle>
+        <Card style={{padding:18, marginBottom:26}}><CampaignManager/></Card>
+        <SectionTitle>Recurring calendar template <span style={{fontWeight:500, color:"var(--ink-mute)", fontSize:12}}>(drives calendar auto-fill)</span></SectionTitle>
+        <Card style={{padding:18, marginBottom:26}}>
+          <div style={{fontSize:12.5, color:"var(--ink-mute)", marginBottom:14, lineHeight:1.5}}>Define the recurring weekly slots your content plan follows (e.g. "Reels every Monday, Wednesday and Friday"). When a manager swipes right to approve something in the queue and it has no publish time set, it's automatically dropped into the next empty slot below that matches its platform — anything left over waits in "Unscheduled" on the calendar until a slot frees up.</div>
+          <TemplateEditor template={state.calendarTemplate} onChange={t=>saveConfig({calendarTemplate:t})}/>
+        </Card>
+      </>}
 
       <SectionTitle>Workflow</SectionTitle>
       <Card style={{padding:18, marginBottom:26}}>
@@ -5603,15 +5679,15 @@ function SettingsPage(){
       </Card>
 
       <SectionTitle>Roles &amp; permissions</SectionTitle>
-      <Card style={{padding:0, overflow:"auto"}}>
+      <Card style={{padding:0, overflow:"auto", marginBottom:26}}>
         <table style={{width:"100%", borderCollapse:"collapse", fontSize:13, minWidth:600}}>
           <thead><tr style={{textAlign:"left", borderBottom:"1px solid var(--border)"}}>{["Role","Create/Edit","Submit","Approve","Schedule","Manage team","Manage settings"].map(h=><th key={h} style={{padding:"10px 12px", fontSize:11.5, color:"var(--ink-mute)", fontWeight:700, textTransform:"uppercase"}}>{h}</th>)}</tr></thead>
           <tbody>
             {Object.entries(PERMS).map(([role,p])=>(
-              <tr key={role} style={{borderBottom:"1px solid var(--border)"}}>
-                <td style={{padding:"10px 12px", fontWeight:700}}>{ROLE_META[role].label}</td>
+              <tr key={role} style={{borderBottom:"1px solid var(--border)", background: role===user.role? "var(--accent-soft)" : "transparent"}}>
+                <td style={{padding:"10px 12px", fontWeight:700}}>{ROLE_META[role].label}{role===user.role && <span style={{fontWeight:500, color:"var(--ink-mute)"}}> (you)</span>}</td>
                 {[p.create||p.edit, p.submit, p.approve, p.schedule, p.manageTeam, p.manageSettings].map((v,i)=>(
-                  <td key={i} style={{padding:"10px 12px"}}>{v? <Icon name="check" size={15} style={{color:"var(--green)"}}/> : <Icon name="x" size={15} style={{color:"var(--ink-mute)"}}/>}</td>
+                  <td key={i} style={{padding:"10px 12px"}}>{yes(v)}</td>
                 ))}
               </tr>
             ))}
@@ -5619,25 +5695,39 @@ function SettingsPage(){
         </table>
       </Card>
 
-      <SectionTitle>Recurring calendar template <span style={{fontWeight:500, color:"var(--ink-mute)", fontSize:12}}>(drives calendar auto-fill)</span></SectionTitle>
-      <Card style={{padding:18, marginBottom:26}}>
-        <div style={{fontSize:12.5, color:"var(--ink-mute)", marginBottom:14, lineHeight:1.5}}>Define the recurring weekly slots your content plan follows (e.g. "Reels every Monday, Wednesday and Friday"). When a manager swipes right to approve something in the queue and it has no publish time set, it's automatically dropped into the next empty slot below that matches its platform — anything left over waits in "Unscheduled" on the calendar until a slot frees up.</div>
-        <TemplateEditor template={state.calendarTemplate} onChange={t=>saveConfig({calendarTemplate:t})}/>
-      </Card>
+      {canManage && <>
+        <SectionTitle>Team &amp; access <span style={{fontWeight:500, color:"var(--ink-mute)", fontSize:12}}>(who can open Creator Studio)</span></SectionTitle>
+        <Card style={{padding:18, marginBottom:6}}><TeamAccessSettings/></Card>
+      </>}
+      {!canManage && <Card style={{padding:14, fontSize:12.5, color:"var(--ink-soft)", lineHeight:1.55}}>Make.com publishing, storage, campaigns, the calendar template and team access are managed by admins{admins.length? " ("+admins.join(", ")+")" : ""}. Ask them — or <strong>@AI Dev +</strong> in Team Chat — if something needs changing.</Card>}
+    </div>
+  );
+}
 
-      <SectionTitle>Make.com <span style={{fontWeight:500, color:"var(--ink-mute)", fontSize:12}}>(auto-publishing &amp; real stats)</span></SectionTitle>
-      <Card style={{padding:18, marginBottom:26}}><MakeSettings/></Card>
-
-      <SectionTitle>Notifications</SectionTitle>
-      <Card style={{padding:18, marginBottom:26}}>
-        <label style={{display:"flex", gap:10, alignItems:"flex-start", cursor:"pointer"}}>
-          <input type="checkbox" checked={state.chatUpdates!==false} onChange={e=>dispatch({type:"SET_CHAT_UPDATES", on:e.target.checked})} style={{marginTop:3}}/>
-          <span style={{fontSize:13, lineHeight:1.55}}><strong>Post workflow updates in Team Chat</strong><br/><span style={{color:"var(--ink-soft)"}}>Creator Studio posts when a post is sent for approval, resubmitted, approved, sent back, rejected or published, and @mentions whoever needs to act — so they get the badge, a pop-up and a phone/desktop alert.</span></span>
-        </label>
-        <PushSettings/>
-      </Card>
-      <SectionTitle>Team &amp; access <span style={{fontWeight:500, color:"var(--ink-mute)", fontSize:12}}>(who can open Creator Studio)</span></SectionTitle>
-      <Card style={{padding:18, marginBottom:6}}><TeamAccessSettings/></Card>
+// "Get latest stats now" for everyone (admins also have it in the Make.com card).
+function StatsRefresh(){
+  const {dispatch} = useApp();
+  const mk = useMakeStore();
+  const [busy, setBusy] = useState(false);
+  const info = mk.info;
+  if(!info) return <Skeleton h={40}/>;
+  if(info.error) return <div style={{fontSize:12.5, color:"var(--ink-mute)"}}>{info.error}</div>;
+  const anyPull = MAKE_PLATFORMS.some(p=>makeReady("pull", p));
+  async function pull(){
+    setBusy(true);
+    try{
+      const r = await fetch("/api/make/pull", {method:"POST"});
+      const d = await r.json().catch(()=>({}));
+      if(!r.ok) throw new Error(d.error || "Couldn't reach Make");
+      dispatch({type:"ADD_TOAST", message:"Fetching the latest stats from "+(d.requested||[]).map(p=>PLATFORM_META[p].label).join(", ")+" — Analytics updates in a minute or two"});
+      [20000, 45000, 90000].forEach(ms=>setTimeout(()=>{ loadRealAnalytics(true); loadMakeInfo(); }, ms));
+    }catch(e){ dispatch({type:"ADD_TOAST", message:e.message, variant:"danger"}); }
+    setBusy(false);
+  }
+  return (
+    <div style={{display:"flex", alignItems:"center", gap:10, flexWrap:"wrap"}}>
+      <Button size="sm" icon="refresh" disabled={busy || !anyPull} onClick={pull}>{busy? "Asking Make…" : "Get latest stats now"}</Button>
+      <span style={{fontSize:12, color:"var(--ink-mute)"}}>{!anyPull ? "Stats aren't connected yet — an admin sets this up in Make.com." : info.lastPull ? "Last updated "+fmtDateTime(info.lastPull.at)+" · also every night at 03:30" : "Not pulled yet · also every night at 03:30"}</span>
     </div>
   );
 }

@@ -119,7 +119,7 @@ moved to another account without touching the others:
 | Folder | Scenarios | What each does |
 |---|---|---|
 | **Creator Studio · Publish** | Publish · Instagram / Facebook / YouTube / Google Business | Gets one post from Creator Studio, publishes it, and calls back `/api/make/callback` with the live link or the error. |
-| **Creator Studio · Pull (stats)** | Pull · Instagram / Facebook / YouTube / TikTok / Google Business | Sends back the latest ~15 posts with likes, comments, reach, saves, shares and views. |
+| **Creator Studio · Pull (stats)** | Pull · Instagram / Facebook / YouTube / TikTok / Google Business | Sends back the latest ~15 posts with likes, comments, reach, saves, shares and views. TikTok is read from the public profile through HasData (plays, likes, comments, shares, saves). |
 
 Each scenario starts with its own webhook (named `CS Publish · …` / `CS Pull · …`). Creator Studio keeps one address per
 platform and direction in Settings → Make.com (admins; *Paste all webhooks at once* accepts lines like

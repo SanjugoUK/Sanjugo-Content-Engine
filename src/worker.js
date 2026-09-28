@@ -1468,6 +1468,13 @@ async function triggerAnalyticsPull(env, { trigger, force }) {
 const num = (v) => { const n = Number(v); return Number.isFinite(n) ? Math.round(n) : 0; };
 const dec = (s) => { try { return decodeURIComponent(String(s || "").replace(/\+/g, " ")); } catch (e) { return String(s || ""); } };
 const normLink = (u) => String(u || "").split("?")[0].replace(/\/+$/, "").toLowerCase();
+// Dates arrive as ISO text (Instagram, Facebook, YouTube) or Unix seconds (TikTok via HasData).
+function toIsoDate(v) {
+  if (v === undefined || v === null || String(v).trim() === "") return null;
+  const n = Number(v);
+  const d = Number.isFinite(n) ? new Date(n < 1e12 ? n * 1000 : n) : new Date(v);
+  return isNaN(d.getTime()) ? null : d.toISOString();
+}
 
 async function handleMakeCallback(request, env, ctx) {
   const body = await request.json().catch(() => null);
@@ -1496,7 +1503,7 @@ async function handleMakeCallback(request, env, ctx) {
       const m = p.m || {};
       const row = {
         id: String(p.id).slice(0, 80), permalink: String(p.permalink || "").slice(0, 300), caption: dec(p.caption).slice(0, 500),
-        type: String(p.type || p.mediaType || "").slice(0, 20), thumb: dec(p.thumb).slice(0, 1000), at: p.at ? new Date(p.at).toISOString() : null,
+        type: String(p.type || p.mediaType || "").slice(0, 20), thumb: dec(p.thumb).slice(0, 1000), at: toIsoDate(p.at),
         likes: num(p.likes), comments: num(p.comments), shares: num(m.shares ?? p.shares), saves: num(m.saved ?? p.saves),
         reach: num(m.reach ?? p.reach), views: num(m.views ?? p.views),
       };

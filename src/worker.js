@@ -1396,6 +1396,9 @@ async function sendPublishJobs(env, { item, platforms, origin, userId, trigger }
     if (!v) { results.push({ platform, skipped: "This post isn't set up for " + PLATFORM_NAMES[platform] + "." }); continue; }
     if (v.publishStatus === "published") { results.push({ platform, skipped: "Already published." }); continue; }
     if (!mediaUrl) { results.push({ platform, skipped: "The video or photo hasn't finished uploading to Creator Studio." }); continue; }
+    // Google Business posts take a photo: for a video, send its cover image instead.
+    const gbpImage = platform === "gbp" ? (item.media.type === "image" ? mediaUrl : absoluteMediaUrl(item.media.previewUrl, origin)) : null;
+    if (platform === "gbp" && !gbpImage) { results.push({ platform, skipped: "Google Business needs a photo — this video has no stored cover image." }); continue; }
     const busy = await env.DB.prepare(
       "SELECT id FROM make_jobs WHERE kind = 'publish' AND content_id = ?1 AND platform = ?2 AND (status = 'done' OR (status = 'sent' AND created_at > ?3))"
     ).bind(item.id, platform, new Date(Date.now() - 20 * 60e3).toISOString()).first();
@@ -1414,8 +1417,8 @@ async function sendPublishJobs(env, { item, platforms, origin, userId, trigger }
       kind: isPhoto ? "photo" : platform === "youtube" ? "short" : platform === "gbp" ? "update" : "reel",
       title: String(v.title || item.title || "Sanjugo").replace(/[<>]/g, "").slice(0, 100),
       caption: platform === "youtube" ? String(v.description || caption).replace(/[<>]/g, "") : platform === "gbp" ? caption.slice(0, 1500) : caption,
-      mediaUrl, fileName: key || (isPhoto ? "photo.jpg" : "video.mp4"), privacy: "public",
-      mediaFormat: isPhoto ? "PHOTO" : "VIDEO",
+      mediaUrl: gbpImage || mediaUrl, fileName: key || (isPhoto ? "photo.jpg" : "video.mp4"), privacy: "public",
+      mediaFormat: isPhoto || gbpImage ? "PHOTO" : "VIDEO",
       // Google Business button: needs a link unless it's "Call" (which uses the listing's phone number).
       ctaType: !v.url ? "CALL" : cta, ctaUrl: v.url || "",
     };

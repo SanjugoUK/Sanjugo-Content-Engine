@@ -1499,6 +1499,17 @@ function MakeSettings(){
     if(!n){ toast("No Make webhook addresses found — each line needs the platform, Publish or Pull, and the https://hook… address", "warn"); return; }
     if(await save({hooks}, "Saved "+n+" webhook"+(n===1?"":"s"))){ setSetup(""); setShowSetup(false); }
   }
+  async function clearStats(p){
+    setBusy(true);
+    try{
+      const r = await fetch("/api/make/stats/clear", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({platform:p})});
+      const d = await r.json().catch(()=>({}));
+      if(!r.ok) throw new Error(d.error || "Couldn't clear stats");
+      toast("Removed "+d.removed+" "+PLATFORM_META[p].label+" post"+(d.removed===1?"":"s")+" from Analytics");
+      loadRealAnalytics(true); await loadMakeInfo();
+    }catch(e){ toast(e.message, "danger"); }
+    setBusy(false);
+  }
   async function pull(){
     setBusy(true);
     try{
@@ -1533,6 +1544,7 @@ function MakeSettings(){
         <span style={{width:8, height:8, borderRadius:8, background: st.configured? "var(--green)" : "var(--border)", flexShrink:0}}/>
         <span style={{fontSize:12.5, color: st.configured? "var(--ink)" : "var(--ink-mute)", whiteSpace:"nowrap"}}>{st.configured? "Connected" : "Not set"}</span>
         {dir==="pull" && byPlat[p] && <span style={{fontSize:11.5, color:"var(--ink-mute)", whiteSpace:"nowrap"}}>· {byPlat[p].count} posts · {fmtDate(byPlat[p].at,{day:"numeric", month:"short"})}</span>}
+        {dir==="pull" && canEdit && byPlat[p] && <ConfirmButton size="sm" confirmLabel="Clear" disabled={busy} onConfirm={()=>clearStats(p)} style={{padding:"2px 8px", fontSize:11.5}}>Clear stats</ConfirmButton>}
         {canEdit && <span style={{marginLeft:"auto", display:"inline-flex", gap:10}}>
           <button onClick={()=>setEdit({dir, platform:p, value:""})} style={{border:"none", background:"none", color:"var(--accent)", fontSize:12, fontWeight:600, cursor:"pointer", padding:0}}>{st.configured? "Change" : "Add"}</button>
           {st.configured && <button onClick={()=>save({hooks:{[dir]:{[p]:""}}}, PLATFORM_META[p].label+" "+(dir==="pull"? "stats" : "publish")+" webhook removed")} style={{border:"none", background:"none", color:"var(--ink-mute)", fontSize:12, cursor:"pointer", padding:0}}>Remove</button>}

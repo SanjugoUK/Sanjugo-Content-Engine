@@ -1656,6 +1656,18 @@ async function makeRoute(request, env, url, viewer, ctx) {
     const platforms = (Array.isArray(b.platforms) ? b.platforms : []).map(String);
     return json({ results: await sendPublishJobs(env, { item, platforms, origin, userId, trigger: "manual" }) });
   }
+  if (url.pathname === "/api/make/stats/clear" && request.method === "POST") {
+    // Remove one platform's pulled stats — e.g. after pointing its Pull scenario at a different account.
+    requireAdmin(viewer);
+    const b = await request.json().catch(() => ({}));
+    const platform = String(b.platform || "");
+    if (!MAKE_PLATFORMS.includes(platform)) throw new HttpError(400, "Unknown platform");
+    const r = await env.DB.prepare("DELETE FROM social_posts WHERE platform = ?1").bind(platform).run();
+    await env.DB.prepare("DELETE FROM social_snapshots WHERE platform = ?1").bind(platform).run();
+    const last = await kvGet(env, "make_last_pull");
+    if (last && last.byPlatform) { delete last.byPlatform[platform]; if (last.platforms) delete last.platforms[platform]; await kvSet(env, "make_last_pull", last); }
+    return json({ ok: true, removed: (r.meta && r.meta.changes) || 0 });
+  }
   if (url.pathname === "/api/make/pull" && request.method === "POST") {
     return json(await triggerAnalyticsPull(env, { trigger: "manual" }));
   }

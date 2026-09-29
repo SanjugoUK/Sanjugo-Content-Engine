@@ -156,9 +156,10 @@ platform and direction in Settings → Make.com (admins; *Paste all webhooks at 
 
 - **Publishing:** on an approved post, *Publish…* → *Publish now with Make*. The post shows "Publishing via Make…", then
   the live link (or the error with *Try again*). Team Chat and push alerts announce the result.
+- **No answer from Make:** a publish Make doesn't answer within 20 minutes is marked failed (Team Chat + alert) so it can be retried; a late success still wins, so nothing posts twice.
 - **On a schedule:** Settings → Make.com → *Auto-publish at the scheduled time*. A cron checks every 5 minutes and sends
   approved posts whose (London) time has arrived, up to 6 hours late. Failed attempts are not retried automatically.
-- **Stats:** nightly at 03:30 (UK), or *Get latest stats now*. Analytics switches to "Real data" once any arrive.
+- **Stats:** every night (cron 03:30 UTC — about 4am UK), or *Get latest stats now*. Analytics switches to "Real data" once any arrive.
 - **Which accounts:** chosen inside the Make scenarios (the Instagram account / Facebook Page / YouTube connection on each
   module). To move from test accounts to Sanjugo's, change those modules in Make — Creator Studio doesn't change.
 - **TikTok publishing:** Make has no module for posting organic TikToks, so TikTok stays "Mark as published" by hand (stats can still be pulled).

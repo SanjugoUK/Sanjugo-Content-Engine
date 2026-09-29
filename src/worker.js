@@ -13,6 +13,7 @@ export default {
       ctx.waitUntil(makeConfig(env).then((c) => pullPlatforms(c).length && triggerAnalyticsPull(env, { trigger: "nightly" })).catch((e) => console.error("analytics pull failed", e)));
     } else {
       ctx.waitUntil(autoPublishDue(env).catch((e) => console.error("auto-publish failed", e)));
+      ctx.waitUntil(expireStuckJobs(env).catch((e) => console.error("expire jobs failed", e)));
     }
   },
 
@@ -1547,9 +1548,10 @@ async function handleMakeCallback(request, env, ctx) {
     return json({ ok: true, saved: posts.length });
   }
 
-  // Publish result
-  if (job.status !== "sent") return json({ ok: true, duplicate: true });
+  // Publish result (a late success still counts after a 20-minute timeout, so the post isn't sent twice)
   const ok = body.ok === true || body.ok === "true";
+  const timedOut = job.status === "failed" && String(job.error || "").startsWith(TIMEOUT_NOTE);
+  if (job.status !== "sent" && !(timedOut && ok)) return json({ ok: true, duplicate: true });
   const permalink = String(body.permalink || "").slice(0, 300) || null;
   const postId = String(body.postId || "").slice(0, 80) || null;
   const error = ok ? null : (dec(body.error) || "Make reported an error").slice(0, 500);
@@ -1570,9 +1572,38 @@ async function handleMakeCallback(request, env, ctx) {
       ? `🚀 “${title}” is live on ${where} — published automatically via Make.${permalink ? "\n" + permalink : ""}`
       : `⚠️ Publishing “${title}” to ${where} failed: ${error}\nOpen the post to try again, or publish it by hand.`;
     const posted = await postSystemChat(env, { text: text + (who.length ? " " + who.map((id) => "@" + nameOf(id)).join(" ") : ""), mentions: who, contentId: job.content_id, eventId: "make_" + job.id });
-    if (posted && who.length) await pushToUsers(env, who, { title: ok ? "Published" : "Publishing failed", body: text.split("\n")[0].slice(0, 200), url: "/#/chat", tag: "make-" + job.id });
+    // (After a timeout, the earlier "didn't finish" message used this event id, so a late success gets its own.)
+    const eventId = "make_" + job.id + (timedOut ? "_late" : "");
+    const posted2 = posted || (timedOut && await postSystemChat(env, { text: text + (who.length ? " " + who.map((id) => "@" + nameOf(id)).join(" ") : ""), mentions: who, contentId: job.content_id, eventId }));
+    if (posted2 && who.length) await pushToUsers(env, who, { title: ok ? "Published" : "Publishing failed", body: text.split("\n")[0].slice(0, 200), url: "/#/chat", tag: "make-" + job.id });
   })().catch((e) => console.error("make notify", e)));
   return json({ ok: true });
+}
+
+// A publish request Make never answers (scenario off, account disconnected, Make down) would otherwise show
+// "Publishing…" forever. After 20 minutes it's marked failed so the team sees it and can try again; if Make's answer
+// still turns up later, a success wins (see handleMakeCallback), so nothing gets posted twice.
+const MAKE_TIMEOUT_MS = 20 * 60e3;
+const TIMEOUT_NOTE = "No answer from Make after 20 minutes";
+async function expireStuckJobs(env, ctx) {
+  await ensureMakeTables(env);
+  const cutoff = new Date(Date.now() - MAKE_TIMEOUT_MS).toISOString();
+  const { results } = await env.DB.prepare("SELECT * FROM make_jobs WHERE kind = 'publish' AND status = 'sent' AND created_at < ?1 LIMIT 20").bind(cutoff).all();
+  for (const job of results || []) {
+    const where = PLATFORM_NAMES[job.platform] || job.platform;
+    const scenario = { instagram: "Instagram", facebook: "Facebook", youtube: "YouTube", tiktok: "TikTok", gbp: "Google Business" }[job.platform] || where;
+    const error = `${TIMEOUT_NOTE} — the "Publish · ${scenario}" scenario may be switched off or its account disconnected. Check it in Make, then try again.`;
+    const res = await env.DB.prepare("UPDATE make_jobs SET status = 'failed', error = ?2, updated_at = ?3 WHERE id = ?1 AND status = 'sent'").bind(job.id, error, new Date().toISOString()).run();
+    if (!res.meta || !res.meta.changes) continue;
+    const state = await readState(env);
+    const item = (state.contentItems || []).find((i) => i.id === job.content_id) || {};
+    const { members } = await listTeam(env);
+    const byId = new Map(members.map((m) => [m.id, m]));
+    const who = [...new Set([item.creator, item.approver, job.requested_by].filter((id) => id && byId.has(id)))];
+    const text = `⚠️ Publishing “${item.title || "a post"}” to ${where} didn't finish: ${error}`;
+    const posted = await postSystemChat(env, { text: text + (who.length ? " " + who.map((id) => "@" + byId.get(id).name).join(" ") : ""), mentions: who, contentId: job.content_id, eventId: "make_" + job.id });
+    if (posted && who.length) await pushToUsers(env, who, { title: "Publishing failed", body: text.slice(0, 200), url: "/#/chat", tag: "make-" + job.id }).catch(() => {});
+  }
 }
 
 // Every 5 minutes (when switched on): send approved posts whose scheduled time has arrived.
@@ -1635,6 +1666,7 @@ async function makeRoute(request, env, url, viewer, ctx) {
     });
   }
   if (url.pathname === "/api/make/jobs" && request.method === "GET") {
+    await expireStuckJobs(env).catch((e) => console.error("expire jobs", e));
     const since = url.searchParams.get("since") || new Date(Date.now() - 7 * 86400e3).toISOString();
     const { results } = await env.DB.prepare("SELECT * FROM make_jobs WHERE kind = 'publish' AND updated_at > ?1 ORDER BY updated_at ASC LIMIT 200").bind(since).all();
     return json({ jobs: (results || []).map(jobOut), now: new Date().toISOString() });
@@ -1721,7 +1753,7 @@ What Creator Studio can do (use this to explain how things work):
 - Content Calendar: month, week and list views; filter by platform, campaign, status; tap a date to see that day or create content for it; drag or edit times.
 - Team Chat: @name mentions (with a badge, pop-up and phone/desktop alert), @everyone, attach a post, Mentions and Updates filters. "Creator Studio" posts automatic updates when something is sent for approval, resubmitted, approved, sent back, rejected, published, or fails to publish.
 - Publishing: on an approved post, "Publish…" → "Publish now with Make" posts to the platforms connected in Make (Instagram reel/photo, Facebook reel/photo, YouTube Short, Google Business update); the live link comes back to the post and Team Chat. Or switch on "Auto-publish at the scheduled time" (Settings → Make.com; checks every 5 minutes). TikTok can't be posted through Make — post it in the TikTok app, then use "Mark as published". Instagram reels need MP4/MOV, H.264/HEVC, max 1920 px wide, max 5 Mbps; Facebook reels 9:16, 3–90 s; best to export 1080p vertical.
-- Stats: Make pulls the latest posts with likes, comments, shares, saves, reach and views every night at 03:30, or any time with "Get latest stats now" (Settings → Make.com). TikTok stats come from the public @sanjugouk profile via HasData. Each platform has its own Make scenario ("Pull · Instagram", "Publish · Facebook", …) so one can be fixed without touching the others; "Clear stats" removes a platform's stats (e.g. after switching accounts).
+- Stats: Make pulls the latest posts with likes, comments, shares, saves, reach and views every night (about 4am UK time), or any time with "Get latest stats now" (Settings → Make.com). TikTok stats come from the public @sanjugouk profile via HasData. Each platform has its own Make scenario ("Pull · Instagram", "Publish · Facebook", …) so one can be fixed without touching the others; "Clear stats" removes a platform's stats (e.g. after switching accounts).
 - Analytics: Real data (from Make) or Sample data; ranges 7/30/90 days, 12 months, All time, custom; filters by platform, campaign, content pillar, post; per-platform and per-post views, reach, likes, comments, shares, saves, engagement rate; best time to post; top posts; a growth forecaster.
 - Published Content: every live post on the connected accounts with its stats and a link to it.
 - Team: workload per person and real approval turnaround.

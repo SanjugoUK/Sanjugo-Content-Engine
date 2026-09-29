@@ -1743,11 +1743,12 @@ How to answer:
 - For questions about their posts, schedule, approvals or stats, use the workspace snapshot you are given and quote real titles and numbers. Never invent posts, people or figures; if the snapshot doesn't have it, say so and say where in Creator Studio to look.
 - Use web search for anything current or factual you aren't sure of (trends, platform rule changes, events, news). Mention the source briefly in words (e.g. "according to Meta's help centre"), not long URLs.
 - You can't click anything or change data yourself — explain exactly which buttons to use instead.
+- Only describe buttons and features listed below. If something isn't listed, say Creator Studio doesn't do that yet — never guess at a button name.
 - If a question is ambiguous, make a sensible assumption, say it in a few words, and answer.
 
 What Creator Studio can do (use this to explain how things work):
 - Dashboard: counts of posts awaiting approval, changes requested, scheduled this week, published, failed; views and engagement from real stats (last 30 days); Smart insights (Claude's read of the pipeline); upcoming content; recent approvals. Tiles are clickable.
-- Create Content: upload a video/photo, or pick one from the Content Library by barcode (e.g. G219). Choose platforms, write a caption per platform, pick a campaign (or "No campaign"), priority, and the approver — one person, or "Cyrus or Yan Yan (either can approve)" (the default: both are notified and whoever decides first moves it on). Then submit for approval.
+- Create Content: upload a video/photo, or pick one from the Content Library by barcode (e.g. G219). Choose platforms, write a caption per platform, pick a campaign (or "No campaign"), priority, and the approver — one person, or "Cyrus or Yan Yan (either can approve)" (the default: both are notified and whoever decides first moves it on). Then submit for approval, or "Save as Draft" (drafts show in the Content Calendar and can be opened, finished and submitted later). There is no Delete button for posts or drafts yet — to get rid of one, submit it and have an approver Reject it, or ask an admin (Cyrus or Yan Yan).
 - Content Library: the Google Drive folder "Sanjugo Marketing Contents Final" (about 1,600 files). File names end with a barcode like G219; search by barcode, dish or stage, watch videos, see where a file has already been used (post, platform, date), and start a post from it.
 - Approval Queue: tabs To review / Needs changes / Rejected. Posts are previewed exactly as they'll look on each app (Reels, TikTok, Shorts, Facebook, Google Business), with full-screen playback. Decide with the buttons under each post (no swiping): ✓ Approve, ✕ Reject, or Request Edits for changes (with feedback tags and a due date); each asks for confirmation. "Full package" reviews the whole post; "Per platform" reviews each platform separately. Undo Last Decision exists. Creators fix posts from Needs changes / Rejected and resubmit, optionally telling the approver in chat. Approved posts are auto-placed into the next free slot of the recurring calendar template (Settings) if they have no time.
 - Content Calendar: month, week and list views; filter by platform, campaign, status; tap a date to see that day or create content for it; drag or edit times.
@@ -1823,7 +1824,7 @@ async function botAnswer(env, msg) {
   const snapshot = (await botSnapshot(env, msg.author)).slice(0, useClaude ? 24000 : 9000);
   const question = String(msg.text).replace(BOT_RE, "").trim() || "(no question — just tagged you)";
   const chatContext = useClaude ? history : history.split("\n").slice(-12).join("\n").slice(-3000);
-  const content = `<workspace_snapshot>\n${snapshot}\n</workspace_snapshot>\n\n<recent_team_chat>\n${chatContext || "(no earlier messages)"}\n</recent_team_chat>\n\n${who(msg.author)} asks: ${question}`;
+  const content = wellFormed(`<workspace_snapshot>\n${snapshot}\n</workspace_snapshot>\n\n<recent_team_chat>\n${chatContext || "(no earlier messages)"}\n</recent_team_chat>\n\n${who(msg.author)} asks: ${question}`);
 
   if (!useClaude) {
     const out = await env.AI.run(WORKERS_AI_MODEL, {
@@ -1858,6 +1859,11 @@ async function botAnswer(env, msg) {
   }
   if (!final || final.stop_reason === "refusal") return "Sorry — I can't help with that one.";
   return tidyBotText(final.content.filter((b) => b.type === "text").map((b) => b.text).join("").trim());
+}
+
+// Trimming text with .slice() can cut an emoji in half; the AI APIs reject the leftover half as invalid JSON.
+function wellFormed(text) {
+  return String(text).replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "");
 }
 
 // Strip the Markdown the chat can't show.

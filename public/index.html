@@ -210,6 +210,15 @@ function reviewTurnaround(log, userId){
   const h = waits.reduce((x,y)=>x+y,0)/waits.length/3600e3;
   return h < 1 ? Math.max(1, Math.round(h*60))+"m" : h < 48 ? h.toFixed(1)+"h" : (h/24).toFixed(1)+"d";
 }
+// Creators can delete their own post until an approver has signed it off (draft, sent back or rejected);
+// admins can delete anything that isn't live or on its way out. Published posts stay, for the record and the stats.
+function canDeleteContent(item, userId){
+  const u = USERS.find(x=>x.id===userId);
+  if(!item || !u) return false;
+  if(["published","publishing"].includes(item.status)) return false;
+  if(u.role==="admin") return true;
+  return item.creator===userId && ["draft","changes_requested","rejected"].includes(item.status);
+}
 const isReviewer = u => !!u && u.active!==false && (u.role==="approver" || u.role==="admin");
 const reviewers = () => activeUsers().filter(isReviewer);
 function approversOf(item){ return item && item.approver===ANY_APPROVER ? reviewers() : USERS.filter(u=>item && u.id===item.approver); }
@@ -697,7 +706,7 @@ function pushServerState(state){
     resetId: state.serverResetId || null,
     contentItems: state.contentItems, activityLog: state.activityLog, decisionHistory: state.decisionHistory,
     calendarTemplate: state.calendarTemplate, adminEmails: state.adminEmails, theme: state.theme, campaigns: state.campaigns,
-    chatUpdates: state.chatUpdates !== false,
+    chatUpdates: state.chatUpdates !== false, deletedIds: state.deletedIds || [],
   };
   fetch("/api/state", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload)}).then(res=>{
     // 409 = the shared workspace was reset after this page loaded. Don't write the old copy back — reload fresh.
@@ -759,6 +768,7 @@ function reducer(state, action){
         adminEmails: Array.isArray(s.adminEmails) ? s.adminEmails : state.adminEmails,
         campaigns: Array.isArray(s.campaigns) ? s.campaigns : state.campaigns,
         chatUpdates: s.chatUpdates !== false,
+        deletedIds: Array.isArray(s.deletedIds) ? s.deletedIds : [],
         theme: s.theme || state.theme,
         serverResetId: s.resetId || null,
         serverLoaded: true,
@@ -792,6 +802,15 @@ function reducer(state, action){
     case "CREATE_CONTENT": {
       const log = {id:uid("act"), at:new Date().toISOString(), type:"created", contentId:action.item.id, contentTitle:action.item.title, user:state.currentUserId, detail: action.item.status==="submitted"?"Content created and submitted for approval":"Draft created"};
       return {...state, contentItems:[action.item, ...state.contentItems], activityLog:[log, ...state.activityLog]};
+    }
+    case "DELETE_CONTENT": {
+      // deletedIds travels with every save so the server can keep an older copy on another device from bringing it back.
+      const item = state.contentItems.find(i=>i.id===action.id);
+      if(!item) return state;
+      const log = {id:uid("act"), at:new Date().toISOString(), type:"deleted", contentId:item.id, contentTitle:item.title, user:state.currentUserId,
+        detail: item.status==="draft"? "Draft deleted" : "Post deleted", comment:null};
+      return {...state, contentItems: state.contentItems.filter(i=>i.id!==item.id), deletedIds:[...(state.deletedIds||[]), item.id].slice(-500),
+        activityLog:[log, ...state.activityLog], toasts:[...state.toasts, {id:uid("toast"), message:"Deleted “"+item.title+"”", variant:"ok"}]};
     }
     case "UPDATE_CONTENT": {
       return {...state, contentItems: state.contentItems.map(it=> it.id===action.id? {...it, ...action.patch} : it)};
@@ -1519,7 +1538,7 @@ function MarkPublishedModal({item, open, onClose}){
 }
 
 function ContentDetailDrawer({item, onClose}){
-  const {state} = useApp();
+  const {state, dispatch} = useApp();
   const [tab, setTab] = useState("overview");
   const [compareVersion, setCompareVersion] = useState(null);
   const [publishing, setPublishing] = useState(false);
@@ -1540,7 +1559,11 @@ function ContentDetailDrawer({item, onClose}){
           <button onClick={onClose} style={{width:32,height:32,borderRadius:9,border:"1px solid var(--border)",background:"var(--surface)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><Icon name="x" size={16}/></button>
         </div>
         <div style={{display:"flex", gap:8, marginTop:10, flexWrap:"wrap"}}><StatusBadge status={item.status}/><PriorityDot priority={item.priority}/><Badge label={"v"+item.currentVersion} color="var(--accent)" soft="var(--accent-soft)"/></div>
-        {canMarkPublished && <div style={{marginTop:12}}><Button variant="success" size="sm" icon="check" onClick={()=>setPublishing(true)}>Publish…</Button></div>}
+        {(canMarkPublished || canDeleteContent(item, state.currentUserId)) && <div style={{display:"flex", gap:8, marginTop:12, flexWrap:"wrap"}}>
+          {canMarkPublished && <Button variant="success" size="sm" icon="check" onClick={()=>setPublishing(true)}>Publish…</Button>}
+          {canDeleteContent(item, state.currentUserId) && <ConfirmButton confirmLabel={item.status==="draft"? "Yes, delete draft" : "Yes, delete post"}
+            onConfirm={()=>{ dispatch({type:"DELETE_CONTENT", id:item.id}); onClose(); }}>{item.status==="draft"? "Delete draft" : "Delete post"}</ConfirmButton>}
+        </div>}
         <MakeStatusLine item={item}/>
         <MarkPublishedModal item={item} open={publishing} onClose={()=>setPublishing(false)}/>
         <div style={{display:"flex", gap:6, marginTop:14}}>
@@ -2609,7 +2632,8 @@ function RevisionEditor({item, onClose}){
     setF({title:item.title, variants, media:null, libraryRef:undefined, note:"", mediaStatus:""});
     setTab(item.platforms[0]);
     setNotify(true);
-    setPerPlatform(new Set(item.platforms.map(p=>variants[p] ? variants[p].scheduledAt : "")).size > 1);
+    // Always start with one date for every platform — creators expect changing it to move the whole post.
+    setPerPlatform(false);
   }, [item && item.id]);
   if(!item || !f) return null;
   const toTell = approversOf(item).filter(u=>u.id!==state.currentUserId);
@@ -2691,6 +2715,9 @@ function RevisionEditor({item, onClose}){
           <input type="datetime-local" value={(f.variants[item.platforms[0]]||{}).scheduledAt||""} onChange={e=>setAllTimes(e.target.value)} style={{...input, width:"auto"}}/>
           <span style={{fontSize:12, color:"var(--ink-mute)"}}>{item.platforms.length>1? "All "+item.platforms.length+" platforms" : PLATFORM_META[item.platforms[0]].label}</span>
           {item.platforms.length>1 && <Button variant="text" size="sm" onClick={()=>setPerPlatform(true)}>Different time per platform</Button>}
+          {item.platforms.length>1 && new Set(item.platforms.map(p=>(f.variants[p]||{}).scheduledAt||"")).size>1 && <div style={{flexBasis:"100%", fontSize:12, color:"var(--amber)", background:"var(--amber-soft)", borderRadius:8, padding:"7px 10px", lineHeight:1.5}}>
+            These platforms are on different dates right now ({item.platforms.map(p=>PLATFORM_META[p].label+" "+((f.variants[p]||{}).scheduledAt? fmtDateTime((f.variants[p]||{}).scheduledAt) : "not set")).join(" · ")}). Pick a date above to put them all on it.
+          </div>}
         </div> : <div style={{display:"grid", gap:8}}>
           {item.platforms.map(p=>(
             <div key={p} style={{display:"flex", gap:10, alignItems:"center", flexWrap:"wrap"}}>

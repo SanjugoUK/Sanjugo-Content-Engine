@@ -161,12 +161,21 @@ async function postState(request, env, ctx) {
   }
   // After the shared workspace is reset, a tab that loaded the old copy must not write it back: every save carries
   // the resetId it loaded, and a mismatch is refused (the app then reloads fresh).
-  const current = await env.DB.prepare("SELECT json_extract(data, '$.resetId') AS resetId FROM app_state WHERE id = 1").first();
+  const current = await env.DB.prepare("SELECT json_extract(data, '$.resetId') AS resetId, json_extract(data, '$.deletedIds') AS deletedIds FROM app_state WHERE id = 1").first();
   const liveReset = current && current.resetId ? String(current.resetId) : null;
   if (liveReset && body.resetId !== liveReset) {
     return new Response(JSON.stringify({ error: "The workspace was reset — reload to get the current posts.", code: "reset" }), { status: 409, headers: { "Content-Type": "application/json" } });
   }
   if (liveReset) body.resetId = liveReset;
+  // Deleted posts stay deleted: a device that loaded before the delete would otherwise save them straight back.
+  let known = [];
+  try { known = JSON.parse((current && current.deletedIds) || "[]"); } catch (e) {}
+  const deleted = [...new Set([...(Array.isArray(known) ? known : []), ...(Array.isArray(body.deletedIds) ? body.deletedIds : [])])].slice(-500);
+  body.deletedIds = deleted;
+  if (deleted.length && Array.isArray(body.contentItems)) {
+    const gone = new Set(deleted);
+    body.contentItems = body.contentItems.filter((i) => !gone.has(i && i.id));
+  }
   const json = JSON.stringify(body);
   await env.DB.prepare(
     `INSERT INTO app_state (id, data, updated_at) VALUES (1, ?1, datetime('now'))
@@ -1752,7 +1761,7 @@ How to answer:
 
 What Creator Studio can do (use this to explain how things work):
 - Dashboard: counts of posts awaiting approval, changes requested, scheduled this week, published, failed; views and engagement from real stats (last 30 days); Smart insights (Claude's read of the pipeline); upcoming content; recent approvals. Tiles are clickable.
-- Create Content: first pick the content style — "Post / Reel" or "Story" (full-screen 9:16, Instagram/Facebook/TikTok only, with an optional link sticker and posting notes instead of a caption; approvers see it as a real story; Make can't post stories, so after approval someone posts it from the phone app and uses "Mark as published"). Then upload a video/photo, or pick one from the Content Library by barcode (e.g. G219). Choose platforms, write a caption per platform, pick a campaign (or "No campaign"), priority, and the approver — one person, or "Cyrus or Yan Yan (either can approve)" (the default: both are notified and whoever decides first moves it on). Then submit for approval, or "Save as Draft" (drafts show in the Content Calendar and can be opened, finished and submitted later). There is no Delete button for posts or drafts yet — to get rid of one, submit it and have an approver Reject it, or ask an admin (Cyrus or Yan Yan).
+- Create Content: first pick the content style — "Post / Reel" or "Story" (full-screen 9:16, Instagram/Facebook/TikTok only, with an optional link sticker and posting notes instead of a caption; approvers see it as a real story; Make can't post stories, so after approval someone posts it from the phone app and uses "Mark as published"). Then upload a video/photo, or pick one from the Content Library by barcode (e.g. G219). Choose platforms, write a caption per platform, pick a campaign (or "No campaign"), priority, and the approver — one person, or "Cyrus or Yan Yan (either can approve)" (the default: both are notified and whoever decides first moves it on). Then submit for approval, or "Save as Draft" (drafts show in the Content Calendar and can be opened, finished and submitted later). To delete a post: open it (tap it in the Calendar, Approval Queue or Dashboard) and tap "Delete draft" / "Delete post" at the top, then confirm. Creators can delete their own post while it is a draft, sent back for changes, or rejected; admins (Cyrus, Yan Yan) can delete any post that is not published. Published posts can\'t be deleted in Creator Studio (delete them in the social app itself).
 - Content Library: the Google Drive folder "Sanjugo Marketing Contents Final" (about 1,600 files). File names end with a barcode like G219; search by barcode, dish or stage, watch videos, see where a file has already been used (post, platform, date), and start a post from it.
 - Approval Queue: tabs To review / Needs changes / Rejected. Posts are previewed exactly as they'll look on each app (Reels, TikTok, Shorts, Facebook, Google Business), with full-screen playback. Decide with the buttons under each post (no swiping): ✓ Approve, ✕ Reject, or Request Edits for changes (with feedback tags and a due date); each asks for confirmation. "Full package" reviews the whole post; "Per platform" reviews each platform separately. Undo Last Decision exists. Creators fix posts from Needs changes / Rejected and resubmit, optionally telling the approver in chat. Approved posts are auto-placed into the next free slot of the recurring calendar template (Settings) if they have no time.
 - Content Calendar: month, week and list views; filter by platform, campaign, status; tap a date to see that day or create content for it; drag or edit times.

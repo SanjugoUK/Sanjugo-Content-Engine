@@ -339,6 +339,11 @@ function videoFileToPoster(file, maxDim, quality){
   });
 }
 
+// Stories: full-screen 9:16, shown for 24 hours. Instagram, Facebook and TikTok only. Make can't post them,
+// so they're approved here and then posted from the phone app and marked as published.
+const STORY_PLATFORMS = ["instagram","facebook","tiktok"];
+const isStoryItem = item => !!item && item.format==="story";
+
 function makeVariant(platform, over){
   const base = {
     platform, status:"draft", publishStatus:"not_scheduled", scheduledAt:null,
@@ -920,7 +925,9 @@ function reducer(state, action){
       if(!item) return state;
       const editor = (USERS.find(u=>u.id===state.currentUserId)||{}).name || "Someone";
       const variants = {...item.variants};
-      Object.entries(patch.variants||{}).forEach(([p,v])=>{ if(variants[p]) variants[p] = {...variants[p], ...v, ...(resubmit? {status:"submitted"} : {})}; });
+      Object.entries(patch.variants||{}).forEach(([p,v])=>{ if(!variants[p]) return;
+        const moved = "scheduledAt" in v && (v.scheduledAt||null) !== (variants[p].scheduledAt||null);
+        variants[p] = {...variants[p], ...v, ...(moved? {templateRuleId:null} : {}), ...(resubmit? {status:"submitted"} : {})}; });
       const nextVersion = resubmit ? item.currentVersion + 1 : item.currentVersion;
       const versions = resubmit ? [...(item.versions||[]), {version:nextVersion, editor, date:new Date().toISOString(), changes: note || "Revised after feedback", decision:"—", feedback:null}] : item.versions;
       const updated = {...item, ...(patch.title!=null? {title:patch.title} : {}), ...(patch.media? {media:{...item.media, ...patch.media}} : {}),
@@ -1120,11 +1127,14 @@ function ScheduleEditor({item, platform, scheduledAt}){
     return scheduledAt ? <FieldRow label="Scheduled" value={fmtDateTime(scheduledAt)}/> : <div style={{color:"var(--ink-mute)"}}>Not scheduled yet</div>;
   }
   function save(){ dispatch({type:"RESCHEDULE", contentId:item.id, platform, scheduledAt: value? value+":00" : null}); }
+  const others = item.platforms.filter(p=>p!==platform && item.variants[p] && item.variants[p].publishStatus!=="published");
+  function saveAll(){ [platform, ...others].forEach(p=>dispatch({type:"RESCHEDULE", contentId:item.id, platform:p, scheduledAt: value+":00"})); }
   return (
     <div style={{display:"flex", alignItems:"center", gap:8, flexWrap:"wrap", paddingTop:2}}>
       <span style={{fontWeight:700, color:"var(--ink-mute)", flexShrink:0}}>Scheduled</span>
       <input type="datetime-local" value={value} onChange={e=>setValue(e.target.value)} style={{borderRadius:8, border:"1px solid var(--border)", padding:"5px 8px", fontSize:12, background:"var(--surface)", color:"var(--ink)"}}/>
       <Button size="sm" variant="primary" onClick={save} disabled={value===(scheduledAt? isoToLocalInput(scheduledAt):"")}>Save</Button>
+      {others.length>0 && <Button size="sm" variant="ghost" onClick={saveAll} disabled={!value}>Save for all</Button>}
       {scheduledAt && <Button size="sm" variant="ghost" onClick={()=>{setValue(""); dispatch({type:"RESCHEDULE", contentId:item.id, platform, scheduledAt:null});}}>Clear</Button>}
     </div>
   );
@@ -1187,6 +1197,11 @@ function MakePublishSection({item, onDone}){
   const [results, setResults] = useState(null);
   const cantMedia = !(item.media && item.media.fileUrl);
   if(!mk.info || mk.info.error || !mk.info.platforms) return null;
+  if(isStoryItem(item)) return (
+    <div style={{border:"1px solid var(--border)", background:"var(--surface-2)", borderRadius:10, padding:12, marginBottom:16, fontSize:12.5, color:"var(--ink-soft)", lineHeight:1.5}}>
+      <div style={{fontSize:13.5, fontWeight:600, color:"var(--ink)", marginBottom:4}}>Post this story from the phone app</div>
+      Make can't post stories, so open {item.platforms.map(p=>PLATFORM_META[p].label).join(", ")} on the phone, post the story{item.platforms.some(p=>(item.variants[p]||{}).url)? " (add the link sticker)" : ""}, then mark it as published below.
+    </div>);
   if(!pending.length && !results) return null;
   async function go(){
     setBusy(true);
@@ -2247,8 +2262,51 @@ function GBPScreen({item, variant, brand, playing, muted}){
   );
 }
 
+/* A story as the viewer sees it: full-screen media, progress bar and account at the top, reply bar at the bottom. */
+function StoryScreen({platform, item, variant, brand}){
+  const {progress} = React.useContext(PhoneCtx);
+  const account = platform==="facebook" ? (brand.accounts.facebook || brand.name) : (handleOf(brand.accounts[platform]) || handleOf(brand.name));
+  const link = variant && variant.url;
+  const linkLabel = link ? String(link).replace(/^https?:\/\//,"").replace(/^www\./,"").replace(/\/$/,"").slice(0,26) : "";
+  const reply = {instagram:"Send message", facebook:"Reply…", tiktok:"Add comment…"}[platform];
+  const ring = {instagram:"#d62976", facebook:"#1877F2", tiktok:"#FE2C55"}[platform];
+  const done = progress!=null ? progress*100 : 35;
+  return (
+    <>
+      <ScreenMedia item={item}/>
+      <div style={{position:"absolute", inset:0, pointerEvents:"none", background:"linear-gradient(180deg, rgba(0,0,0,.4) 0%, transparent 17%, transparent 80%, rgba(0,0,0,.45) 100%)"}}/>
+      <PhoneStatusBar/>
+      <div style={{position:"absolute", top:pt(52), left:pt(8), right:pt(8), height:pt(2.5), borderRadius:pt(2), background:"rgba(255,255,255,.35)", overflow:"hidden", pointerEvents:"none"}}>
+        <div style={{width:done+"%", height:"100%", background:"#fff", transition:"width .25s linear"}}/>
+      </div>
+      <div style={{position:"absolute", top:pt(62), left:pt(12), right:pt(12), display:"flex", alignItems:"center", gap:pt(9), color:"#fff", textShadow:"0 1px 2px rgba(0,0,0,.4)", pointerEvents:"none"}}>
+        <BrandAvatar brand={brand} size={pt(34)} ring={`0 0 0 ${pt(2)} ${ring}`}/>
+        <span style={{fontWeight:600, fontSize:pt(14.5), whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis", minWidth:0}}>{account}</span>
+        <span style={{fontSize:pt(13.5), opacity:.75, flexShrink:0}}>{platform==="facebook"? "Just now" : "1m"}</span>
+        {platform==="tiktok" && <span style={{fontSize:pt(11.5), fontWeight:700, background:"rgba(255,255,255,.22)", borderRadius:pt(4), padding:`${pt(1)} ${pt(6)}`, flexShrink:0}}>Story</span>}
+        <span style={{flex:1}}/>
+        <AppGlyph name="dotsH" size={pt(22)}/>
+        <AppGlyph name="close" size={pt(24)}/>
+      </div>
+      {link && <div style={{position:"absolute", left:"50%", bottom:pt(170), transform:"translateX(-50%)", display:"flex", alignItems:"center", gap:pt(6), background:"#fff", color:platform==="facebook"? "#1877F2" : "#0095F6", borderRadius:pt(10), padding:`${pt(9)} ${pt(14)}`, fontSize:pt(14.5), fontWeight:700, boxShadow:"0 2px 10px rgba(0,0,0,.25)", whiteSpace:"nowrap", pointerEvents:"none"}}>
+        <svg viewBox="0 0 24 24" width={pt(16)} height={pt(16)} fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round"><path d="M10 14a4.5 4.5 0 0 0 6.4 0l3-3a4.5 4.5 0 0 0-6.4-6.4l-1 1"/><path d="M14 10a4.5 4.5 0 0 0-6.4 0l-3 3a4.5 4.5 0 0 0 6.4 6.4l1-1"/></svg>
+        {linkLabel.toUpperCase()}
+      </div>}
+      <div style={{position:"absolute", left:pt(12), right:pt(12), bottom:pt(40), display:"flex", alignItems:"center", gap:pt(14), color:"#fff", pointerEvents:"none"}}>
+        <div style={{flex:1, height:pt(44), borderRadius:pt(22), border:"1px solid rgba(255,255,255,.7)", display:"flex", alignItems:"center", padding:`0 ${pt(16)}`, fontSize:pt(14.5), color:"rgba(255,255,255,.9)"}}>{reply}</div>
+        {platform==="facebook" ? <span style={{fontSize:pt(24), letterSpacing:pt(2)}}>👍❤️😆</span> : <>
+          <AppGlyph name="heart" size={pt(27)}/>
+          <AppGlyph name="send" size={pt(26)}/>
+        </>}
+      </div>
+      <HomeIndicator/>
+    </>
+  );
+}
+
 function platformScreen(platform, item, variant, brand){
   const p = {item, variant, brand};
+  if(variant && isStoryItem(item) && STORY_PLATFORMS.includes(platform)) return [<StoryScreen platform={platform} {...p}/>, "#000"];
   if(!variant) return [<div style={{position:"absolute", inset:0, display:"flex", alignItems:"center", justifyContent:"center", color:"#aaa", fontSize:pt(15), padding:pt(30), textAlign:"center"}}>No {PLATFORM_META[platform].label} version of this post.</div>, "#111"];
   return {
     instagram: [item.media.aspectRatio==="9:16" ? <IGReelScreen {...p}/> : <IGFeedScreen {...p}/>, "#000"],
@@ -2321,6 +2379,7 @@ function ImmersiveViewer({entry, platform, onPlatform, onDecision, onClose, busy
 
 function variantFields(platform, v){
   if(!v) return [];
+  if(v.postType==="Story") return [["Link sticker", v.url || "None"], ["Posting notes", v.storyNotes]];
   if(platform==="youtube") return [["Title", v.title], ["Description", v.description]];
   if(platform==="gbp") return [["Update text", v.caption], ["Button", v.cta || "Learn more"]];
   return [["Caption", v.caption], ["Hashtags", (v.hashtags||[]).join(" ")]];
@@ -2341,7 +2400,8 @@ function SwipeCard({entry, onDecision, onOpenDetails, isTop, narrow, paused, onI
   const scheduledAt = entry.platform? variant.scheduledAt : (Object.values(item.variants).find(v=>v.scheduledAt)||{}).scheduledAt;
   const hasVideo = item.media.type==="video" && !!item.media.fileUrl;
   const warnings = [];
-  if(!caption) warnings.push("Missing caption/title");
+  if(!caption && !isStoryItem(item)) warnings.push("Missing caption/title");
+  if(isStoryItem(item) && item.media.aspectRatio!=="9:16") warnings.push("Not 9:16 — will be cropped as a story");
   if(item.media.duration && item.media.duration>60 && platformList.includes("tiktok")) warnings.push("Video exceeds TikTok's recommended length");
   if(!scheduledAt) warnings.push("No publish time set");
 
@@ -2390,7 +2450,10 @@ function SwipeCard({entry, onDecision, onOpenDetails, isTop, narrow, paused, onI
         <div style={{display:"flex", alignItems:"center", gap:9, padding:"10px 12px 8px", flexShrink:0}} onClick={openDetails}>
           <span style={{width:8,height:8,borderRadius:99,background:brand.color, flexShrink:0}}/>
           <div style={{flex:1, minWidth:0}}>
-            <div style={{fontSize:13.5, fontWeight:700, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>{item.title}</div>
+            <div style={{display:"flex", alignItems:"center", gap:6, minWidth:0}}>
+              <span style={{fontSize:13.5, fontWeight:700, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>{item.title}</span>
+              {isStoryItem(item) && <span style={{flexShrink:0, fontSize:10.5, fontWeight:700, color:"#d62976", background:"#d6297618", borderRadius:99, padding:"1px 7px"}}>Story</span>}
+            </div>
             <div style={{fontSize:11, color:"var(--ink-mute)", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>{campaign.name} · {creator.name} · {scheduledAt? fmtDateTime(scheduledAt) : "Not scheduled"}</div>
           </div>
           <Badge label={PRIORITY_META[item.priority].label} color={PRIORITY_META[item.priority].color} soft="var(--surface-2)"/>
@@ -2538,17 +2601,21 @@ function RevisionEditor({item, onClose}){
   const [tab, setTab] = useState(null);
   const [busy, setBusy] = useState(false);
   const [notify, setNotify] = useState(true);
+  const [perPlatform, setPerPlatform] = useState(false);
   useEffect(()=>{
     if(!item){ setF(null); return; }
     const variants = {};
-    Object.entries(item.variants||{}).forEach(([p,v])=>{ variants[p] = {caption:v.caption||"", hashtags:(v.hashtags||[]).join(" "), title:v.title||"", description:v.description||"", cta:v.cta||"", scheduledAt: v.scheduledAt ? isoToLocalInput(v.scheduledAt) : ""}; });
+    Object.entries(item.variants||{}).forEach(([p,v])=>{ variants[p] = {caption:v.caption||"", hashtags:(v.hashtags||[]).join(" "), title:v.title||"", description:v.description||"", cta:v.cta||"", url:v.url||"", storyNotes:v.storyNotes||"", scheduledAt: v.scheduledAt ? isoToLocalInput(v.scheduledAt) : ""}; });
     setF({title:item.title, variants, media:null, libraryRef:undefined, note:"", mediaStatus:""});
     setTab(item.platforms[0]);
     setNotify(true);
+    setPerPlatform(new Set(item.platforms.map(p=>variants[p] ? variants[p].scheduledAt : "")).size > 1);
   }, [item && item.id]);
   if(!item || !f) return null;
   const toTell = approversOf(item).filter(u=>u.id!==state.currentUserId);
   const setV = (p, patch) => setF(x=>({...x, variants:{...x.variants, [p]:{...x.variants[p], ...patch}}}));
+  // One publish time for every platform unless the creator asks for different ones — editing it in one platform's tab left the others on the old date.
+  const setAllTimes = (t) => setF(x=>({...x, variants:Object.fromEntries(Object.entries(x.variants).map(([p,vv])=>[p, {...vv, scheduledAt:t}]))}));
   const input = {width:"100%", padding:"9px 11px", borderRadius:8, border:"1px solid var(--border)", fontSize:13.5, background:"var(--surface)", color:"var(--ink)", fontFamily:"inherit"};
   const label = {display:"block", fontSize:12.5, fontWeight:600, marginBottom:6, marginTop:14};
 
@@ -2576,7 +2643,7 @@ function RevisionEditor({item, onClose}){
   function patchFromForm(){
     const variants = {};
     Object.entries(f.variants).forEach(([p,v])=>{
-      variants[p] = {caption:v.caption, hashtags: v.hashtags.split(/[\s,]+/).filter(Boolean).map(t=> t.startsWith("#")? t : "#"+t), title:v.title, description:v.description, cta:v.cta,
+      variants[p] = {caption:v.caption, hashtags: v.hashtags.split(/[\s,]+/).filter(Boolean).map(t=> t.startsWith("#")? t : "#"+t), title:v.title, description:v.description, cta:v.cta, url:v.url.trim(), storyNotes:v.storyNotes,
         scheduledAt: v.scheduledAt ? new Date(v.scheduledAt).toISOString() : null};
     });
     return {title:f.title.trim() || item.title, variants, ...(f.media? {media:f.media} : {}), ...(f.libraryRef!==undefined? {libraryRef:f.libraryRef} : {})};
@@ -2619,7 +2686,22 @@ function RevisionEditor({item, onClose}){
           </label>
         </div>
 
-        <label style={label}>Wording per platform</label>
+        <label style={label}>Publish date &amp; time</label>
+        {!perPlatform ? <div style={{display:"flex", gap:10, alignItems:"center", flexWrap:"wrap"}}>
+          <input type="datetime-local" value={(f.variants[item.platforms[0]]||{}).scheduledAt||""} onChange={e=>setAllTimes(e.target.value)} style={{...input, width:"auto"}}/>
+          <span style={{fontSize:12, color:"var(--ink-mute)"}}>{item.platforms.length>1? "All "+item.platforms.length+" platforms" : PLATFORM_META[item.platforms[0]].label}</span>
+          {item.platforms.length>1 && <Button variant="text" size="sm" onClick={()=>setPerPlatform(true)}>Different time per platform</Button>}
+        </div> : <div style={{display:"grid", gap:8}}>
+          {item.platforms.map(p=>(
+            <div key={p} style={{display:"flex", gap:10, alignItems:"center", flexWrap:"wrap"}}>
+              <span style={{display:"inline-flex", alignItems:"center", gap:6, width:130, fontSize:12.5, fontWeight:600}}><PlatformIcon platform={p} size={11}/>{PLATFORM_META[p].label}</span>
+              <input type="datetime-local" value={(f.variants[p]||{}).scheduledAt||""} onChange={e=>setV(p,{scheduledAt:e.target.value})} style={{...input, width:"auto"}}/>
+            </div>
+          ))}
+          <div><Button variant="text" size="sm" onClick={()=>{ setAllTimes((f.variants[item.platforms[0]]||{}).scheduledAt||""); setPerPlatform(false); }}>Use {PLATFORM_META[item.platforms[0]].label}'s time for all</Button></div>
+        </div>}
+
+        <label style={label}>{isStoryItem(item)? "Story details per platform" : "Wording per platform"}</label>
         <div className="cf-noscrollbar" style={{display:"flex", gap:6, overflowX:"auto", marginBottom:10}}>
           {item.platforms.map(p=>(
             <button key={p} onClick={()=>setTab(p)} style={{display:"flex", alignItems:"center", gap:6, padding:"6px 11px 6px 6px", borderRadius:99, border:"1px solid "+(tab===p? PLATFORM_HEX[p]:"var(--border)"), background: tab===p? PLATFORM_HEX[p]+"14":"var(--surface)", fontSize:12.5, fontWeight:600, cursor:"pointer", color:"var(--ink)", flexShrink:0}}>
@@ -2627,7 +2709,10 @@ function RevisionEditor({item, onClose}){
             </button>
           ))}
         </div>
-        {tab==="youtube" ? <>
+        {isStoryItem(item) ? <>
+          {tab!=="tiktok" && <input value={v.url} onChange={e=>setV(tab,{url:e.target.value})} placeholder="Link sticker (optional) — https://…" style={{...input, marginBottom:8}}/>}
+          <textarea value={v.storyNotes} onChange={e=>setV(tab,{storyNotes:e.target.value})} placeholder="Posting notes — stickers, @mentions, music…" rows={3} style={{...input, resize:"vertical"}}/>
+        </> : tab==="youtube" ? <>
           <input value={v.title} onChange={e=>setV(tab,{title:e.target.value})} placeholder="YouTube Shorts title" style={{...input, marginBottom:8}}/>
           <textarea value={v.description} onChange={e=>setV(tab,{description:e.target.value})} placeholder="Description" rows={3} style={{...input, resize:"vertical"}}/>
         </> : <>
@@ -2636,11 +2721,6 @@ function RevisionEditor({item, onClose}){
             ? <input value={v.cta} onChange={e=>setV(tab,{cta:e.target.value})} placeholder="Button text, e.g. Book" style={input}/>
             : <input value={v.hashtags} onChange={e=>setV(tab,{hashtags:e.target.value})} placeholder="#Sanjugo #sushi" style={input}/>}
         </>}
-        <div style={{display:"flex", gap:10, alignItems:"center", flexWrap:"wrap", marginTop:10}}>
-          <span style={{fontSize:12.5, fontWeight:600}}>Publish at</span>
-          <input type="datetime-local" value={v.scheduledAt||""} onChange={e=>setV(tab,{scheduledAt:e.target.value})} style={{...input, width:"auto"}}/>
-          {item.platforms.length>1 && <Button variant="text" size="sm" onClick={()=>item.platforms.forEach(p=>setV(p,{scheduledAt:v.scheduledAt}))}>Use for all platforms</Button>}
-        </div>
 
         <label style={label}>Note to the approver <span style={{fontWeight:400, color:"var(--ink-mute)"}}>(what you changed)</span></label>
         <textarea value={f.note} onChange={e=>setF(x=>({...x, note:e.target.value}))} rows={2} placeholder="e.g. Shortened the caption and swapped to the brighter shot (G731)." style={{...input, resize:"vertical"}}/>
@@ -3107,7 +3187,7 @@ function CalendarCard({entry, onOpen}){
       <div style={{width:26, height:26, borderRadius:6, overflow:"hidden", flexShrink:0}}><Thumb item={item} radius={6} iconSize={11}/></div>
       <div style={{flex:1, minWidth:0}}>
         <div style={{fontSize:11.5, fontWeight:700, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>{item.title}</div>
-        <div style={{fontSize:10, color:"var(--ink-mute)"}}>{new Date(v.scheduledAt).toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit"})}</div>
+        <div style={{fontSize:10, color:"var(--ink-mute)"}}>{new Date(v.scheduledAt).toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit"})}{isStoryItem(item)? " · Story" : ""}</div>
       </div>
       <PlatformIcon platform={v.platform} size={11}/>
     </div>
@@ -3270,7 +3350,7 @@ function ContentCalendarPage(){
                   </div>
                   <div style={{width:40, height:40, borderRadius:9, overflow:"hidden", flexShrink:0}}><Thumb item={e.item} radius={9} iconSize={16}/></div>
                   <div style={{flex:1, minWidth:0}}>
-                    <div style={{fontSize:13.5, fontWeight:700}}>{e.item.title}</div>
+                    <div style={{fontSize:13.5, fontWeight:700}}>{e.item.title}{isStoryItem(e.item) && <span style={{marginLeft:6, fontSize:10.5, fontWeight:700, color:"#d62976", background:"#d6297618", borderRadius:99, padding:"1px 7px", verticalAlign:"2px"}}>Story</span>}</div>
                     <div style={{fontSize:11.5, color:"var(--ink-mute)"}}>{BRANDS.find(b=>b.id===e.item.brand).name} · {new Date(e.v.scheduledAt).toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit"})}</div>
                   </div>
                   <PlatformIcon platform={e.v.platform} size={14}/>
@@ -4112,7 +4192,7 @@ function CreateContentPage(){
   const [step, setStep] = useState(0);
   const [form, setForm] = useState({
     title:"", campaign: "", brand: BRANDS[0].id, pillar: PILLARS[0], creator: user.id, approver: reviewers().length>1 ? ANY_APPROVER : ((reviewers()[0]||USERS[0]).id), priority:"normal", notes:"",
-    mediaType:"video", aspectRatio:"9:16", duration:20, fileName:"",
+    format:"post", mediaType:"video", aspectRatio:"9:16", duration:20, fileName:"",
     platforms:["instagram"], scheduledAt:"", variants:{},
     ...(state.createPrefill || {}),
   });
@@ -4164,17 +4244,26 @@ function CreateContentPage(){
   }, []);
   function setVariant(p, patch){ setForm(f=>({...f, variants:{...f.variants, [p]:{...(f.variants[p]||{}), ...patch}}})); }
   function togglePlatform(p){ set({platforms: form.platforms.includes(p)? form.platforms.filter(x=>x!==p) : [...form.platforms, p]}); }
+  const story = form.format==="story";
+  function setFormat(fmt){
+    if(fmt==="story") set({format:"story", aspectRatio:"9:16", platforms: form.platforms.filter(p=>STORY_PLATFORMS.includes(p)).length ? form.platforms.filter(p=>STORY_PLATFORMS.includes(p)) : ["instagram"]});
+    else set({format:"post"});
+  }
 
   const warnings = useMemo(()=>{
     const w = [];
-    form.platforms.forEach(p=>{
+    if(story){
+      if(form.aspectRatio!=="9:16") w.push("Stories are full-screen 9:16 — current media is "+form.aspectRatio+", so it will be cropped or letterboxed.");
+      if(form.mediaType==="video" && form.duration>60) w.push("Story videos longer than 60s are split into several story frames.");
+    }
+    if(!story) form.platforms.forEach(p=>{
       const v = form.variants[p]||{};
       if(p==="youtube" && !v.title) w.push("YouTube Shorts is missing a title.");
       if((p==="instagram"||p==="facebook"||p==="gbp") && !v.caption && !v.postDescription) w.push(PLATFORM_META[p].label+" is missing a caption.");
       if(p==="tiktok" && !v.caption) w.push("TikTok is missing a caption.");
     });
     if((form.platforms.includes("tiktok")||form.platforms.includes("youtube")) && form.aspectRatio!=="9:16") w.push("TikTok / YouTube Shorts expect a 9:16 aspect ratio — current media is "+form.aspectRatio+".");
-    if(form.duration>60 && form.platforms.includes("tiktok")) w.push("Video is over 60s — long-form for TikTok may reduce reach.");
+    if(!story && form.duration>60 && form.platforms.includes("tiktok")) w.push("Video is over 60s — long-form for TikTok may reduce reach.");
     if(form.platforms.length===0) w.push("Select at least one platform.");
     if(!form.scheduledAt && step===4) w.push("No publishing date/time set — content will be saved as approved-but-unscheduled.");
     if(form.uploadStatus==="uploading") w.push("Still uploading the original file — wait for it to finish before submitting.");
@@ -4190,12 +4279,12 @@ function CreateContentPage(){
     const variants = {};
     form.platforms.forEach(p=>{
       const {hashtagsText, ...fv} = form.variants[p] || {};
-      variants[p] = makeVariant(p, {status: status==="draft"?"draft":"submitted", scheduledAt: fv.overrideTime || form.scheduledAt || null, ...fv, hashtags: parseTags(hashtagsText)});
+      variants[p] = makeVariant(p, {status: status==="draft"?"draft":"submitted", scheduledAt: fv.overrideTime || form.scheduledAt || null, ...fv, hashtags: story? [] : parseTags(hashtagsText), ...(story? {postType:"Story"} : {})});
     });
     return {
       id: uid("ct"), title: form.title||"Untitled content", brand: form.brand, campaign: form.campaign, pillar: form.pillar,
       creator: form.creator, approver: form.approver, priority: form.priority, notes: form.notes, status,
-      createdAt: new Date().toISOString(), platforms: form.platforms, currentVersion: 1,
+      createdAt: new Date().toISOString(), platforms: form.platforms, currentVersion: 1, format: story? "story" : "post",
       media:{type:form.mediaType, duration: form.mediaType==="video"?Number(form.duration):null, aspectRatio: form.aspectRatio, previewUrl: form.previewUrl || null, fileUrl: form.fileUrl || null},
       due: form.scheduledAt || new Date().toISOString(),
       versions:[{version:1, editor:USERS.find(u=>u.id===form.creator).name, date:new Date().toISOString(), changes: status==="draft"?"Initial draft created.":"Initial draft created and submitted for approval.", decision:"—", feedback:null}],
@@ -4229,6 +4318,18 @@ function CreateContentPage(){
         <Card style={{padding:22}}>
           {step===0 && (
             <div>
+              <label style={{fontSize:12.5, fontWeight:700, display:"block", marginBottom:8}}>Content style</label>
+              <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, marginBottom:16}}>
+                {[["post","Post / Reel","Feed post, reel, Short or Google update — Make can publish it"],["story","Story","Full-screen 9:16 for Instagram, Facebook and TikTok — disappears after 24 hours"]].map(([k,l,d])=>(
+                  <button key={k} type="button" onClick={()=>setFormat(k)} style={{textAlign:"left", padding:"11px 13px", borderRadius:11, cursor:"pointer", fontFamily:"inherit", color:"var(--ink)",
+                    border:"1.5px solid "+(form.format===k?"var(--accent)":"var(--border)"), background: form.format===k?"var(--accent-soft)":"var(--surface)"}}>
+                    <div style={{display:"flex", alignItems:"center", gap:8, fontWeight:700, fontSize:13.5}}>
+                      {k==="story" ? <span style={{width:18, height:18, borderRadius:99, border:"2px solid #d62976", display:"inline-block", flexShrink:0}}/> : <Icon name="grid" size={16}/>}{l}
+                    </div>
+                    <div style={{fontSize:11.5, color:"var(--ink-mute)", marginTop:4, lineHeight:1.4}}>{d}</div>
+                  </button>
+                ))}
+              </div>
               <TextField label="Content title" value={form.title} onChange={v=>set({title:v})} placeholder="e.g. Autumn Roast — Hero Reel"/>
               <div className="cf-field-grid" style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:14}}>
                 <div>
@@ -4337,8 +4438,9 @@ function CreateContentPage(){
           {step===2 && (
             <div>
               <label style={{fontSize:12.5, fontWeight:700, display:"block", marginBottom:10}}>Select platforms</label>
+              {story && <div style={{fontSize:12, color:"var(--ink-mute)", marginBottom:10}}>Stories can go on Instagram, Facebook and TikTok.</div>}
               <div style={{display:"flex", flexDirection:"column", gap:8}}>
-                {Object.entries(PLATFORM_META).map(([k,v])=>(
+                {Object.entries(PLATFORM_META).filter(([k])=>!story || STORY_PLATFORMS.includes(k)).map(([k,v])=>(
                   <label key={k} style={{display:"flex", alignItems:"center", gap:10, padding:"11px 13px", borderRadius:11, border:"1px solid "+(form.platforms.includes(k)?"var(--accent)":"var(--border)"), background: form.platforms.includes(k)?"var(--accent-soft)":"var(--surface)", cursor:"pointer"}}>
                     <input type="checkbox" checked={form.platforms.includes(k)} onChange={()=>togglePlatform(k)} style={{width:16,height:16}}/>
                     <PlatformIcon platform={k}/>
@@ -4355,8 +4457,12 @@ function CreateContentPage(){
                 const v = form.variants[p]||{};
                 return (
                   <Card key={p} style={{padding:16}}>
-                    <div style={{display:"flex", alignItems:"center", gap:8, marginBottom:12}}><PlatformIcon platform={p}/><span style={{fontWeight:700, fontSize:14}}>{PLATFORM_META[p].label}</span></div>
-                    {(p==="instagram"||p==="facebook") && <>
+                    <div style={{display:"flex", alignItems:"center", gap:8, marginBottom:12}}><PlatformIcon platform={p}/><span style={{fontWeight:700, fontSize:14}}>{PLATFORM_META[p].label}{story? " Story" : ""}</span></div>
+                    {story && <>
+                      {p!=="tiktok" && <TextField label="Link sticker (optional)" value={v.url||""} onChange={val=>setVariant(p,{url:val})} placeholder="https://sanjugo.co.uk/…" hint="Shown on the story as a tappable link."/>}
+                      <TextField label="Posting notes (optional)" value={v.storyNotes||""} onChange={val=>setVariant(p,{storyNotes:val})} textarea placeholder="Stickers, @mentions, music, poll question…" hint="Stories have no caption — note anything to add when posting it from the app."/>
+                    </>}
+                    {!story && (p==="instagram"||p==="facebook") && <>
                       <TextField label="Caption" value={v.caption||""} onChange={val=>setVariant(p,{caption:val})} textarea placeholder="Write a caption…"/>
                       <TextField label="Hashtags" value={v.hashtagsText||""} onChange={val=>setVariant(p,{hashtagsText:val})} placeholder="#brand #campaign"/>
                       <div className="cf-field-grid" style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:14}}>
@@ -4364,7 +4470,7 @@ function CreateContentPage(){
                         <TextField label="First comment" value={v.firstComment||""} onChange={val=>setVariant(p,{firstComment:val})} placeholder="Optional"/>
                       </div>
                     </>}
-                    {p==="tiktok" && <>
+                    {!story && p==="tiktok" && <>
                       <TextField label="Caption" value={v.caption||""} onChange={val=>setVariant(p,{caption:val})} textarea placeholder="Write a caption…"/>
                       <TextField label="Hashtags" value={v.hashtagsText||""} onChange={val=>setVariant(p,{hashtagsText:val})} placeholder="#brand #campaign"/>
                       <div style={{display:"flex", gap:16, flexWrap:"wrap", marginBottom:6}}>
@@ -5473,8 +5579,10 @@ async function pushRegistration(){
   return (await navigator.serviceWorker.getRegistration()) || await navigator.serviceWorker.register("/sw.js");
 }
 async function currentPushSub(){
-  const reg = await pushRegistration();
-  return reg && reg.pushManager ? await reg.pushManager.getSubscription() : null;
+  // Some phones never answer this (service worker still starting, push service unreachable) — don't leave
+  // Settings on a loading bar forever: after 4 seconds treat it as "not turned on yet".
+  const look = (async ()=>{ const reg = await pushRegistration(); return reg && reg.pushManager ? await reg.pushManager.getSubscription() : null; })();
+  return Promise.race([look, new Promise(res=>setTimeout(()=>res(null), 4000))]);
 }
 async function savePushSub(sub, userId){
   const r = await fetch("/api/push/subscribe", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({subscription: sub.toJSON(), userId, device: pushDeviceName()})});

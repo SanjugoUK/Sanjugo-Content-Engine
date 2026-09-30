@@ -1399,6 +1399,8 @@ function absoluteMediaUrl(u, origin) {
 }
 
 // Send one post to Make for the given platforms. Returns the jobs created (or reasons they weren't).
+const isStory = (item, v) => item.format === "story" || (v && v.postType === "Story");
+
 async function sendPublishJobs(env, { item, platforms, origin, userId, trigger }) {
   const cfg = await makeConfig(env);
   await ensureMakeTables(env);
@@ -1410,6 +1412,8 @@ async function sendPublishJobs(env, { item, platforms, origin, userId, trigger }
     if (!hook) { results.push({ platform, skipped: (PLATFORM_NAMES[platform] || platform) + " isn't connected to Make — publish it by hand, then mark it as published." }); continue; }
     if (!v) { results.push({ platform, skipped: "This post isn't set up for " + PLATFORM_NAMES[platform] + "." }); continue; }
     if (v.publishStatus === "published") { results.push({ platform, skipped: "Already published." }); continue; }
+    // Make can't post stories (its Instagram app has no story module) — sending one would post it as a normal reel/post.
+    if (isStory(item, v)) { results.push({ platform, skipped: "Stories can't be posted through Make — post it from the " + PLATFORM_NAMES[platform] + " app, then mark it as published." }); continue; }
     if (!mediaUrl) { results.push({ platform, skipped: "The video or photo hasn't finished uploading to Creator Studio." }); continue; }
     // Google Business posts take a photo: for a video, send its cover image instead.
     const gbpImage = platform === "gbp" ? (item.media.type === "image" ? mediaUrl : absoluteMediaUrl(item.media.previewUrl, origin)) : null;
@@ -1619,7 +1623,7 @@ async function autoPublishDue(env) {
     const due = [];
     for (const platform of MAKE_PLATFORMS) {
       const v = (item.variants || {})[platform];
-      if (!publishHookFor(cfg, platform) || !v || v.publishStatus === "published" || !v.scheduledAt) continue;
+      if (!publishHookFor(cfg, platform) || !v || v.publishStatus === "published" || !v.scheduledAt || isStory(item, v)) continue;
       const at = londonTime(v.scheduledAt);
       if (!(at <= now) || now - at > 6 * 3600e3) continue; // not yet, or too old to post without someone checking
       // A failed attempt for this same time isn't retried automatically — someone decides from the post.
@@ -1748,7 +1752,7 @@ How to answer:
 
 What Creator Studio can do (use this to explain how things work):
 - Dashboard: counts of posts awaiting approval, changes requested, scheduled this week, published, failed; views and engagement from real stats (last 30 days); Smart insights (Claude's read of the pipeline); upcoming content; recent approvals. Tiles are clickable.
-- Create Content: upload a video/photo, or pick one from the Content Library by barcode (e.g. G219). Choose platforms, write a caption per platform, pick a campaign (or "No campaign"), priority, and the approver — one person, or "Cyrus or Yan Yan (either can approve)" (the default: both are notified and whoever decides first moves it on). Then submit for approval, or "Save as Draft" (drafts show in the Content Calendar and can be opened, finished and submitted later). There is no Delete button for posts or drafts yet — to get rid of one, submit it and have an approver Reject it, or ask an admin (Cyrus or Yan Yan).
+- Create Content: first pick the content style — "Post / Reel" or "Story" (full-screen 9:16, Instagram/Facebook/TikTok only, with an optional link sticker and posting notes instead of a caption; approvers see it as a real story; Make can't post stories, so after approval someone posts it from the phone app and uses "Mark as published"). Then upload a video/photo, or pick one from the Content Library by barcode (e.g. G219). Choose platforms, write a caption per platform, pick a campaign (or "No campaign"), priority, and the approver — one person, or "Cyrus or Yan Yan (either can approve)" (the default: both are notified and whoever decides first moves it on). Then submit for approval, or "Save as Draft" (drafts show in the Content Calendar and can be opened, finished and submitted later). There is no Delete button for posts or drafts yet — to get rid of one, submit it and have an approver Reject it, or ask an admin (Cyrus or Yan Yan).
 - Content Library: the Google Drive folder "Sanjugo Marketing Contents Final" (about 1,600 files). File names end with a barcode like G219; search by barcode, dish or stage, watch videos, see where a file has already been used (post, platform, date), and start a post from it.
 - Approval Queue: tabs To review / Needs changes / Rejected. Posts are previewed exactly as they'll look on each app (Reels, TikTok, Shorts, Facebook, Google Business), with full-screen playback. Decide with the buttons under each post (no swiping): ✓ Approve, ✕ Reject, or Request Edits for changes (with feedback tags and a due date); each asks for confirmation. "Full package" reviews the whole post; "Per platform" reviews each platform separately. Undo Last Decision exists. Creators fix posts from Needs changes / Rejected and resubmit, optionally telling the approver in chat. Approved posts are auto-placed into the next free slot of the recurring calendar template (Settings) if they have no time.
 - Content Calendar: month, week and list views; filter by platform, campaign, status; tap a date to see that day or create content for it; drag or edit times.

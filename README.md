@@ -128,6 +128,14 @@ Google Drive library (Refresh library now, Open library folder), Get latest stat
 Workflow and Roles. Admins only: connecting/disconnecting Drive, Make.com, Storage clean-up, Smart insights, Campaigns,
 the calendar template, the team-wide chat-updates switch, and Team & access.
 
+## Stories
+
+Create Content → **Content style: Story** makes a full-screen 9:16 story for Instagram, Facebook and/or TikTok (item `format: "story"`, variants `postType: "Story"`). Stories have no caption — each platform gets an optional link sticker (`url`) and posting notes (`storyNotes`). The Approval Queue previews them as real story screens. Make can't post stories (its Instagram app has no story module), so the worker never sends a story to Make — neither from **Publish…** nor from auto-publish. After approval, post it from the phone app and use **Mark as published**.
+
+## Changing the publish date
+
+In **Edit & resubmit** there is one **Publish date & time** field that moves every platform together (it used to sit inside each platform's tab, which left the other platforms on the old date and showed the post twice in the calendar). "Different time per platform" lists every platform's time together. In the post details, **Save for all** does the same for an approver.
+
 ## Approvers
 
 A post's approver is one person, or **"Cyrus or Yan Yan (either can approve)"** (stored as `approver: "any"` — every

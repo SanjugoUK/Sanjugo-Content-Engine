@@ -914,11 +914,15 @@ function baseReducer(state, action){
     case "MARK_PUBLISHED": {
       // Until auto-publishing is wired up, someone records when a post actually went live. Once every platform
       // is published the post counts as Published, and 7 days later its file moves out of Creator Studio storage.
-      const {contentId, platforms, publishedAt, urls} = action;
+      const {contentId, publishedAt, urls} = action;
+      let {platforms} = action;
       const item = state.contentItems.find(i=>i.id===contentId);
       if(!item) return state;
       const variants = {...item.variants};
-      platforms.forEach(p=>{ if(variants[p]) variants[p] = {...variants[p], publishStatus:"published", publishedAt, postUrl: (urls&&urls[p]) || variants[p].postUrl || null}; });
+      // Never touch a platform that's already live (e.g. Make finished while this form was open) — it keeps its real link.
+      platforms = platforms.filter(p=> variants[p] && variants[p].publishStatus!=="published");
+      if(!platforms.length) return state;
+      platforms.forEach(p=>{ variants[p] = {...variants[p], publishStatus:"published", publishedAt, postUrl: (urls&&urls[p]) || variants[p].postUrl || null}; });
       const all = Object.values(variants).every(v=>v.publishStatus==="published");
       const items = state.contentItems.map(i=> i.id===contentId ? {...i, variants, status: all? "published" : i.status} : i);
       const log = {id:uid("act"), at:new Date().toISOString(), type:"published", contentId, contentTitle:item.title, user:state.currentUserId,
@@ -1563,7 +1567,7 @@ function MarkPublishedModal({item, open, onClose}){
         {pending.length>0 && <input type="datetime-local" value={when} onChange={e=>setWhen(e.target.value)} style={input}/>}
         <div style={{display:"flex", justifyContent:"flex-end", gap:8, marginTop:18}}>
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
-          {pending.length>0 && <Button variant="success" icon="check" disabled={!sel.length} onClick={()=>{ dispatch({type:"MARK_PUBLISHED", contentId:item.id, platforms:sel, publishedAt:new Date(when).toISOString(), urls}); onClose(); }}>Mark published</Button>}
+          {pending.length>0 && <Button variant="success" icon="check" disabled={!sel.length} onClick={()=>{ dispatch({type:"MARK_PUBLISHED", contentId:item.id, platforms:sel.filter(p=>pending.includes(p)), publishedAt:new Date(when).toISOString(), urls}); onClose(); }}>Mark published</Button>}
         </div>
       </div>
     </Modal>

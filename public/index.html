@@ -1151,13 +1151,15 @@ function Drawer({open, onClose, width=520, children}){
 
 function Modal({open, onClose, width=460, children}){
   if(!open) return null;
-  return (
+  // Rendered on <body>: a modal opened from inside a drawer was otherwise trapped (and cut off) by the drawer panel.
+  return ReactDOM.createPortal(
     <div style={{position:"fixed", inset:0, zIndex:110, display:"flex", alignItems:"center", justifyContent:"center", padding:"calc(16px + env(safe-area-inset-top, 0px)) 16px calc(16px + env(safe-area-inset-bottom, 0px))"}}>
       <div onClick={onClose} style={{position:"absolute", inset:0, background:"rgba(10,12,25,.5)", animation:"cf-fade-in .2s ease"}}/>
       <div style={{position:"relative", width:"min(100%, "+width+"px)", maxHeight:"88vh", overflowY:"auto", background:"var(--surface)", borderRadius:16, boxShadow:"var(--shadow-lg)", animation:"cf-pop-in .22s cubic-bezier(.2,.8,.3,1)"}}>
         {children}
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 

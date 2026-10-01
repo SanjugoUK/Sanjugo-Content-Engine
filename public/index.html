@@ -753,8 +753,39 @@ function initState(){
   };
 }
 
+/* Several phones and laptops save the same workspace. Every change to a post stamps it with updatedAt, so when
+   copies meet (the server on save, this device on refresh) each post keeps its newest version — an older copy
+   left open on another device can no longer undo an approval. */
 function reducer(state, action){
+  const next = baseReducer(state, action);
+  if(action.type==="LOAD_STATE" || action.type==="MERGE_SERVER" || next.contentItems===state.contentItems) return next;
+  const before = new Map(state.contentItems.map(i=>[i.id, i]));
+  const now = new Date().toISOString();
+  return {...next, contentItems: next.contentItems.map(i=> before.get(i.id)===i ? i : {...i, updatedAt: now})};
+}
+const newer = (a, b) => String(a && a.updatedAt || "") >= String(b && b.updatedAt || "");
+function mergeServer(state, s){
+  const gone = new Set([...(state.deletedIds||[]), ...(Array.isArray(s.deletedIds)? s.deletedIds : [])]);
+  const server = new Map((Array.isArray(s.contentItems)? withTagsFixed(s.contentItems) : []).map(i=>[i.id, i]));
+  const local = new Map(state.contentItems.map(i=>[i.id, i]));
+  const ids = [...new Set([...server.keys(), ...local.keys()])].filter(id=>!gone.has(id));
+  let changed = ids.length!==state.contentItems.length;
+  const items = ids.map(id=>{
+    const a = local.get(id), b = server.get(id);
+    const pick = !a ? b : !b ? a : (String(b.updatedAt||"") > String(a.updatedAt||"") ? b : a);
+    if(pick!==a) changed = true;
+    return pick;
+  }).sort((x,y)=> String(y.createdAt||"").localeCompare(String(x.createdAt||"")));
+  const logIds = new Set(state.activityLog.map(a=>a.id));
+  const extraLog = (Array.isArray(s.activityLog)? s.activityLog : []).filter(a=>!logIds.has(a.id) && !gone.has(a.id));
+  if(!changed && !extraLog.length && gone.size===(state.deletedIds||[]).length) return state;
+  return {...state, contentItems: changed? items : state.contentItems, deletedIds:[...gone].slice(-500),
+    activityLog: extraLog.length? [...state.activityLog, ...extraLog].sort((x,y)=> String(y.at).localeCompare(String(x.at))) : state.activityLog};
+}
+
+function baseReducer(state, action){
   switch(action.type){
+    case "MERGE_SERVER": return mergeServer(state, action.data || {});
     case "LOAD_STATE": {
       // Replaces locally-derived data with what the shared server actually has, once it answers.
       // toasts/route stay local — those are per-tab UI state, not shared content.
@@ -874,7 +905,7 @@ function reducer(state, action){
         detail: (decision==="approved"?"Approved":decision==="rejected"?"Rejected":"Requested changes") + (platform? " — "+PLATFORM_META[platform].label : " — full package") + (dueDate? ` (due ${fmtDate(dueDate)})` : ""),
         comment: feedback||null,
       };
-      const historyEntry = {id: log.id, contentId, platform, prevItemStatus, prevVariants, decision};
+      const historyEntry = {id: log.id, at: log.at, contentId, platform, prevItemStatus, prevVariants, decision};
       const approvedMsg = "Approved — "+item.title + (autoFilled.length? " · auto-scheduled into next "+autoFilled.join("/")+" slot" : (decision==="approved"? " · waiting for an empty calendar slot" : ""));
       return {...state, contentItems: items, activityLog:[log, ...state.activityLog], decisionHistory:[...state.decisionHistory, historyEntry],
         toasts:[...state.toasts, {id:uid("toast"), message: decision==="approved"? approvedMsg : decision==="rejected"? "Rejected — "+item.title : "Changes requested — "+item.title, variant: decision==="approved"?"ok": decision==="rejected"?"danger":"warn"}]};
@@ -962,7 +993,7 @@ function reducer(state, action){
       const last = state.decisionHistory[state.decisionHistory.length-1];
       const items = state.contentItems.map(i=> i.id===last.contentId? {...i, status:last.prevItemStatus, variants:last.prevVariants} : i);
       const activityLog = state.activityLog.filter(a=>a.id!==last.id);
-      return {...state, contentItems: items, activityLog, decisionHistory: state.decisionHistory.slice(0,-1),
+      return {...state, contentItems: items, activityLog, decisionHistory: state.decisionHistory.slice(0,-1), deletedIds:[...(state.deletedIds||[]), last.id].slice(-500),
         toasts:[...state.toasts, {id:uid("toast"), message:"Last decision undone", variant:"ok"}]};
     }
     default: return state;
@@ -5971,6 +6002,17 @@ function App(){
     });
     return ()=>{ cancelled = true; };
   }, []);
+
+  // Keep this device current: pull the shared copy every 45 seconds and whenever the app comes back to the
+  // screen, merging post by post (newest change wins) — so nobody keeps working on, and saving, an old copy.
+  useEffect(()=>{
+    if(!state.serverLoaded) return;
+    const pull = ()=>{ if(document.visibilityState==="visible") fetchServerState().then(d=>{ if(d) dispatch({type:"MERGE_SERVER", data:d}); }); };
+    const t = setInterval(pull, 45000);
+    document.addEventListener("visibilitychange", pull);
+    window.addEventListener("focus", pull);
+    return ()=>{ clearInterval(t); document.removeEventListener("visibilitychange", pull); window.removeEventListener("focus", pull); };
+  }, [state.serverLoaded]);
 
   // Push changes back up, debounced so a burst of edits (typing, dragging) doesn't fire a request per keystroke.
   const pushTimer = useRef(null);

@@ -161,7 +161,10 @@ async function postState(request, env, ctx) {
   }
   // After the shared workspace is reset, a tab that loaded the old copy must not write it back: every save carries
   // the resetId it loaded, and a mismatch is refused (the app then reloads fresh).
-  const current = await env.DB.prepare("SELECT json_extract(data, '$.resetId') AS resetId, json_extract(data, '$.deletedIds') AS deletedIds FROM app_state WHERE id = 1").first();
+  const row = await env.DB.prepare("SELECT data FROM app_state WHERE id = 1").first();
+  let stored = {};
+  try { stored = row && row.data ? JSON.parse(row.data) : {}; } catch (e) {}
+  const current = { resetId: stored.resetId, deletedIds: JSON.stringify(stored.deletedIds || []) };
   const liveReset = current && current.resetId ? String(current.resetId) : null;
   if (liveReset && body.resetId !== liveReset) {
     return new Response(JSON.stringify({ error: "The workspace was reset — reload to get the current posts.", code: "reset" }), { status: 409, headers: { "Content-Type": "application/json" } });
@@ -172,9 +175,32 @@ async function postState(request, env, ctx) {
   try { known = JSON.parse((current && current.deletedIds) || "[]"); } catch (e) {}
   const deleted = [...new Set([...(Array.isArray(known) ? known : []), ...(Array.isArray(body.deletedIds) ? body.deletedIds : [])])].slice(-500);
   body.deletedIds = deleted;
-  if (deleted.length && Array.isArray(body.contentItems)) {
-    const gone = new Set(deleted);
-    body.contentItems = body.contentItems.filter((i) => !gone.has(i && i.id));
+  // Merge post by post instead of letting the whole save replace what's stored: each post keeps whichever copy
+  // was changed most recently (updatedAt), posts another device added are kept, and activity entries are combined.
+  // Without this, a phone or laptop that loaded an old copy could undo approvals made elsewhere when it saved.
+  const gone = new Set(deleted);
+  if (Array.isArray(body.contentItems)) {
+    const byId = new Map();
+    for (const i of Array.isArray(stored.contentItems) ? stored.contentItems : []) if (i && i.id) byId.set(i.id, i);
+    for (const i of body.contentItems) {
+      if (!i || !i.id) continue;
+      const old = byId.get(i.id);
+      if (!old || String(i.updatedAt || "") >= String(old.updatedAt || "")) byId.set(i.id, i);
+    }
+    body.contentItems = [...byId.values()].filter((i) => !gone.has(i.id))
+      .sort((x, y) => String(y.createdAt || "").localeCompare(String(x.createdAt || "")));
+  }
+  if (Array.isArray(body.activityLog)) {
+    const seen = new Set(body.activityLog.map((a) => a && a.id));
+    const extra = (Array.isArray(stored.activityLog) ? stored.activityLog : []).filter((a) => a && !seen.has(a.id));
+    body.activityLog = [...body.activityLog, ...extra].filter((a) => a && !gone.has(a.id))
+      .sort((x, y) => String(y.at || "").localeCompare(String(x.at || ""))).slice(0, 3000);
+  }
+  if (Array.isArray(body.decisionHistory)) {
+    const seen = new Set(body.decisionHistory.map((d) => d && d.id));
+    const extra = (Array.isArray(stored.decisionHistory) ? stored.decisionHistory : []).filter((d) => d && !seen.has(d.id));
+    body.decisionHistory = [...extra, ...body.decisionHistory].filter((d) => d && !gone.has(d.id))
+      .sort((x, y) => String(x.at || "").localeCompare(String(y.at || ""))).slice(-100);
   }
   const json = JSON.stringify(body);
   await env.DB.prepare(

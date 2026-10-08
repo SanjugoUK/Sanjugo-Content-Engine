@@ -470,6 +470,9 @@ function Thumb({item, radius=12, iconSize=22, bare}){
       {previewUrl && item.media.type==="video" && <div style={{position:"absolute", inset:0, background:"rgba(0,0,0,.18)"}}/>}
       {fromDrive && <div style={{position:"absolute", inset:0, backgroundImage:"repeating-linear-gradient(135deg, rgba(255,255,255,.09) 0 10px, transparent 10px 20px)"}}/>}
       {(!previewUrl || item.media.type==="video") && <Icon name={item.media.type==="video"?"play":"image"} size={iconSize} style={{color:"rgba(255,255,255,.85)", position: previewUrl?"relative":"static", zIndex:1}}/>}
+      {galleryOf(item) && <span title={galleryOf(item).length+" photos"} style={{position:"absolute", top:4, right:4, zIndex:2, display:"flex", alignItems:"center", gap:2, background:"rgba(0,0,0,.6)", color:"#fff", borderRadius:5, padding:"1px 4px", fontSize:Math.max(9, iconSize*0.5), fontWeight:700, lineHeight:1.3}}>
+        <svg viewBox="0 0 24 24" width={Math.max(9, iconSize*0.5)} height={Math.max(9, iconSize*0.5)} fill="none" stroke="currentColor" strokeWidth="2.4"><rect x="7" y="3" width="14" height="14" rx="2"/><path d="M3 7v12a2 2 0 0 0 2 2h12"/></svg>{galleryOf(item).length}
+      </span>}
       {!bare && item.media.type==="video" && item.media.duration ? <span style={{position:"absolute", bottom:6, right:7, fontSize:10.5, fontWeight:700, color:"#fff", background:"rgba(0,0,0,.4)", borderRadius:5, padding:"1px 5px"}}>{item.media.duration}s</span> : null}
       {!bare && fromDrive && <span style={{position:"absolute", bottom:6, left:7, display:"flex", alignItems:"center", gap:4, fontSize:9.5, fontWeight:700, color:"#fff", background:"rgba(0,0,0,.45)", borderRadius:5, padding:"2px 6px 2px 5px", letterSpacing:".2px"}}><Icon name="file" size={9} style={{color:"#fff"}}/>{item.driveSource}</span>}
     </div>
@@ -719,6 +722,31 @@ function pushServerState(state){
     /* offline or /api not available — localStorage cache above still has this device covered */
   });
 }
+/* Multi-photo (carousel) posts. Instagram takes 2–10 JPEG photos between 4:5 portrait and 1.91:1 landscape, so every
+   photo in a carousel is re-saved as a JPEG (max 1440 px wide) and trimmed into that range — like the Instagram app does. */
+const MAX_PHOTOS = 10, IG_MIN_RATIO = 4/5, IG_MAX_RATIO = 1.91;
+const galleryOf = item => (item && item.media && Array.isArray(item.media.gallery) && item.media.gallery.length>1) ? item.media.gallery : null;
+async function carouselReadyPhoto(src, name){
+  const url = typeof src==="string" ? src : URL.createObjectURL(src);
+  let img;
+  try{ img = await new Promise((res, rej)=>{ const i = new Image(); i.onload = ()=>res(i); i.onerror = ()=>rej(new Error("Couldn't open "+(name||"a photo")+" — use JPG or PNG")); i.src = url; }); }
+  finally{ if(typeof src!=="string") URL.revokeObjectURL(url); }
+  let sw = img.naturalWidth, sh = img.naturalHeight, sx = 0, sy = 0;
+  if(sw/sh < IG_MIN_RATIO){ const nh = Math.round(sw/IG_MIN_RATIO); sy = Math.round((sh-nh)/2); sh = nh; }
+  else if(sw/sh > IG_MAX_RATIO){ const nw = Math.round(sh*IG_MAX_RATIO); sx = Math.round((sw-nw)/2); sw = nw; }
+  const scale = Math.min(1, 1440/sw);
+  const c = document.createElement("canvas"); c.width = Math.round(sw*scale); c.height = Math.round(sh*scale);
+  c.getContext("2d").drawImage(img, sx, sy, sw, sh, 0, 0, c.width, c.height);
+  const blob = await new Promise(res=>c.toBlob(res, "image/jpeg", 0.9));
+  const up = await uploadMediaFile(new File([blob], String(name||"photo").replace(/\.[^.]+$/, "")+".jpg", {type:"image/jpeg"}));
+  return {type:"image", fileUrl: up.url, previewUrl: up.url, w: c.width, h: c.height, trimmed: sx>0 || sy>0};
+}
+/* The media object for a post built from carousel photos (the first photo doubles as the post's main image). */
+function galleryMedia(g){
+  const first = g[0] || {};
+  return {type:"image", fileUrl:first.fileUrl, previewUrl:first.previewUrl, aspectRatio: nearestAspect(first.w, first.h) || "4:5", duration:null, gallery: g.length>1 ? g : null};
+}
+
 async function uploadMediaFile(file, onProgress){
   const fd = new FormData();
   fd.append("file", file, file.name);
@@ -982,6 +1010,15 @@ function baseReducer(state, action){
       Object.entries(patch.variants||{}).forEach(([p,v])=>{ if(!variants[p]) return;
         const moved = "scheduledAt" in v && (v.scheduledAt||null) !== (variants[p].scheduledAt||null);
         variants[p] = {...variants[p], ...v, ...(moved? {templateRuleId:null} : {}), ...(resubmit? {status:"submitted"} : {})}; });
+      if(patch.media && variants){
+        // Photos replaced: label each platform's version as a carousel (or back to its normal type).
+        const multi = Array.isArray(patch.media.gallery) && patch.media.gallery.length>1;
+        Object.keys(variants).forEach(p=>{
+          const v = variants[p]; if(!v || v.postType==="Story") return;
+          if(multi) variants[p] = {...v, postType: p==="instagram"||p==="facebook" ? "Carousel" : p==="tiktok" ? "Photos" : v.postType};
+          else if(v.postType==="Carousel" || v.postType==="Photos") variants[p] = {...v, postType: makeVariant(p).postType};
+        });
+      }
       const nextVersion = resubmit ? item.currentVersion + 1 : item.currentVersion;
       const versions = resubmit ? [...(item.versions||[]), {version:nextVersion, editor, date:new Date().toISOString(), changes: note || "Revised after feedback", decision:"—", feedback:null}] : item.versions;
       const updated = {...item, ...(patch.title!=null? {title:patch.title} : {}), ...(patch.media? {media:{...item.media, ...patch.media}} : {}),
@@ -1620,6 +1657,16 @@ function ContentDetailDrawer({item, onClose}){
                     : <img src={item.media.fileUrl} alt={item.title} style={{width:"100%", height:"100%", objectFit:"contain"}}/>)
                 : <div style={{width:"100%", height:"100%"}}><Thumb item={item} radius={14} iconSize={34}/></div>}
             </div>
+            {galleryOf(item) && (
+              <div style={{display:"flex", gap:6, flexWrap:"wrap", marginTop:-6}}>
+                {galleryOf(item).map((ph, i)=>(
+                  <a key={i} href={ph.fileUrl} target="_blank" rel="noopener noreferrer" title={"Photo "+(i+1)} style={{position:"relative", width:52, height:52, borderRadius:7, overflow:"hidden", background:"#000", display:"block"}}>
+                    <img src={ph.previewUrl||ph.fileUrl} alt="" style={{width:"100%", height:"100%", objectFit:"cover"}}/>
+                    <span style={{position:"absolute", left:3, top:3, background:"rgba(0,0,0,.65)", color:"#fff", borderRadius:4, fontSize:10, fontWeight:700, padding:"0 4px"}}>{i+1}</span>
+                  </a>
+                ))}
+              </div>
+            )}
             {item.media.fileUrl && (
               <a href={item.media.fileUrl} target="_blank" rel="noopener noreferrer" style={{fontSize:12, fontWeight:700, color:"var(--accent)", textDecoration:"none", display:"flex", alignItems:"center", gap:5, marginTop:-8}}>
                 <Icon name="upload" size={13}/>Open original in a new tab
@@ -1997,8 +2044,10 @@ function PhoneFrame({children, screenBg="#000", ...playback}){
 
 /* The actual uploaded file when we have it (so approvers watch the real video), otherwise the poster / placeholder.
    Tapping a real video pauses/plays it, like the apps do. */
-function ScreenMedia({item, fit="cover"}){
+function ScreenMedia({item, fit="cover", single}){
   const m = item.media || {};
+  const gallery = single ? null : galleryOf(item);
+  const [idx, setIdx] = useState(0);
   const ctx = React.useContext(PhoneCtx);
   const ref = useRef(null);
   const [failed, setFailed] = useState(false);
@@ -2026,6 +2075,24 @@ function ScreenMedia({item, fit="cover"}){
         {ctx.paused && <div style={{position:"absolute", inset:0, display:"flex", alignItems:"center", justifyContent:"center", pointerEvents:"none"}}>
           <svg viewBox="0 0 24 24" style={{width:pt(64), height:pt(64), opacity:.8, filter:"drop-shadow(0 2px 6px rgba(0,0,0,.4))"}}><path d="M7 4.5v15l12.5-7.5z" fill="#fff"/></svg>
         </div>}
+      </div>
+    );
+  }
+  if(gallery){
+    const i = Math.min(idx, gallery.length-1);
+    const go = d => e=>{ e.stopPropagation(); setIdx((i + d + gallery.length) % gallery.length); };
+    const arrow = (d, side) => <button onPointerDown={e=>e.stopPropagation()} onClick={go(d)} aria-label={d<0?"Previous photo":"Next photo"}
+      style={{position:"absolute", top:"50%", [side]:pt(8), transform:"translateY(-50%)", width:pt(30), height:pt(30), borderRadius:99, border:"none", background:"rgba(255,255,255,.85)", color:"#111", display:"flex", alignItems:"center", justifyContent:"center", cursor:"pointer", boxShadow:"0 1px 4px rgba(0,0,0,.3)", padding:0}}>
+      <svg viewBox="0 0 24 24" width={pt(16)} height={pt(16)} fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round"><path d={d<0? "M15 5l-7 7 7 7" : "M9 5l7 7-7 7"}/></svg></button>;
+    return (
+      <div style={{position:"absolute", inset:0}}>
+        <img src={gallery[i].fileUrl || gallery[i].previewUrl} alt="" draggable={false} style={{width:"100%", height:"100%", objectFit:fit, background:"#000", display:"block", pointerEvents:"none"}}/>
+        <span style={{position:"absolute", top:pt(10), right:pt(10), background:"rgba(0,0,0,.6)", color:"#fff", borderRadius:99, padding:`${pt(2)} ${pt(8)}`, fontSize:pt(12), fontWeight:600, pointerEvents:"none"}}>{i+1}/{gallery.length}</span>
+        {i>0 && arrow(-1, "left")}
+        {i<gallery.length-1 && arrow(1, "right")}
+        <div style={{position:"absolute", left:0, right:0, bottom:pt(8), display:"flex", justifyContent:"center", gap:pt(4), pointerEvents:"none"}}>
+          {gallery.map((_, j)=><span key={j} style={{width:pt(6), height:pt(6), borderRadius:99, background: j===i? "#0095F6" : "rgba(255,255,255,.7)", boxShadow:"0 0 2px rgba(0,0,0,.4)"}}/>)}
+        </div>
       </div>
     );
   }
@@ -2312,7 +2379,7 @@ function GBPScreen({item, variant, brand, playing, muted}){
             <BrandAvatar brand={brand} size={pt(34)}/>
             <div><div style={{fontSize:pt(14), fontWeight:500}}>{brand.name}</div><div style={{fontSize:pt(12), color:mute}}>Just now</div></div>
           </div>
-          <div style={{position:"relative", width:"100%", aspectRatio:"4/3", background:"#000"}}><ScreenMedia item={item}/></div>
+          <div style={{position:"relative", width:"100%", aspectRatio:"4/3", background:"#000"}}><ScreenMedia item={item} single/></div>
           <PhoneCaption lines={4} style={{padding:`${pt(10)} ${pt(12)} ${pt(4)}`, fontSize:pt(14), lineHeight:1.45}}>{variant.caption || <span style={{color:mute}}>No update text</span>}</PhoneCaption>
           <div style={{padding:pt(12)}}><span style={{display:"inline-block", border:"1px solid #dadce0", color:"#1a73e8", borderRadius:99, padding:`${pt(8)} ${pt(18)}`, fontSize:pt(14), fontWeight:500}}>{variant.cta || "Learn more"}</span></div>
         </div>
@@ -2333,7 +2400,7 @@ function StoryScreen({platform, item, variant, brand}){
   const done = progress!=null ? progress*100 : 35;
   return (
     <>
-      <ScreenMedia item={item}/>
+      <ScreenMedia item={item} single/>
       <div style={{position:"absolute", inset:0, pointerEvents:"none", background:"linear-gradient(180deg, rgba(0,0,0,.4) 0%, transparent 17%, transparent 80%, rgba(0,0,0,.45) 100%)"}}/>
       <PhoneStatusBar/>
       <div style={{position:"absolute", top:pt(52), left:pt(8), right:pt(8), height:pt(2.5), borderRadius:pt(2), background:"rgba(255,255,255,.35)", overflow:"hidden", pointerEvents:"none"}}>
@@ -2560,7 +2627,7 @@ function SwipeCard({entry, onDecision, onOpenDetails, isTop, narrow, paused, onI
         <div style={{display:"grid", gridTemplateColumns:"auto 1fr", gap:"8px 14px", fontSize:12.5}}>
           <span style={{color:"var(--ink-mute)"}}>Creator</span><span style={{display:"flex", alignItems:"center", gap:6, fontWeight:600}}><Avatar user={creator} size={18}/>{creator.name}</span>
           <span style={{color:"var(--ink-mute)"}}>Publishes</span><span style={{fontWeight:600}}>{(variant && variant.scheduledAt) ? fmtDateTime(variant.scheduledAt) : scheduledAt ? fmtDateTime(scheduledAt) : "Not scheduled"}</span>
-          <span style={{color:"var(--ink-mute)"}}>Media</span><span style={{fontWeight:600}}>{item.media.type==="video" ? "Video" : "Image"}{item.media.duration ? " · "+item.media.duration+"s" : ""}{item.media.aspectRatio ? " · "+item.media.aspectRatio : ""}</span>
+          <span style={{color:"var(--ink-mute)"}}>Media</span><span style={{fontWeight:600}}>{item.media.type==="video" ? "Video" : galleryOf(item) ? galleryOf(item).length+" photos (carousel)" : "Image"}{item.media.duration ? " · "+item.media.duration+"s" : ""}{item.media.aspectRatio ? " · "+item.media.aspectRatio : ""}</span>
           <span style={{color:"var(--ink-mute)"}}>Version</span><span style={{fontWeight:600}}>v{item.currentVersion}</span>
         </div>
         {warningList}
@@ -2689,7 +2756,7 @@ function RevisionEditor({item, onClose}){
       if(!r.ok) throw new Error(d.error || "Couldn't copy the file");
       const isVideo = (d.mime||"").startsWith("video/");
       const info = await readMediaInfo(d.url, isVideo);
-      setF(x=>({...x, mediaStatus:"New file ready — "+(file.barcode||file.name), media:{type:isVideo?"video":"image", fileUrl:d.url, previewUrl: isVideo? libThumbUrl(file, true) : d.url,
+      setF(x=>({...x, mediaStatus:"New file ready — "+(file.barcode||file.name), media:{type:isVideo?"video":"image", gallery:null, fileUrl:d.url, previewUrl: isVideo? libThumbUrl(file, true) : d.url,
         ...(info? {aspectRatio: nearestAspect(info.w, info.h) || item.media.aspectRatio, duration: isVideo && isFinite(info.duration)? Math.round(info.duration) : null} : {})}}));
     }catch(e){ setF(x=>({...x, mediaStatus:e.message})); }
   }
@@ -2698,7 +2765,16 @@ function RevisionEditor({item, onClose}){
     setF(x=>({...x, mediaStatus:"Uploading "+file.name+"…", libraryRef:null}));
     try{
       const [up, preview, info] = await Promise.all([uploadMediaFile(file), (isVideo? videoFileToPoster(file, 480, 0.72) : imageFileToPreview(file, 480, 0.78)).catch(()=>null), readMediaInfo(file, isVideo)]);
-      setF(x=>({...x, mediaStatus:"New file ready — "+file.name, media:{type:isVideo?"video":"image", fileUrl:up.url, previewUrl:preview, ...(info? {aspectRatio: nearestAspect(info.w, info.h) || item.media.aspectRatio, duration: isVideo && isFinite(info.duration)? Math.round(info.duration) : null} : {})}}));
+      setF(x=>({...x, mediaStatus:"New file ready — "+file.name, media:{type:isVideo?"video":"image", gallery:null, fileUrl:up.url, previewUrl:preview, ...(info? {aspectRatio: nearestAspect(info.w, info.h) || item.media.aspectRatio, duration: isVideo && isFinite(info.duration)? Math.round(info.duration) : null} : {})}}));
+    }catch(e){ setF(x=>({...x, mediaStatus:"Upload failed — "+e.message})); }
+  }
+  async function uploadPhotos(files){
+    const list = files.slice(0, MAX_PHOTOS);
+    setF(x=>({...x, mediaStatus:"Uploading "+list.length+" photos…", libraryRef:null}));
+    try{
+      const g = [];
+      for(const file of list){ g.push(await carouselReadyPhoto(file, file.name)); setF(x=>({...x, mediaStatus:"Uploading photos… "+g.length+"/"+list.length})); }
+      setF(x=>({...x, mediaStatus:"New photos ready — "+g.length+" photos"+(g.some(p=>p.trimmed)? " (some trimmed to Instagram's 4:5 shape)" : ""), media: galleryMedia(g)}));
     }catch(e){ setF(x=>({...x, mediaStatus:"Upload failed — "+e.message})); }
   }
   function patchFromForm(){
@@ -2737,13 +2813,13 @@ function RevisionEditor({item, onClose}){
         <label style={label}>Photo / video</label>
         <div style={{display:"flex", gap:12, alignItems:"center", marginBottom:8}}>
           <div style={{width:64, height:64, borderRadius:8, overflow:"hidden", flexShrink:0}}><Thumb item={{...item, media:{...item.media, ...(f.media||{})}}} radius={8} iconSize={16}/></div>
-          <div style={{fontSize:12.5, color: /failed|isn't|Couldn't/.test(f.mediaStatus)? "var(--red)" : "var(--ink-soft)"}}>{f.mediaStatus || (f.media? "" : "Keeping the current file. Replace it below if the feedback was about the visual.")}</div>
+          <div style={{fontSize:12.5, color: /failed|isn't|Couldn't/.test(f.mediaStatus)? "var(--red)" : "var(--ink-soft)"}}>{f.mediaStatus || (f.media? "" : (galleryOf(item)? "Keeping the current "+galleryOf(item).length+" photos. To replace them, upload several photos at once." : "Keeping the current file. Replace it below if the feedback was about the visual — pick several photos at once for a multi-photo post."))}</div>
         </div>
         <div style={{display:"grid", gridTemplateColumns:"1fr auto", gap:8, alignItems:"center"}}>
           <LibraryPicker onPick={pickFromLibrary}/>
           <label style={{display:"inline-flex", alignItems:"center", gap:6, padding:"8px 12px", borderRadius:8, border:"1px solid var(--border)", fontSize:13, fontWeight:500, cursor:"pointer", whiteSpace:"nowrap"}}>
             <Icon name="upload" size={14}/>Upload
-            <input type="file" accept="image/*,video/*" style={{display:"none"}} onChange={e=>{ const file=e.target.files[0]; if(file) upload(file); e.target.value=""; }}/>
+            <input type="file" accept="image/*,video/*" multiple={!isStoryItem(item)} style={{display:"none"}} onChange={e=>{ const fs=[...e.target.files]; e.target.value=""; const photos=fs.filter(x=>x.type.startsWith("image/")); if(photos.length>1) uploadPhotos(photos); else if(fs[0]) upload(fs[0]); }}/>
           </label>
         </div>
 
@@ -4256,7 +4332,7 @@ function CreateContentPage(){
   const [step, setStep] = useState(0);
   const [form, setForm] = useState({
     title:"", campaign: "", brand: BRANDS[0].id, pillar: PILLARS[0], creator: user.id, approver: reviewers().length>1 ? ANY_APPROVER : ((reviewers()[0]||USERS[0]).id), priority:"normal", notes:"",
-    format:"post", mediaType:"video", aspectRatio:"9:16", duration:20, fileName:"",
+    format:"post", mediaType:"video", aspectRatio:"9:16", duration:20, fileName:"", gallery:[], galleryStatus:"",
     platforms:["instagram"], scheduledAt:"", variants:{},
     ...(state.createPrefill || {}),
   });
@@ -4269,6 +4345,7 @@ function CreateContentPage(){
     const patch = {
       libraryRef: libraryRefOf(file), fileName: file.name, mediaType: file.kind==="video" ? "video" : "image",
       previewUrl: libThumbUrl(file, connected), previewLoading:false, fileUrl:null, uploadStatus: connected ? "importing" : "linked", uploadError:null,
+      gallery:[], galleryStatus:"",
     };
     if(m.category && LIB_PILLAR[m.category]) patch.pillar = LIB_PILLAR[m.category];
     if(m.social && LIB_PLATFORMS[m.social]) patch.platforms = LIB_PLATFORMS[m.social];
@@ -4309,6 +4386,48 @@ function CreateContentPage(){
   function setVariant(p, patch){ setForm(f=>({...f, variants:{...f.variants, [p]:{...(f.variants[p]||{}), ...patch}}})); }
   function togglePlatform(p){ set({platforms: form.platforms.includes(p)? form.platforms.filter(x=>x!==p) : [...form.platforms, p]}); }
   const story = form.format==="story";
+  // Multi-photo posts: the first photo plus up to 9 more. Each is re-saved for Instagram (see carouselReadyPhoto).
+  const galleryRef = useRef(form.gallery); galleryRef.current = form.gallery;
+  async function addPhotos(sources, {includeCurrent=true}={}){
+    const list = sources.slice(0, MAX_PHOTOS);
+    setForm(f=>({...f, galleryStatus:"Preparing "+list.length+" photo"+(list.length>1?"s":"")+"…"}));
+    try{
+      let g = includeCurrent ? galleryRef.current : [];
+      if(includeCurrent && !g.length && form.fileUrl && form.mediaType==="image") g = [await carouselReadyPhoto(form.fileUrl, form.fileName)];
+      for(const src of list){
+        if(g.length >= MAX_PHOTOS) break;
+        g = [...g, await carouselReadyPhoto(src.url || src, src.name)];
+        const now = g; setForm(f=>({...f, gallery: now}));
+      }
+      const m = galleryMedia(g);
+      setForm(f=>({...f, gallery:g, galleryStatus:"", mediaType:"image", fileUrl:m.fileUrl, previewUrl:m.previewUrl, aspectRatio:m.aspectRatio, uploadStatus:"done",
+        fileName: g.length>1? g.length+" photos" : f.fileName}));
+    }catch(e){
+      setForm(f=>({...f, galleryStatus:"", ...(f.uploadStatus==="uploading" && !f.gallery.length? {uploadStatus:"failed", uploadError:e.message} : {})}));
+      dispatch({type:"ADD_TOAST", message:e.message || "Couldn't add that photo", variant:"danger"});
+    }
+  }
+  function removePhoto(i){
+    const g = form.gallery.filter((_, j)=>j!==i);
+    const m = galleryMedia(g);
+    set({gallery:g, fileUrl:m.fileUrl, previewUrl:m.previewUrl, aspectRatio:m.aspectRatio, fileName: g.length>1? g.length+" photos" : (g.length? "1 photo" : "")});
+  }
+  function movePhoto(i){
+    if(i<1) return;
+    const g = [...form.gallery]; [g[i-1], g[i]] = [g[i], g[i-1]];
+    const m = galleryMedia(g);
+    set({gallery:g, fileUrl:m.fileUrl, previewUrl:m.previewUrl, aspectRatio:m.aspectRatio});
+  }
+  async function addLibraryPhoto(file, connected){
+    if(!connected){ dispatch({type:"ADD_TOAST", message:"Connect Google Drive in Settings to add library photos", variant:"warn"}); return; }
+    if(file.kind==="video"){ dispatch({type:"ADD_TOAST", message:"Multi-photo posts take photos only", variant:"warn"}); return; }
+    try{
+      const r = await fetch("/api/library/import", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({id:file.id})});
+      const d = await r.json().catch(()=>({}));
+      if(!r.ok) throw new Error(d.error || "Couldn't copy the photo from Drive");
+      await addPhotos([{url:d.url, name:file.name}]);
+    }catch(e){ dispatch({type:"ADD_TOAST", message:e.message, variant:"danger"}); }
+  }
   function setFormat(fmt){
     if(fmt==="story") set({format:"story", aspectRatio:"9:16", platforms: form.platforms.filter(p=>STORY_PLATFORMS.includes(p)).length ? form.platforms.filter(p=>STORY_PLATFORMS.includes(p)) : ["instagram"]});
     else set({format:"post"});
@@ -4316,6 +4435,13 @@ function CreateContentPage(){
 
   const warnings = useMemo(()=>{
     const w = [];
+    if(form.gallery.length>1){
+      if(form.platforms.includes("youtube")) w.push("YouTube can't post photos — untick YouTube for this multi-photo post.");
+      if(form.platforms.includes("tiktok")) w.push("TikTok photo posts go up from the TikTok app (Make can't post them), then mark them as published.");
+      if(form.platforms.includes("gbp")) w.push("Google Business shows the first photo only.");
+      if(form.gallery.some(x=>x.trimmed)) w.push("Some photos were trimmed to fit Instagram's 4:5–1.91:1 shape — check the preview.");
+    }
+    if(form.galleryStatus) w.push("Still preparing photos — wait for them to finish before submitting.");
     if(story){
       if(form.aspectRatio!=="9:16") w.push("Stories are full-screen 9:16 — current media is "+form.aspectRatio+", so it will be cropped or letterboxed.");
       if(form.mediaType==="video" && form.duration>60) w.push("Story videos longer than 60s are split into several story frames.");
@@ -4343,18 +4469,44 @@ function CreateContentPage(){
     const variants = {};
     form.platforms.forEach(p=>{
       const {hashtagsText, ...fv} = form.variants[p] || {};
-      variants[p] = makeVariant(p, {status: status==="draft"?"draft":"submitted", scheduledAt: fv.overrideTime || form.scheduledAt || null, ...fv, hashtags: story? [] : parseTags(hashtagsText), ...(story? {postType:"Story"} : {})});
+      const carousel = !story && form.gallery.length>1;
+      variants[p] = makeVariant(p, {status: status==="draft"?"draft":"submitted", scheduledAt: fv.overrideTime || form.scheduledAt || null, ...fv, hashtags: story? [] : parseTags(hashtagsText),
+        ...(story? {postType:"Story"} : carousel && (p==="instagram"||p==="facebook")? {postType:"Carousel"} : carousel && p==="tiktok"? {postType:"Photos"} : {})});
     });
     return {
       id: uid("ct"), title: form.title||"Untitled content", brand: form.brand, campaign: form.campaign, pillar: form.pillar,
       creator: form.creator, approver: form.approver, priority: form.priority, notes: form.notes, status,
       createdAt: new Date().toISOString(), platforms: form.platforms, currentVersion: 1, format: story? "story" : "post",
-      media:{type:form.mediaType, duration: form.mediaType==="video"?Number(form.duration):null, aspectRatio: form.aspectRatio, previewUrl: form.previewUrl || null, fileUrl: form.fileUrl || null},
+      media: (!story && form.gallery.length>1) ? galleryMedia(form.gallery)
+        : {type:form.mediaType, duration: form.mediaType==="video"?Number(form.duration):null, aspectRatio: form.aspectRatio, previewUrl: form.previewUrl || null, fileUrl: form.fileUrl || null},
       due: form.scheduledAt || new Date().toISOString(),
       versions:[{version:1, editor:USERS.find(u=>u.id===form.creator).name, date:new Date().toISOString(), changes: status==="draft"?"Initial draft created.":"Initial draft created and submitted for approval.", decision:"—", feedback:null}],
       variants, gradient: grad(form.title||"x"+Math.random()), libraryRef: form.libraryRef || null,
     };
   }
+
+  // Live preview of the post as it stands (re-built as the form changes; the id stays put so the player doesn't restart).
+  const [previewPlatform, setPreviewPlatform] = useState(null);
+  useEffect(()=>{ if(!form.platforms.includes(previewPlatform)) setPreviewPlatform(form.platforms[0] || null); }, [form.platforms.join(",")]);
+  const previewItem = useMemo(()=>{
+    if(!form.previewUrl && !form.fileUrl && !form.gallery.length) return null;
+    try{ return {...buildItem("draft"), id:"preview", gradient: grad(form.title||"preview")}; }catch(e){ return null; }
+  }, [form]);
+
+  const narrowScreen = useIsNarrow(900);
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const renderPreview = h => (<>
+            {form.platforms.length>1 && <div className="cf-noscrollbar" style={{display:"flex", gap:5, overflowX:"auto", marginBottom:10}}>
+              {form.platforms.map(p=>(
+                <button key={p} onClick={()=>setPreviewPlatform(p)} style={{display:"flex", alignItems:"center", gap:5, padding:"4px 9px 4px 4px", borderRadius:99, border:"1px solid "+(previewPlatform===p? PLATFORM_HEX[p] : "var(--border)"), background: previewPlatform===p? PLATFORM_HEX[p]+"14" : "var(--surface)", fontSize:11.5, fontWeight:600, cursor:"pointer", color:"var(--ink)", flexShrink:0}}>
+                  <PlatformIcon platform={p} size={10}/>{PLATFORM_META[p].label}
+                </button>
+              ))}
+            </div>}
+            <div style={{height:h, marginBottom:12}}>
+              <PhonePreview platform={previewPlatform} item={previewItem} variant={previewItem.variants[previewPlatform]} brand={BRANDS.find(b=>b.id===form.brand)} playing={true} muted={true} onAutoMuted={()=>{}}/>
+            </div>
+  </>);
 
   function submit(status){
     const item = buildItem(status);
@@ -4433,11 +4585,19 @@ function CreateContentPage(){
               <label htmlFor="cf-upload" style={{display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:8, border:"2px dashed var(--border)", borderRadius:14, padding:"32px 16px", cursor:"pointer", background:"var(--surface-2)", marginBottom:16}}>
                 <Icon name="upload" size={26} style={{color:"var(--ink-mute)"}}/>
                 <div style={{fontSize:13, fontWeight:700}}>Drag & drop, or click to upload</div>
-                <div style={{fontSize:11.5, color:"var(--ink-mute)"}}>MP4, MOV, JPG or PNG up to 100MB — bigger videos: use the content library</div>
-                <input id="cf-upload" type="file" accept="image/*,video/*" style={{display:"none"}} onChange={e=>{
-                  const f=e.target.files[0]; if(!f) return;
+                <div style={{fontSize:11.5, color:"var(--ink-mute)"}}>MP4, MOV, JPG or PNG up to 100MB — bigger videos: use the content library{story? "" : ". Pick several photos at once for a multi-photo post (up to 10)."}</div>
+                <input id="cf-upload" type="file" accept="image/*,video/*" multiple={!story} style={{display:"none"}} onChange={e=>{
+                  const picked = [...e.target.files]; e.target.value = "";
+                  const photos = picked.filter(x=>x.type.startsWith("image/"));
+                  if(photos.length>1){
+                    // Several photos at once → a multi-photo post.
+                    set({fileName: photos.length+" photos", mediaType:"image", gallery:[], fileUrl:null, previewUrl:null, uploadStatus:"uploading", libraryRef:null, previewLoading:false});
+                    addPhotos(photos, {includeCurrent:false});
+                    return;
+                  }
+                  const f=picked[0]; if(!f) return;
                   const isVideo = f.type.startsWith("video/");
-                  set({fileName:f.name, mediaType: isVideo?"video":"image", previewLoading:true, uploadStatus:"uploading", fileUrl:null});
+                  set({fileName:f.name, mediaType: isVideo?"video":"image", previewLoading:true, uploadStatus:"uploading", fileUrl:null, gallery:[], galleryStatus:""});
                   // Small poster/thumbnail for instant feedback in the UI...
                   const task = isVideo ? videoFileToPoster(f, 480, 0.72) : imageFileToPreview(f, 480, 0.78);
                   task.then(dataUrl=>{ set({previewUrl:dataUrl, previewLoading:false}); })
@@ -4481,6 +4641,32 @@ function CreateContentPage(){
                       <button onClick={()=>set({libraryRef:null, ...(form.uploadStatus==="linked"? {uploadStatus:null, fileName:""} : {})})} style={{border:"none", background:"none", color:"var(--ink-mute)", cursor:"pointer", fontSize:11.5, textDecoration:"underline"}}>unlink</button>
                     </div>}
                   </div>
+                </div>
+              )}
+              {!story && form.mediaType==="image" && (form.fileUrl || form.gallery.length>0 || form.galleryStatus) && (
+                <div style={{border:"1px solid var(--border)", borderRadius:12, padding:12, marginBottom:16}}>
+                  <div style={{display:"flex", alignItems:"center", gap:8, marginBottom:10, flexWrap:"wrap"}}>
+                    <span style={{fontSize:12.5, fontWeight:700}}>Photos in this post</span>
+                    <span style={{fontSize:11.5, color:"var(--ink-mute)"}}>{form.gallery.length>1? form.gallery.length+" of "+MAX_PHOTOS+" · shown in this order" : "Add more to make a multi-photo (carousel) post"}</span>
+                    {form.galleryStatus && <span style={{fontSize:11.5, fontWeight:600, color:"var(--accent)"}}>{form.galleryStatus}</span>}
+                  </div>
+                  <div style={{display:"flex", gap:8, flexWrap:"wrap", alignItems:"center"}}>
+                    {(form.gallery.length? form.gallery : [{previewUrl:form.previewUrl, fileUrl:form.fileUrl}]).map((ph, i)=>(
+                      <div key={(ph.fileUrl||"")+i} style={{position:"relative", width:64, height:64, borderRadius:8, overflow:"hidden", background:"#000", flexShrink:0}}>
+                        {(ph.previewUrl||ph.fileUrl) && <img src={ph.previewUrl||ph.fileUrl} alt="" style={{width:"100%", height:"100%", objectFit:"cover"}}/>}
+                        <span style={{position:"absolute", left:3, top:3, background:"rgba(0,0,0,.65)", color:"#fff", borderRadius:4, fontSize:10, fontWeight:700, padding:"0 4px"}}>{i+1}</span>
+                        {form.gallery.length>1 && <button title="Remove" onClick={()=>removePhoto(i)} style={{position:"absolute", right:2, top:2, width:18, height:18, borderRadius:99, border:"none", background:"rgba(0,0,0,.65)", color:"#fff", fontSize:11, lineHeight:"18px", padding:0, cursor:"pointer"}}>✕</button>}
+                        {form.gallery.length>1 && i>0 && <button title="Move earlier" onClick={()=>movePhoto(i)} style={{position:"absolute", left:2, bottom:2, width:18, height:18, borderRadius:99, border:"none", background:"rgba(0,0,0,.65)", color:"#fff", fontSize:11, lineHeight:"18px", padding:0, cursor:"pointer"}}>‹</button>}
+                      </div>
+                    ))}
+                    {(form.gallery.length || 1) < MAX_PHOTOS && !form.galleryStatus && form.uploadStatus!=="uploading" && form.uploadStatus!=="importing" && (
+                      <label style={{width:64, height:64, borderRadius:8, border:"2px dashed var(--border)", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:2, cursor:"pointer", fontSize:10.5, fontWeight:600, color:"var(--ink-mute)", flexShrink:0}}>
+                        <Icon name="plus" size={16}/>Add photo
+                        <input type="file" accept="image/*" multiple style={{display:"none"}} onChange={e=>{ const fs=[...e.target.files]; e.target.value=""; if(fs.length) addPhotos(fs); }}/>
+                      </label>
+                    )}
+                  </div>
+                  {(form.gallery.length || 1) < MAX_PHOTOS && !form.galleryStatus && <div style={{marginTop:10}}><LibraryPicker onPick={addLibraryPhoto}/></div>}
                 </div>
               )}
               <div className="cf-field-grid" style={{display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:14}}>
@@ -4586,7 +4772,10 @@ function CreateContentPage(){
             </div>
           )}
           <div style={{display:"flex", justifyContent:"space-between", marginTop:24, paddingTop:18, borderTop:"1px solid var(--border)"}}>
-            <Button variant="ghost" icon="chevronLeft" onClick={()=>setStep(s=>Math.max(0,s-1))} disabled={step===0}>Back</Button>
+            <div style={{display:"flex", gap:8}}>
+              <Button variant="ghost" icon="chevronLeft" onClick={()=>setStep(s=>Math.max(0,s-1))} disabled={step===0}>Back</Button>
+              {narrowScreen && previewItem && <Button variant="ghost" onClick={()=>setPreviewOpen(true)}>Preview</Button>}
+            </div>
             <div style={{display:"flex", gap:10}}>
               <Button variant="ghost" onClick={()=>submit("draft")} disabled={form.uploadStatus==="uploading"||form.uploadStatus==="importing"}>{form.uploadStatus==="uploading"||form.uploadStatus==="importing"?"Waiting for file…":"Save as Draft"}</Button>
               {step<4 ? <Button variant="primary" onClick={()=>setStep(s=>Math.min(4,s+1))}>Continue</Button>
@@ -4597,9 +4786,11 @@ function CreateContentPage(){
 
         <Card style={{padding:16, position:"sticky", top:16}}>
           <SectionTitle>Preview</SectionTitle>
-          <div style={{height:150, borderRadius:12, overflow:"hidden", marginBottom:12}}>
+          {/* The same phone preview approvers see, built from what's in the form right now. */}
+          {previewItem && previewPlatform ? <>{renderPreview(470)}
+          </> : <div style={{height:150, borderRadius:12, overflow:"hidden", marginBottom:12}}>
             <Thumb item={{gradient:grad(form.title||"preview"), media:{type:form.mediaType, duration:form.duration, previewUrl:form.previewUrl}}} radius={12} iconSize={26}/>
-          </div>
+          </div>}
           <div style={{fontWeight:700, fontSize:14, marginBottom:4}}>{form.title || "Untitled content"}</div>
           <div style={{fontSize:12, color:"var(--ink-mute)", marginBottom:12}}>{BRANDS.find(b=>b.id===form.brand).name} · {campaignLabel(state.campaigns, form.campaign)}</div>
           <div style={{display:"flex", gap:6, flexWrap:"wrap", marginBottom:14}}>{form.platforms.map(p=><PlatformIcon key={p} platform={p} size={14}/>)}</div>
@@ -4613,6 +4804,15 @@ function CreateContentPage(){
           )}
         </Card>
       </div>
+      <Modal open={previewOpen && !!previewItem} onClose={()=>setPreviewOpen(false)} width={420}>
+        <div style={{padding:14}}>
+          <div style={{display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:10}}>
+            <strong style={{fontSize:15}}>Preview</strong>
+            <IconButton icon="x" title="Close" onClick={()=>setPreviewOpen(false)}/>
+          </div>
+          {previewItem && previewPlatform && renderPreview("min(620px, 68vh)")}
+        </div>
+      </Modal>
       <style>{`@media (max-width:900px){ .cf-wiz-grid{ grid-template-columns:1fr !important; } }`}</style>
     </div>
   );

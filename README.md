@@ -132,6 +132,10 @@ the calendar template, the team-wide chat-updates switch, and Team & access.
 
 Create Content → **Content style: Story** makes a full-screen 9:16 story for Instagram, Facebook and/or TikTok (item `format: "story"`, variants `postType: "Story"`). Stories have no caption — each platform gets an optional link sticker (`url`) and posting notes (`storyNotes`). The Approval Queue previews them as real story screens. Make can't post stories (its Instagram app has no story module), so the worker never sends a story to Make — neither from **Publish…** nor from auto-publish. After approval, post it from the phone app and use **Mark as published**.
 
+## Multi-photo (carousel) posts
+
+Create Content → pick several photos at once (up to 10), or "Add photo" / the library search under **Photos in this post** (‹ reorders, ✕ removes). Each photo is re-saved as a JPEG (max 1440 px wide) and trimmed into Instagram's 4:5–1.91:1 range, then stored in `media.gallery` (the first photo is also `media.fileUrl`). Previews show the carousel with arrows and dots. On publish the worker sends `kind: "carousel"` with `igFiles` / `fbPhotos`; the Make scenarios have a "Photos → Carousel" route (Instagram: Create a carousel post; Facebook: Create a Post with Photos). Google Business gets the first photo, YouTube is skipped, TikTok photo posts are manual.
+
 ## Deleting posts and drafts
 
 Open a post (Calendar, Approval Queue, Dashboard) → **Delete draft** / **Delete post** at the top → confirm. Creators can delete their own post while it's a draft, sent back for changes or rejected; admins can delete any post that isn't published (published posts stay for the record and stats). Deleted ids are kept in `deletedIds` in the shared state, and `/api/state` drops those posts from every save, so a device that loaded before the delete can't bring them back.

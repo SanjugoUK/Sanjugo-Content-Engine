@@ -212,6 +212,12 @@ function reviewTurnaround(log, userId){
 }
 // Creators can delete their own post until an approver has signed it off (draft, sent back or rejected);
 // admins can delete anything that isn't live or on its way out. Published posts stay, for the record and the stats.
+function canRescheduleContent(item, userId){
+  const u = USERS.find(x=>x.id===userId);
+  if(!item || !u || item.status==="published") return false;
+  if(PERMS[u.role] && PERMS[u.role].schedule) return true;
+  return item.creator===userId && ["draft","submitted","changes_requested","rejected"].includes(item.status);
+}
 function canDeleteContent(item, userId){
   const u = USERS.find(x=>x.id===userId);
   if(!item || !u) return false;
@@ -989,12 +995,32 @@ function baseReducer(state, action){
         contentItems: state.contentItems.map(i=> i.campaign===action.id? {...i, campaign:""} : i),
         toasts:[...state.toasts, {id:uid("toast"), message:"Campaign deleted" + (moved? " · "+moved+" post"+(moved>1?"s":"")+" moved to No campaign" : ""), variant:"ok"}]};
     }
+    case "RESCHEDULE_ALL": {
+      const {contentId, scheduledAt} = action;
+      const item = state.contentItems.find(i=>i.id===contentId);
+      if(!item) return state;
+      const approved = ["approved","scheduled","publishing","failed"].includes(item.status);
+      const moved = [];
+      const variants = {...item.variants};
+      Object.keys(variants).forEach(p=>{
+        const v = variants[p]; if(!v || v.publishStatus==="published" || v.publishStatus==="publishing") return;
+        variants[p] = {...v, scheduledAt, templateRuleId:null, publishStatus: scheduledAt && approved ? "scheduled" : "not_scheduled"};
+        moved.push(PLATFORM_META[p].label);
+      });
+      if(!moved.length) return state;
+      const items = state.contentItems.map(i=> i.id===contentId? {...i, variants} : i);
+      const log = {id:uid("act"), at:new Date().toISOString(), contentId, contentTitle:item.title, user: state.currentUserId,
+        type:"scheduled", detail: (scheduledAt? "Rescheduled to "+fmtDateTime(scheduledAt) : "Removed publish time")+" — "+moved.join(", "), comment:null};
+      return {...state, contentItems: items, activityLog:[log, ...state.activityLog],
+        toasts:[...state.toasts, {id:uid("toast"), message: scheduledAt? "Moved to "+fmtDateTime(scheduledAt)+" ("+moved.join(", ")+")" : "Publish time cleared", variant:"ok"}]};
+    }
     case "RESCHEDULE": {
       const {contentId, platform, scheduledAt} = action;
       const item = state.contentItems.find(i=>i.id===contentId);
       if(!item || !item.variants[platform]) return state;
       const variants = {...item.variants, [platform]: {...item.variants[platform], scheduledAt, templateRuleId:null,
-        publishStatus: scheduledAt? (item.variants[platform].publishStatus==="published"?"published":"scheduled") : "not_scheduled"}};
+        publishStatus: item.variants[platform].publishStatus==="published" ? "published"
+          : scheduledAt && ["approved","scheduled","publishing","failed"].includes(item.status) ? "scheduled" : "not_scheduled"}};
       const items = state.contentItems.map(i=> i.id===contentId? {...i, variants} : i);
       const log = {id:uid("act"), at:new Date().toISOString(), contentId, contentTitle:item.title, user: state.currentUserId,
         type:"scheduled", detail: (scheduledAt? "Rescheduled — "+PLATFORM_META[platform].label+" set to "+fmtDateTime(scheduledAt) : "Removed publish time — "+PLATFORM_META[platform].label), comment:null};
@@ -1211,8 +1237,7 @@ function isoToLocalInput(iso){
 }
 function ScheduleEditor({item, platform, scheduledAt}){
   const {state, dispatch} = useApp();
-  const user = USERS.find(u=>u.id===state.currentUserId);
-  const perms = PERMS[user.role];
+  const perms = {schedule: canRescheduleContent(item, state.currentUserId)};
   const [value, setValue] = useState(scheduledAt? isoToLocalInput(scheduledAt) : "");
   useEffect(()=>{ setValue(scheduledAt? isoToLocalInput(scheduledAt) : ""); }, [scheduledAt]);
 
@@ -1221,7 +1246,7 @@ function ScheduleEditor({item, platform, scheduledAt}){
   }
   function save(){ dispatch({type:"RESCHEDULE", contentId:item.id, platform, scheduledAt: value? value+":00" : null}); }
   const others = item.platforms.filter(p=>p!==platform && item.variants[p] && item.variants[p].publishStatus!=="published");
-  function saveAll(){ [platform, ...others].forEach(p=>dispatch({type:"RESCHEDULE", contentId:item.id, platform:p, scheduledAt: value+":00"})); }
+  function saveAll(){ dispatch({type:"RESCHEDULE_ALL", contentId:item.id, scheduledAt: value+":00"}); }
   return (
     <div style={{display:"flex", alignItems:"center", gap:8, flexWrap:"wrap", paddingTop:2}}>
       <span style={{fontWeight:700, color:"var(--ink-mute)", flexShrink:0}}>Scheduled</span>
@@ -1611,6 +1636,36 @@ function MarkPublishedModal({item, open, onClose}){
   );
 }
 
+/* Top of a post's details (opened from the calendar, queue or dashboard): change when the whole post goes out. */
+function QuickSchedule({item}){
+  const {state, dispatch} = useApp();
+  const open = Object.entries(item.variants||{}).filter(([p,v])=>v && v.publishStatus!=="published" && v.publishStatus!=="publishing");
+  const first = (open.find(([p,v])=>v.scheduledAt)||[])[1];
+  const current = first && first.scheduledAt ? isoToLocalInput(first.scheduledAt) : "";
+  const [value, setValue] = useState(current);
+  useEffect(()=>{ setValue(current); }, [item.id, current]);
+  if(!open.length) return null;
+  const canEdit = canRescheduleContent(item, state.currentUserId);
+  const dates = new Set(open.map(([p,v])=>v.scheduledAt ? isoToLocalInput(v.scheduledAt) : ""));
+  const split = dates.size>1;
+  const box = {marginTop:12, padding:"10px 12px", borderRadius:10, border:"1px solid var(--border)", background:"var(--surface-2)"};
+  if(!canEdit) return (
+    <div style={box}><span style={{fontSize:12, fontWeight:600, color:"var(--ink-mute)"}}>Publishes </span>
+      <span style={{fontSize:13, fontWeight:600}}>{split ? open.map(([p,v])=>PLATFORM_META[p].label+" "+(v.scheduledAt? fmtDateTime(v.scheduledAt) : "not set")).join(" · ") : current ? fmtDateTime(first.scheduledAt) : "Not scheduled yet"}</span></div>
+  );
+  return (
+    <div style={box}>
+      <div style={{fontSize:12, fontWeight:700, color:"var(--ink-mute)", marginBottom:6}}>Publish date &amp; time{open.length>1? " · all "+open.length+" platforms" : " · "+PLATFORM_META[open[0][0]].label}</div>
+      <div style={{display:"flex", gap:8, alignItems:"center", flexWrap:"wrap"}}>
+        <input type="datetime-local" value={value} onChange={e=>setValue(e.target.value)} style={{borderRadius:8, border:"1px solid var(--border)", padding:"6px 9px", fontSize:13, background:"var(--surface)", color:"var(--ink)"}}/>
+        <Button size="sm" variant="primary" disabled={!value || (value===current && !split)} onClick={()=>dispatch({type:"RESCHEDULE_ALL", contentId:item.id, scheduledAt:value+":00"})}>Save</Button>
+        {current && <Button size="sm" variant="ghost" onClick={()=>{ setValue(""); dispatch({type:"RESCHEDULE_ALL", contentId:item.id, scheduledAt:null}); }}>Clear</Button>}
+      </div>
+      {split && <div style={{fontSize:11.5, color:"var(--amber)", marginTop:6, lineHeight:1.5}}>Platforms are on different times now ({open.map(([p,v])=>PLATFORM_META[p].label+" "+(v.scheduledAt? fmtDateTime(v.scheduledAt) : "not set")).join(" · ")}). Saving puts them all on this time — or set each one in the Platforms tab.</div>}
+    </div>
+  );
+}
+
 function ContentDetailDrawer({item, onClose}){
   const {state, dispatch} = useApp();
   const [tab, setTab] = useState("overview");
@@ -1638,6 +1693,7 @@ function ContentDetailDrawer({item, onClose}){
           {canDeleteContent(item, state.currentUserId) && <ConfirmButton confirmLabel={item.status==="draft"? "Yes, delete draft" : "Yes, delete post"}
             onConfirm={()=>{ dispatch({type:"DELETE_CONTENT", id:item.id}); onClose(); }}>{item.status==="draft"? "Delete draft" : "Delete post"}</ConfirmButton>}
         </div>}
+        <QuickSchedule item={item}/>
         <MakeStatusLine item={item}/>
         <MarkPublishedModal item={item} open={publishing} onClose={()=>setPublishing(false)}/>
         <div style={{display:"flex", gap:6, marginTop:14}}>
@@ -6290,7 +6346,8 @@ function App(){
         </div>
       </div>
       <div className="cf-statusbar-bg" style={{position:"fixed", top:0, left:0, right:0, height:"env(safe-area-inset-top, 0px)", background:"var(--surface)", zIndex:30, pointerEvents:"none"}}/>
-      <ContentDetailDrawer item={detailItem} onClose={()=>setDetailItem(null)}/>
+      {/* Always the live copy of the post, so changes made while it's open (dates, Make results, approvals) show straight away. */}
+      <ContentDetailDrawer item={detailItem && (state.contentItems.find(i=>i.id===detailItem.id) || null)} onClose={()=>setDetailItem(null)}/>
       <ToastHost toasts={state.toasts} remove={id=>dispatch({type:"REMOVE_TOAST", id})}/>
       <style>{`@media (max-width:600px){ .cf-main{ padding:18px 16px 50px !important; } }`}</style>
     </AppCtx.Provider>

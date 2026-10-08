@@ -2506,7 +2506,7 @@ function PhonePreview({platform, item, variant, brand, ...playback}){
 
 /* Full-screen review: the post fills the approver's screen exactly like opening the app, with the decision
    buttons underneath. Stays open and moves on to the next post after each decision. */
-function ImmersiveViewer({entry, platform, onPlatform, onDecision, onClose, busy}){
+function ImmersiveViewer({entry, platform, onPlatform, onDecision, onClose, busy, browse}){
   const item = entry.item;
   const brand = BRANDS.find(b=>b.id===item.brand);
   const platforms = entry.platform ? [entry.platform] : item.platforms;
@@ -2549,11 +2549,15 @@ function ImmersiveViewer({entry, platform, onPlatform, onDecision, onClose, busy
             {muted? "Sound off":"Sound on"}
           </button>}
         </div>
-        <div style={{display:"flex", alignItems:"center", justifyContent:"center", gap:14}}>
+        {browse ? <div style={{display:"flex", alignItems:"center", justifyContent:"center", gap:14}}>
+          <Button variant="ghost" size="lg" icon="chevronLeft" onClick={browse.onPrev} disabled={browse.index<=0} style={{borderRadius:99, background:"#1c1c1e", color:"#fff", borderColor:"#333"}}>Previous</Button>
+          <span className="num" style={{fontSize:13, fontWeight:700, color:"#bbb", minWidth:54, textAlign:"center"}}>{browse.index+1} of {browse.total}</span>
+          <Button variant="ghost" size="lg" onClick={browse.onNext} disabled={browse.index>=browse.total-1} style={{borderRadius:99, background:"#1c1c1e", color:"#fff", borderColor:"#333"}}>Next ›</Button>
+        </div> : <div style={{display:"flex", alignItems:"center", justifyContent:"center", gap:14}}>
           <Button variant="danger" size="lg" icon="x" onClick={()=>onDecision("reject")} style={round}/>
           <Button variant="amber" size="lg" icon="edit" onClick={()=>onDecision("edits")} style={{borderRadius:99}}>Request Edits</Button>
           <Button variant="success" size="lg" icon="check" onClick={()=>onDecision("approve")} style={round}/>
-        </div>
+        </div>}
       </div>
     </div>,
     document.body
@@ -2697,14 +2701,14 @@ function SwipeCard({entry, onDecision, onOpenDetails, isTop, narrow, paused, onI
 /* Approval Queue has three tabs: To review (approvers), Needs changes and Rejected (where creators fix and resubmit). */
 function QueueTabs({tab, setTab, canReview}){
   const {state} = useApp();
-  const count = st => state.contentItems.filter(i=>i.status===st).length;
-  const tabs = [...(canReview? [["review","To review","submitted"]] : []), ["changes","Needs changes","changes_requested"], ["rejected","Rejected","rejected"]];
+  const count = (st, k) => state.contentItems.filter(i=>i.status===st && (k!=="waiting" || i.creator===state.currentUserId)).length;
+  const tabs = [...(canReview? [["review","To review","submitted"]] : [["waiting","Waiting for approval","submitted"]]), ["changes","Needs changes","changes_requested"], ["rejected","Rejected","rejected"]];
   return (
     <div className="cf-noscrollbar" style={{display:"flex", gap:4, borderBottom:"1px solid var(--border)", marginBottom:16, overflowX:"auto"}}>
       {tabs.map(([k,l,st])=>{
-        const n = count(st), active = tab===k;
+        const n = count(st, k), active = tab===k;
         return <button key={k} onClick={()=>setTab(k)} style={{padding:"9px 14px", border:"none", borderBottom:"2px solid "+(active? "var(--accent)":"transparent"), marginBottom:-1, background:"transparent", color: active? "var(--ink)":"var(--ink-soft)", fontWeight: active? 600:500, fontSize:13.5, cursor:"pointer", display:"flex", alignItems:"center", gap:7, whiteSpace:"nowrap"}}>
-          {l}<span className="num" style={{fontSize:11, fontWeight:600, padding:"1px 7px", borderRadius:99, background: n? (k==="review"? "var(--blue-soft)" : k==="changes"? "var(--amber-soft)" : "var(--red-soft)") : "var(--surface-2)", color: n? (k==="review"? "var(--blue)" : k==="changes"? "var(--amber)" : "var(--red)") : "var(--ink-mute)"}}>{n}</span>
+          {l}<span className="num" style={{fontSize:11, fontWeight:600, padding:"1px 7px", borderRadius:99, background: n? (k==="review"||k==="waiting"? "var(--blue-soft)" : k==="changes"? "var(--amber-soft)" : "var(--red-soft)") : "var(--surface-2)", color: n? (k==="review"? "var(--blue)" : k==="changes"? "var(--amber)" : "var(--red)") : "var(--ink-mute)"}}>{n}</span>
         </button>;
       })}
     </div>
@@ -2937,7 +2941,7 @@ function ApprovalQueuePage(){
   const {state, dispatch, openDetails} = useApp();
   const meQ = USERS.find(u=>u.id===state.currentUserId);
   const canReview = PERMS[meQ.role].approve;
-  const [qtab, setQtab] = useState(()=>{ const t = state.queueTab; if(t==="review" && !canReview) return "changes"; return t || (canReview? "review" : "changes"); });
+  const [qtab, setQtab] = useState(()=>{ const t = state.queueTab; if(t==="review" && !canReview) return "waiting"; if(t==="waiting" && canReview) return "review"; return t || (canReview? "review" : "waiting"); });
   const [mode, setMode] = useState("package");
   const [filters, setFilters] = useState({brand:"", creator:"", campaign:"", priority:"", platform:""});
   // Keys reviewed this session. Approved/rejected items drop out of the "submitted" pool on their own, so
@@ -2977,14 +2981,14 @@ function ApprovalQueuePage(){
 
   return (
     <div>
-      <PageHeader title="Approval Queue" subtitle={qtab==="review" ? "Review each post, then tap ✕ Reject, Request Edits or ✓ Approve." : "Fix what the approver asked for, then resubmit."} action={qtab!=="review" ? null :
+      <PageHeader title="Approval Queue" subtitle={qtab==="review" ? "Review each post, then tap ✕ Reject, Request Edits or ✓ Approve." : qtab==="waiting" ? "See your posts exactly as the approver will — tap Next to go through them." : "Fix what the approver asked for, then resubmit."} action={qtab!=="review" ? null :
         <div style={{display:"flex", gap:8, alignItems:"center"}}>
           <Button variant="ghost" size="sm" icon="undo" onClick={undo} disabled={state.decisionHistory.length===0}>Undo Last Decision</Button>
         </div>
       }/>
 
       <QueueTabs tab={qtab} setTab={setQtab} canReview={canReview}/>
-      {qtab!=="review" ? <ReworkList key={qtab} status={qtab==="changes"? "changes_requested" : "rejected"}/> : <>
+      {qtab==="waiting" ? <WaitingBrowser/> : qtab!=="review" ? <ReworkList key={qtab} status={qtab==="changes"? "changes_requested" : "rejected"}/> : <>
       <Card style={{padding: narrow? 10:14, marginBottom: narrow? 14:18, display:"flex", flexWrap:"wrap", gap:10, alignItems:"center"}}>
         <div style={{display:"flex", background:"var(--surface-2)", borderRadius:9, padding:3, gap:2}}>
           <button onClick={()=>setMode("package")} style={{padding:"6px 12px", borderRadius:7, border:"none", fontWeight:700, fontSize:12.5, cursor:"pointer", background:mode==="package"?"var(--surface)":"transparent", boxShadow:mode==="package"?"var(--shadow-sm)":"none"}}>Full package</button>
@@ -3037,6 +3041,50 @@ function ApprovalQueuePage(){
       {immersive && current && <ImmersiveViewer key={current.key} entry={current} platform={immersivePlatform} onPlatform={setImmersive}
         onDecision={requestDecision} onClose={()=>setImmersive(null)} busy={!!pending}/>}
       <DecisionModal pending={pending} onCancel={()=>setPending(null)} onConfirm={confirmDecision}/>
+    </div>
+  );
+}
+
+/* Creators: look through what's waiting for approval, as the approver sees it — no decisions, just Previous / Next. */
+function WaitingBrowser(){
+  const {state, openDetails} = useApp();
+  const narrow = useIsNarrow(900);
+  const [onlyMine, setOnlyMine] = useState(true);
+  const [index, setIndex] = useState(0);
+  const [immersive, setImmersive] = useState(null);
+  const list = useMemo(()=>buildQueue(state.contentItems, "package", onlyMine? {creator: state.currentUserId} : {}), [state.contentItems, onlyMine, state.currentUserId]);
+  useEffect(()=>{ if(index > list.length-1) setIndex(Math.max(0, list.length-1)); }, [list.length]);
+  const i = Math.min(index, Math.max(0, list.length-1));
+  const current = list[i];
+  const go = d => setIndex(x=> Math.max(0, Math.min(list.length-1, x+d)));
+  const immersivePlatform = current && immersive ? (current.item.platforms.includes(immersive) ? immersive : current.item.platforms[0]) : null;
+  return (
+    <div>
+      <label style={{display:"flex", alignItems:"center", gap:7, fontSize:13, fontWeight:600, color:"var(--ink-soft)", marginBottom:14, cursor:"pointer"}}>
+        <input type="checkbox" checked={onlyMine} onChange={e=>{ setOnlyMine(e.target.checked); setIndex(0); }}/> Only mine
+      </label>
+      {!current ? (
+        <Card style={{padding:0}}><EmptyState icon="check" title="Nothing waiting for approval" subtitle={onlyMine? "None of your posts are waiting. Untick “Only mine” to see the whole team's." : "Nothing is waiting for approval right now."}/></Card>
+      ) : (
+        <div>
+          <div style={{display:"flex", alignItems:"center", gap:10, marginBottom:14, flexWrap:"wrap"}}>
+            <div style={{fontSize:13, fontWeight:700, color:"var(--ink-soft)"}}>{i+1} of {list.length} waiting</div>
+            <div style={{flex:1, minWidth:80, height:6, borderRadius:99, background:"var(--surface-2)", overflow:"hidden"}}><div style={{width:((i+1)/list.length*100)+"%", height:"100%", background:"var(--blue)", borderRadius:99, transition:"width .25s"}}/></div>
+            <span style={{fontSize:12, color:"var(--ink-mute)"}}>Waiting for {approverName(current.item)}</span>
+          </div>
+          <div style={{position:"relative", height: narrow? "max(480px, calc(100dvh - 200px))" : "clamp(540px, calc(100dvh - 270px), 860px)", maxWidth: narrow? 520 : 780, margin:"0 auto"}}>
+            <div key={current.key} style={{position:"absolute", inset:0}}>
+              <SwipeCard entry={current} isTop={true} narrow={narrow} paused={!!immersive} onImmersive={p=>setImmersive(p)} onOpenDetails={openDetails} onDecision={()=>{}}/>
+            </div>
+          </div>
+          <div style={{display:"flex", justifyContent:"center", alignItems:"center", gap:14, marginTop: narrow? 16:22}}>
+            <Button variant="ghost" size="lg" icon="chevronLeft" onClick={()=>go(-1)} disabled={i<=0} style={{borderRadius:99}}>Previous</Button>
+            <Button variant="primary" size="lg" onClick={()=>go(1)} disabled={i>=list.length-1} style={{borderRadius:99}}>Next ›</Button>
+          </div>
+        </div>
+      )}
+      {immersive && current && <ImmersiveViewer key={current.key} entry={current} platform={immersivePlatform} onPlatform={setImmersive} onClose={()=>setImmersive(null)}
+        browse={{index:i, total:list.length, onPrev:()=>go(-1), onNext:()=>go(1)}}/>}
     </div>
   );
 }

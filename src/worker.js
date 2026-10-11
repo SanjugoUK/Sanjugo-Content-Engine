@@ -14,6 +14,7 @@ export default {
     } else {
       ctx.waitUntil(autoPublishDue(env).catch((e) => console.error("auto-publish failed", e)));
       ctx.waitUntil(expireStuckJobs(env).catch((e) => console.error("expire jobs failed", e)));
+      ctx.waitUntil(remindPendingApprovals(env).catch((e) => console.error("approval reminders failed", e)));
     }
   },
 
@@ -1660,6 +1661,38 @@ async function expireStuckJobs(env, ctx) {
   }
 }
 
+// Every 5 minutes: a post (or story/reel) still waiting for approval within an hour of its publish time gets one
+// reminder — Team Chat @mention + phone/desktop alert — to whoever is assigned to approve it. Posts already
+// approved, sent back or rejected are left alone. The event id includes the publish time, so moving the post
+// to a new time earns a fresh reminder, and each time is only reminded once.
+const REMIND_BEFORE_MS = 60 * 60e3;
+async function remindPendingApprovals(env) {
+  const state = await readState(env);
+  const now = Date.now();
+  let team = null;
+  for (const item of state.contentItems || []) {
+    if (item.status !== "submitted") continue;
+    // Platforms still waiting (in per-platform review, decided platforms drop out).
+    const waiting = Object.entries(item.variants || {}).filter(([, v]) => v && v.scheduledAt && (v.status === "submitted" || !v.status) && v.publishStatus !== "published");
+    if (!waiting.length) continue;
+    const at = Math.min(...waiting.map(([, v]) => londonTime(v.scheduledAt)).filter(Number.isFinite));
+    if (!Number.isFinite(at) || now < at - REMIND_BEFORE_MS || now > at + 30 * 60e3) continue;
+    if (!team) team = (await listTeam(env)).members;
+    const reviewers = team.filter((m) => m.active && (m.role === "approver" || m.role === "admin"));
+    const who = (item.approver && item.approver !== "any" ? team.filter((m) => m.id === item.approver && m.active) : reviewers).map((m) => m.id);
+    if (!who.length) continue;
+    const byId = new Map(team.map((m) => [m.id, m]));
+    const when = new Date(at).toLocaleString("en-GB", { timeZone: "Europe/London", weekday: "short", hour: "2-digit", minute: "2-digit" });
+    const mins = Math.round((at - now) / 60e3);
+    const left = mins > 0 ? `in ${mins} min` : mins === 0 ? "now" : `${-mins} min ago`;
+    const kind = item.format === "story" ? "story" : /reel|short|video/i.test(waiting.map(([, v]) => v.postType).join(" ")) ? "reel" : "post";
+    const where = waiting.map(([p]) => PLATFORM_NAMES[p] || p).join(", ");
+    const text = `⏰ Reminder: the ${kind} “${item.title || "Untitled"}” is due to go out ${when} (${left}) on ${where} and is still waiting for approval. ${who.map((id) => "@" + byId.get(id).name).join(" ")}`;
+    const posted = await postSystemChat(env, { text, mentions: who, contentId: item.id, eventId: "remind_" + item.id + "_" + at });
+    if (posted) await pushToUsers(env, who, { title: "Approval needed — " + left, body: `“${item.title || "Untitled"}” goes out ${when}. Tap to review.`, url: "/#/queue", tag: "remind-" + item.id }).catch(() => {});
+  }
+}
+
 // Every 5 minutes (when switched on): send approved posts whose scheduled time has arrived.
 async function autoPublishDue(env) {
   const cfg = await makeConfig(env);
@@ -1802,6 +1835,7 @@ How to answer:
 
 What Creator Studio can do (use this to explain how things work):
 - Dashboard: counts of posts awaiting approval, changes requested, scheduled this week, published, failed; views and engagement from real stats (last 30 days); Smart insights (Claude's read of the pipeline); upcoming content; recent approvals. Tiles are clickable.
+- Approval reminders: if a post, reel or story is still waiting for approval 1 hour before its publish time, Creator Studio @mentions the assigned approver(s) in Team Chat and sends a phone/desktop alert — once per publish time. Approved, sent-back or rejected posts aren't reminded.
 - Multi-photo (carousel) posts: in Create Content pick several photos at once (up to 10), or tap "Add photo" / pick more from the library under "Photos in this post"; reorder with ‹ and remove with ✕. Photos are re-saved as JPEG and trimmed to Instagram's 4:5–1.91:1 shape. Make posts them as an Instagram carousel and a Facebook multi-photo post; Google Business gets the first photo; YouTube can't post photos; TikTok photo posts go up from the TikTok app.
 - Create Content: first pick the content style — "Post / Reel" or "Story" (full-screen 9:16, Instagram/Facebook/TikTok only, with an optional link sticker and posting notes instead of a caption; approvers see it as a real story; Make can't post stories, so after approval someone posts it from the phone app and uses "Mark as published"). Then upload a video/photo, or pick one from the Content Library by barcode (e.g. G219). Choose platforms, write a caption per platform, pick a campaign (or "No campaign"), priority, and the approver — one person, or "Cyrus or Yan Yan (either can approve)" (the default: both are notified and whoever decides first moves it on). Then submit for approval, or "Save as Draft" (drafts show in the Content Calendar and can be opened, finished and submitted later). To delete a post: open it (tap it in the Calendar, Approval Queue or Dashboard) and tap "Delete draft" / "Delete post" at the top, then confirm. Creators can delete their own post while it is a draft, sent back for changes, or rejected; admins (Cyrus, Yan Yan) can delete any post that is not published. Published posts can\'t be deleted in Creator Studio (delete them in the social app itself).
 - Content Library: the Google Drive folder "Sanjugo Marketing Contents Final" (about 1,600 files). File names end with a barcode like G219; search by barcode, dish or stage, watch videos, see where a file has already been used (post, platform, date), and start a post from it.

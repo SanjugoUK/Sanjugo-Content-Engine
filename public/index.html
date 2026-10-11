@@ -218,6 +218,13 @@ function canRescheduleContent(item, userId){
   if(PERMS[u.role] && PERMS[u.role].schedule) return true;
   return item.creator===userId && ["draft","submitted","changes_requested","rejected"].includes(item.status);
 }
+// Edit a post's photos/video, wording and dates in place: approvers/admins until it's live; creators their own until it's approved.
+function canEditContent(item, userId){
+  const u = USERS.find(x=>x.id===userId);
+  if(!item || !u || ["published","publishing"].includes(item.status)) return false;
+  if(PERMS[u.role] && PERMS[u.role].approve) return true;
+  return item.creator===userId && ["draft","submitted","changes_requested","rejected"].includes(item.status);
+}
 function canDeleteContent(item, userId){
   const u = USERS.find(x=>x.id===userId);
   if(!item || !u) return false;
@@ -1205,14 +1212,15 @@ function MobileTopBar({onMenu, title}){
 /* ============================== DRAWER (content detail) ============================== */
 function Drawer({open, onClose, width=520, children}){
   if(!open) return null;
-  return (
+  return ReactDOM.createPortal(
     <div style={{position:"fixed", inset:0, zIndex:100}}>
       <div onClick={onClose} style={{position:"absolute", inset:0, background:"rgba(10,12,25,.45)", animation:"cf-fade-in .2s ease"}}/>
       <div style={{position:"absolute", top:0, right:0, bottom:0, width:"min(100%, "+width+"px)", background:"var(--surface)", boxShadow:"var(--shadow-lg)", display:"flex", flexDirection:"column", paddingTop:"env(safe-area-inset-top, 0px)", animation:"cf-drawer-in .28s cubic-bezier(.2,.8,.3,1)"}}>
         <div style={{flex:1, minHeight:0, overflowY:"auto", paddingBottom:"env(safe-area-inset-bottom, 0px)"}}>{children}</div>
       </div>
       <style>{`@keyframes cf-drawer-in{from{transform:translateX(24px); opacity:.5;} to{transform:translateX(0); opacity:1;}}`}</style>
-    </div>
+    </div>,
+    document.body
   );
 }
 
@@ -1671,6 +1679,8 @@ function ContentDetailDrawer({item, onClose}){
   const [tab, setTab] = useState("overview");
   const [compareVersion, setCompareVersion] = useState(null);
   const [publishing, setPublishing] = useState(false);
+  const [editingPost, setEditingPost] = useState(false);
+  useEffect(()=>{ setEditingPost(false); }, [item && item.id]);
   if(!item) return null;
   const canMarkPublished = ["approved","scheduled","publishing","failed","published"].includes(item.status) && Object.values(item.variants||{}).some(v=>v.publishStatus!=="published");
   const brand = BRANDS.find(b=>b.id===item.brand);
@@ -1688,14 +1698,16 @@ function ContentDetailDrawer({item, onClose}){
           <button onClick={onClose} style={{width:32,height:32,borderRadius:9,border:"1px solid var(--border)",background:"var(--surface)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><Icon name="x" size={16}/></button>
         </div>
         <div style={{display:"flex", gap:8, marginTop:10, flexWrap:"wrap"}}><StatusBadge status={item.status}/><PriorityDot priority={item.priority}/><Badge label={"v"+item.currentVersion} color="var(--accent)" soft="var(--accent-soft)"/></div>
-        {(canMarkPublished || canDeleteContent(item, state.currentUserId)) && <div style={{display:"flex", gap:8, marginTop:12, flexWrap:"wrap"}}>
+        {(canMarkPublished || canDeleteContent(item, state.currentUserId) || canEditContent(item, state.currentUserId)) && <div style={{display:"flex", gap:8, marginTop:12, flexWrap:"wrap"}}>
           {canMarkPublished && <Button variant="success" size="sm" icon="check" onClick={()=>setPublishing(true)}>Publish…</Button>}
+          {canEditContent(item, state.currentUserId) && <Button variant="ghost" size="sm" icon="edit" onClick={()=>setEditingPost(true)}>Edit post</Button>}
           {canDeleteContent(item, state.currentUserId) && <ConfirmButton confirmLabel={item.status==="draft"? "Yes, delete draft" : "Yes, delete post"}
             onConfirm={()=>{ dispatch({type:"DELETE_CONTENT", id:item.id}); onClose(); }}>{item.status==="draft"? "Delete draft" : "Delete post"}</ConfirmButton>}
         </div>}
         <QuickSchedule item={item}/>
         <MakeStatusLine item={item}/>
         <MarkPublishedModal item={item} open={publishing} onClose={()=>setPublishing(false)}/>
+        <RevisionEditor item={editingPost ? item : null} onClose={()=>setEditingPost(false)}/>
         <div style={{display:"flex", gap:6, marginTop:14}}>
           {["overview","platforms","versions","activity"].map(t=>(
             <button key={t} onClick={()=>setTab(t)} style={{padding:"7px 12px", borderRadius:8, border:"none", background: tab===t?"var(--accent-soft)":"transparent", color: tab===t?"var(--accent)":"var(--ink-soft)", fontWeight:700, fontSize:12.5, cursor:"pointer", textTransform:"capitalize"}}>{t}</button>
@@ -2860,13 +2872,13 @@ function RevisionEditor({item, onClose}){
     <Drawer open={!!item} onClose={onClose} width={640}>
       <div style={{position:"sticky", top:0, zIndex:3, background:"var(--surface)", borderBottom:"1px solid var(--border)", padding:"14px 18px", display:"flex", gap:10, alignItems:"flex-start"}}>
         <div style={{flex:1, minWidth:0}}>
-          <div style={{fontSize:11.5, color:"var(--ink-mute)", fontWeight:600}}>{item.status==="rejected"? "Rework & resubmit" : "Edit & resubmit"} · currently v{item.currentVersion}</div>
+          <div style={{fontSize:11.5, color:"var(--ink-mute)", fontWeight:600}}>{item.status==="rejected"? "Rework & resubmit" : item.status==="changes_requested"? "Edit & resubmit" : "Edit post"} · currently v{item.currentVersion}</div>
           <div style={{fontSize:16.5, fontWeight:600}}>{item.title}</div>
         </div>
         <IconButton icon="x" title="Close" onClick={onClose}/>
       </div>
       <div style={{padding:18}}>
-        <FeedbackBox item={item}/>
+        {(item.status==="changes_requested" || item.status==="rejected") && <FeedbackBox item={item}/>}
         <label style={label}>Title</label>
         <input value={f.title} onChange={e=>setF(x=>({...x, title:e.target.value}))} style={input}/>
 
@@ -2924,14 +2936,14 @@ function RevisionEditor({item, onClose}){
 
         <label style={label}>Note to the approver <span style={{fontWeight:400, color:"var(--ink-mute)"}}>(what you changed)</span></label>
         <textarea value={f.note} onChange={e=>setF(x=>({...x, note:e.target.value}))} rows={2} placeholder="e.g. Shortened the caption and swapped to the brighter shot (G731)." style={{...input, resize:"vertical"}}/>
-        {toTell.length>0 && <label style={{display:"flex", alignItems:"center", gap:7, fontSize:12.5, marginTop:10, color:"var(--ink-soft)", cursor:"pointer"}}>
+        {toTell.length>0 && ["changes_requested","rejected","draft"].includes(item.status) && <label style={{display:"flex", alignItems:"center", gap:7, fontSize:12.5, marginTop:10, color:"var(--ink-soft)", cursor:"pointer"}}>
           <input type="checkbox" checked={notify} onChange={e=>setNotify(e.target.checked)}/> Tell {toTell.map(u=>u.name).join(" and ")} in Team Chat when I resubmit
         </label>}
       </div>
       <div style={{position:"sticky", bottom:0, background:"var(--surface)", borderTop:"1px solid var(--border)", padding:"12px 18px", display:"flex", justifyContent:"flex-end", gap:8, flexWrap:"wrap"}}>
         <Button variant="ghost" onClick={onClose}>Cancel</Button>
         <Button variant="ghost" onClick={()=>save(false)} disabled={busy||uploading}>Save changes</Button>
-        <Button variant="primary" icon="check" onClick={()=>save(true)} disabled={busy||uploading}>{uploading? "Waiting for file…" : "Resubmit for approval"}</Button>
+        {["changes_requested","rejected","draft"].includes(item.status) && <Button variant="primary" icon="check" onClick={()=>save(true)} disabled={busy||uploading}>{uploading? "Waiting for file…" : item.status==="draft"? "Submit for approval" : "Resubmit for approval"}</Button>}
       </div>
     </Drawer>
   );

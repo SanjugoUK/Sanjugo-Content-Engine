@@ -787,7 +787,9 @@ async function planCleanup(env, now = Date.now()) {
   const items = stateRow ? (JSON.parse(stateRow.data).contentItems || []) : [];
   const users = new Map();
   for (const it of items) {
-    const keys = new Set([mediaKeyOf(it.media && it.media.fileUrl), mediaKeyOf(it.media && it.media.previewUrl)].filter(Boolean));
+    // Every file a post points at — main file, preview, every carousel photo, anything added later — counts as in use.
+    // (Only checking media.fileUrl once let the nightly clean-up delete carousel photos 2–10 as "unused".)
+    const keys = new Set([...JSON.stringify(it).matchAll(/\/api\/media\/([^"?#\\]+)/g)].map((m) => { try { return decodeURIComponent(m[1]); } catch (e) { return m[1]; } }));
     for (const k of keys) { if (!users.has(k)) users.set(k, []); users.get(k).push(it); }
   }
   // Safety: with no shared post data to compare against, never treat files as unused.
@@ -1451,6 +1453,12 @@ async function sendPublishJobs(env, { item, platforms, origin, userId, trigger }
     if (!v) { results.push({ platform, skipped: "This post isn't set up for " + PLATFORM_NAMES[platform] + "." }); continue; }
     if (v.publishStatus === "published") { results.push({ platform, skipped: "Already published." }); continue; }
     // Make can't post stories (its Instagram app has no story module) — sending one would post it as a normal reel/post.
+    if (photos && (platform === "instagram" || platform === "facebook")) {
+      // Make fetches every photo by link — a missing one fails the whole post with a vague error, so say which.
+      const missing = [];
+      for (const [n, g] of item.media.gallery.entries()) { const k = mediaKeyOf(g && g.fileUrl); if (k && !(await env.MEDIA.head(k))) missing.push(n + 1); }
+      if (missing.length) { results.push({ platform, skipped: "Photo " + missing.join(", ") + " of this post is no longer in Creator Studio — open the post, Edit & resubmit, and add the photos again." }); continue; }
+    }
     if (photos && platform === "youtube") { results.push({ platform, skipped: "YouTube can't post photos — this is a multi-photo post." }); continue; }
     if (isStory(item, v)) { results.push({ platform, skipped: "Stories can't be posted through Make — post it from the " + PLATFORM_NAMES[platform] + " app, then mark it as published." }); continue; }
     if (!mediaUrl) { results.push({ platform, skipped: "The video or photo hasn't finished uploading to Creator Studio." }); continue; }

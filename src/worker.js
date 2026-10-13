@@ -1143,11 +1143,8 @@ async function postWorkflowUpdates(env, body) {
     const note = a.comment ? `\n“${String(a.comment).slice(0, 300)}”` : "";
     // Who needs to act: the approver for anything waiting on review, the creator for decisions on their post.
     let text = null, notify = [];
-    const approverOrReviewers = () => {
-      const ap = byId.get(item.approver);
-      if (ap && ap.active && ap.id !== a.user) return [ap.id];
-      return reviewers.filter((r) => r.id !== a.user).map((r) => r.id);
-    };
+    // Two-person approval: every approver (Cyrus and Yan Yan) is asked, whoever the post was assigned to.
+    const approverOrReviewers = () => reviewers.filter((r) => r.id !== a.user).map((r) => r.id);
     const creator = item.creator && item.creator !== a.user ? [item.creator] : [];
     if (a.type === "created" && /submitted/i.test(a.detail || "")) {
       notify = approverOrReviewers();
@@ -1155,9 +1152,14 @@ async function postWorkflowUpdates(env, body) {
     } else if (a.type === "submitted") {
       notify = approverOrReviewers();
       text = `🔁 ${actor} resubmitted “${title}”${a.version ? " as v" + a.version : ""} after changes.${note}`;
+    } else if (a.type === "approval") {
+      // First of the two approvals: tell whoever still has to approve.
+      const left = (Array.isArray(a.waitingFor) ? a.waitingFor : []).filter((id) => id !== a.user && byId.has(id));
+      notify = left;
+      text = `👍 ${actor} approved “${title}” — it still needs ${left.length ? left.map(nameOf).join(" and ") : "the other approver"} to approve before it can go out.`;
     } else if (a.type === "approved") {
       notify = creator;
-      text = `✅ ${actor} approved “${title}”.`;
+      text = reviewers.length > 1 ? `✅ “${title}” is approved — ${actor} gave the final approval, so both approvals are in.` : `✅ ${actor} approved “${title}”.`;
     } else if (a.type === "changes_requested") {
       notify = creator;
       text = `✏️ ${actor} asked for changes on “${title}”.${note}`;
@@ -1177,7 +1179,7 @@ async function postWorkflowUpdates(env, body) {
     ).bind(text, JSON.stringify(mentions), item.id, new Date().toISOString(), a.id).run();
     // Only the save that actually posted the update sends the push, so nobody gets the same alert twice.
     if (res.meta && res.meta.changes > 0 && mentions.length) {
-      const tab = { created: "review", submitted: "review", changes_requested: "changes", rejected: "rejected" }[a.type];
+      const tab = { created: "review", submitted: "review", approval: "review", changes_requested: "changes", rejected: "rejected" }[a.type];
       await pushToUsers(env, mentions, { title: "Creator Studio", body: alert.slice(0, 220), url: tab ? "/#/queue?tab=" + tab : "/#/chat", tag: "post-" + item.id });
     }
   }
@@ -1679,7 +1681,8 @@ async function remindPendingApprovals(env) {
     if (!Number.isFinite(at) || now < at - REMIND_BEFORE_MS || now > at + 30 * 60e3) continue;
     if (!team) team = (await listTeam(env)).members;
     const reviewers = team.filter((m) => m.active && (m.role === "approver" || m.role === "admin"));
-    const who = (item.approver && item.approver !== "any" ? team.filter((m) => m.id === item.approver && m.active) : reviewers).map((m) => m.id);
+    // Two-person approval: remind each approver who hasn't approved the waiting platforms yet.
+    const who = reviewers.filter((m) => waiting.some(([, v]) => !(v.approvals || {})[m.id])).map((m) => m.id);
     if (!who.length) continue;
     const byId = new Map(team.map((m) => [m.id, m]));
     const when = new Date(at).toLocaleString("en-GB", { timeZone: "Europe/London", weekday: "short", hour: "2-digit", minute: "2-digit" });
@@ -1835,9 +1838,10 @@ How to answer:
 
 What Creator Studio can do (use this to explain how things work):
 - Dashboard: counts of posts awaiting approval, changes requested, scheduled this week, published, failed; views and engagement from real stats (last 30 days); Smart insights (Claude's read of the pipeline); upcoming content; recent approvals. Tiles are clickable.
+- Two-person approval: every post needs BOTH Cyrus and Yan Yan to approve. The first approval is recorded ("Yan Yan ✓ · waiting for Cyrus") and the post stays in "To review" for the other approver; only the second approval makes it Approved and schedules it. Either approver can Reject or Request Edits on their own, which clears approvals; resubmitting starts approvals again.
 - Approval reminders: if a post, reel or story is still waiting for approval 1 hour before its publish time, Creator Studio @mentions the assigned approver(s) in Team Chat and sends a phone/desktop alert — once per publish time. Approved, sent-back or rejected posts aren't reminded.
 - Multi-photo (carousel) posts: in Create Content pick several photos at once (up to 10), or tap "Add photo" / pick more from the library under "Photos in this post"; reorder with ‹ and remove with ✕. Photos are re-saved as JPEG and trimmed to Instagram's 4:5–1.91:1 shape. Make posts them as an Instagram carousel and a Facebook multi-photo post; Google Business gets the first photo; YouTube can't post photos; TikTok photo posts go up from the TikTok app.
-- Create Content: first pick the content style — "Post / Reel" or "Story" (full-screen 9:16, Instagram/Facebook/TikTok only, with an optional link sticker and posting notes instead of a caption; approvers see it as a real story; Make can't post stories, so after approval someone posts it from the phone app and uses "Mark as published"). Then upload a video/photo, or pick one from the Content Library by barcode (e.g. G219). Choose platforms, write a caption per platform, pick a campaign (or "No campaign"), priority, and the approver — one person, or "Cyrus or Yan Yan (either can approve)" (the default: both are notified and whoever decides first moves it on). Then submit for approval, or "Save as Draft" (drafts show in the Content Calendar and can be opened, finished and submitted later). To delete a post: open it (tap it in the Calendar, Approval Queue or Dashboard) and tap "Delete draft" / "Delete post" at the top, then confirm. Creators can delete their own post while it is a draft, sent back for changes, or rejected; admins (Cyrus, Yan Yan) can delete any post that is not published. Published posts can\'t be deleted in Creator Studio (delete them in the social app itself).
+- Create Content: first pick the content style — "Post / Reel" or "Story" (full-screen 9:16, Instagram/Facebook/TikTok only, with an optional link sticker and posting notes instead of a caption; approvers see it as a real story; Make can't post stories, so after approval someone posts it from the phone app and uses "Mark as published"). Then upload a video/photo, or pick one from the Content Library by barcode (e.g. G219). Choose platforms, write a caption per platform, pick a campaign (or "No campaign"), priority, and the approvers — every post needs both Cyrus and Yan Yan to approve. Then submit for approval, or "Save as Draft" (drafts show in the Content Calendar and can be opened, finished and submitted later). To delete a post: open it (tap it in the Calendar, Approval Queue or Dashboard) and tap "Delete draft" / "Delete post" at the top, then confirm. Creators can delete their own post while it is a draft, sent back for changes, or rejected; admins (Cyrus, Yan Yan) can delete any post that is not published. Published posts can\'t be deleted in Creator Studio (delete them in the social app itself).
 - Content Library: the Google Drive folder "Sanjugo Marketing Contents Final" (about 1,600 files). File names end with a barcode like G219; search by barcode, dish or stage, watch videos, see where a file has already been used (post, platform, date), and start a post from it.
 - Approval Queue: tabs To review / Needs changes / Rejected. Posts are previewed exactly as they'll look on each app (Reels, TikTok, Shorts, Facebook, Google Business), with full-screen playback. Decide with the buttons under each post (no swiping): ✓ Approve, ✕ Reject, or Request Edits for changes (with feedback tags and a due date); each asks for confirmation. "Full package" reviews the whole post; "Per platform" reviews each platform separately. Undo Last Decision exists. Creators fix posts from Needs changes / Rejected and resubmit, optionally telling the approver in chat. Approved posts are auto-placed into the next free slot of the recurring calendar template (Settings) if they have no time.
 - Content Calendar: month, week and list views; filter by platform, campaign, status; tap a date to see that day or create content for it; drag or edit times.
@@ -1854,7 +1858,7 @@ async function botSnapshot(env, askerId) {
   const state = await readState(env);
   const { members } = await listTeam(env);
   const byId = new Map(members.map((m) => [m.id, m]));
-  const name = (id) => (id === "any" ? "Cyrus or Yan Yan (either)" : (byId.get(id) || {}).name || id || "—");
+  const name = (id) => (id === "any" ? "Cyrus and Yan Yan (both must approve)" : (byId.get(id) || {}).name || id || "—");
   const items = Array.isArray(state.contentItems) ? state.contentItems : [];
   const counts = {};
   for (const i of items) counts[i.status] = (counts[i.status] || 0) + 1;

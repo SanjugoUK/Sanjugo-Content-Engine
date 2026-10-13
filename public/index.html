@@ -195,7 +195,7 @@ function applyTeam(members){
   if(next.length) USERS.splice(0, USERS.length, ...next);
 }
 const activeUsers = () => USERS.filter(u=>u.active!==false);
-// A post's approver is one person's id, or ANY_APPROVER — "any approver or admin can approve it" (Cyrus or Yan Yan).
+// A post's approver field is ANY_APPROVER for new posts; since Oct 2026 every post needs ALL approvers (Cyrus and Yan Yan) — see requiredApprovers().
 const ANY_APPROVER = "any";
 // Average time from a post being sent for approval to this person's decision on it, from the real activity log.
 function reviewTurnaround(log, userId){
@@ -234,14 +234,29 @@ function canDeleteContent(item, userId){
 }
 const isReviewer = u => !!u && u.active!==false && (u.role==="approver" || u.role==="admin");
 const reviewers = () => activeUsers().filter(isReviewer);
-function approversOf(item){ return item && item.approver===ANY_APPROVER ? reviewers() : USERS.filter(u=>item && u.id===item.approver); }
+// Every post needs approval from everyone who approves (Cyrus and Yan Yan) — two-person sign-off.
+const requiredApprovers = () => reviewers().map(u=>u.id);
+function approversOf(item){ return reviewers(); }
+// "Yan Yan ✓ · waiting for Cyrus" — who has approved a waiting post so far.
+function approvalProgress(item){
+  const req = reviewers(); const vs = Object.values(item.variants||{});
+  const done = req.filter(u=> vs.length && vs.every(v=> v.status==="approved" || (v.approvals||{})[u.id]));
+  const left = req.filter(u=> !done.includes(u));
+  if(!done.length) return "0 of "+req.length+" — waiting for "+left.map(u=>u.name).join(" and ");
+  return done.map(u=>u.name+" ✓").join(" · ") + (left.length? " · waiting for "+left.map(u=>u.name).join(" and ") : "");
+}
+// Who still has to approve a waiting post (across the platforms that are still pending).
+function stillToApprove(item){
+  if(!item || item.status!=="submitted") return [];
+  const pend = Object.values(item.variants||{}).filter(v=>v && v.status!=="approved" && v.status!=="rejected" && v.status!=="changes_requested");
+  return reviewers().filter(u=> pend.some(v=> !(v.approvals||{})[u.id]));
+}
 function approverName(item){
-  if(item && item.approver===ANY_APPROVER){ const n = reviewers().map(u=>u.name); return n.length ? n.join(" or ") : "Any approver"; }
-  const u = USERS.find(u=>item && u.id===item.approver); return u ? u.name : "—";
+  const n = reviewers().map(u=>u.name); return n.length ? n.join(" and ") : "—";
 }
 function approverOptions(){
   const list = reviewers();
-  return [...(list.length>1 ? [{value:ANY_APPROVER, label:list.map(u=>u.name).join(" or ")+" (either can approve)"}] : []), ...list.map(u=>({value:u.id, label:u.name}))];
+  return [{value:ANY_APPROVER, label: list.length>1 ? list.map(u=>u.name).join(" and ")+" (both must approve)" : (list[0]||{}).name || "Approver"}];
 }
 const BRANDS = [
   {id:"sanjugo", name:"Sanjugo", color:"#D9642A", logo:true, accounts:{instagram:"@sanjugo", facebook:"Sanjugo", tiktok:"@sanjugo", youtube:"Sanjugo", gbp:"Sanjugo — Shoreditch, Angel, Victoria"}},
@@ -904,50 +919,71 @@ function baseReducer(state, action){
     }
 
     case "SUBMIT_DECISION": {
+      // Two-person approval: a post is Approved only once every required approver (Cyrus and Yan Yan) has approved it.
+      // The first approval is recorded on each platform (variant.approvals) and the post stays waiting for the other.
+      // Reject or Request Edits from either approver takes effect straight away and clears any approvals.
       const {contentId, platform, decision, feedback, tags, dueDate} = action;
       const item = state.contentItems.find(i=>i.id===contentId);
       if(!item) return state;
+      const me = state.currentUserId, now = new Date().toISOString();
+      const required = requiredApprovers();
       const prevItemStatus = item.status;
       const prevVariants = JSON.parse(JSON.stringify(item.variants));
       const statusMap = {approved:"approved", rejected:"rejected", changes_requested:"changes_requested"};
-      const newStatus = statusMap[decision];
       const variants = {...item.variants};
       let autoFilled = [];
-      Object.keys(variants).forEach(p=>{
-        if(!platform || p===platform){
-          variants[p] = {...variants[p], status:newStatus};
-          if(decision==="approved"){
+      const targets = Object.keys(variants).filter(p=> !platform || p===platform);
+      targets.forEach(p=>{
+        const v = variants[p];
+        if(decision==="approved"){
+          if(v.status==="approved") return;
+          const approvals = {...(v.approvals||{}), [me]: now};
+          const done = required.every(id=>approvals[id]);
+          variants[p] = {...v, approvals, status: done? "approved" : "submitted"};
+          if(done){
             if(!variants[p].scheduledAt){
               const slot = findTemplateSlot(item, p, state.contentItems, state.calendarTemplate);
               if(slot){ variants[p] = {...variants[p], scheduledAt:slot.date, templateRuleId:slot.ruleId}; autoFilled.push(PLATFORM_META[p].label); }
             }
             variants[p].publishStatus = variants[p].scheduledAt? "scheduled" : "not_scheduled";
           }
+        } else {
+          variants[p] = {...v, status: statusMap[decision], approvals:{}};
         }
       });
-      const nextVersion = item.currentVersion + (decision!=="approved"?0:0);
+      const allVs = Object.values(variants);
+      const fullyApproved = decision==="approved" && targets.every(p=>variants[p].status==="approved");
+      const itemStatus = decision!=="approved" ? (platform? item.status : statusMap[decision])
+        : allVs.every(v=>v.status==="approved") ? "approved" : item.status;
+      const waitingFor = decision==="approved" && !fullyApproved
+        ? required.filter(id=> targets.some(p=> !(variants[p].approvals||{})[id])) : [];
+      const waitingNames = waitingFor.map(id=>(USERS.find(u=>u.id===id)||{}).name).filter(Boolean);
       const versionEntry = {
-        version: item.currentVersion, editor: USERS.find(u=>u.id===item.creator).name, date: new Date().toISOString(),
+        version: item.currentVersion, editor: USERS.find(u=>u.id===item.creator).name, date: now,
         changes: platform? `Reviewed ${PLATFORM_META[platform].label} variant` : "Reviewed full package",
-        decision: decision==="approved"?"Approved": decision==="rejected"?"Rejected":"Changes Requested",
+        decision: decision==="approved" ? (fullyApproved? "Approved" : "Approved by "+((USERS.find(u=>u.id===me)||{}).name||"one approver")+" — waiting for "+waitingNames.join(" and "))
+          : decision==="rejected"?"Rejected":"Changes Requested",
         feedback: feedback||null,
       };
       const versions = [...item.versions.slice(0,-1), versionEntry];
       const patch = {
-        status: platform? item.status : newStatus,
-        variants,
-        versions,
-        lastFeedback: (decision!=="approved")? {by: state.currentUserId, at:new Date().toISOString(), tags: tags||[], text: feedback||""} : item.lastFeedback,
+        status: itemStatus, variants, versions,
+        lastFeedback: (decision!=="approved")? {by: me, at: now, tags: tags||[], text: feedback||""} : item.lastFeedback,
       };
       const items = state.contentItems.map(i=> i.id===contentId? {...i, ...patch} : i);
+      const where = platform? " — "+PLATFORM_META[platform].label : " — full package";
       const log = {
-        id:uid("act"), at:new Date().toISOString(), contentId, contentTitle:item.title, user: state.currentUserId,
-        type: decision, version:item.currentVersion,
-        detail: (decision==="approved"?"Approved":decision==="rejected"?"Rejected":"Requested changes") + (platform? " — "+PLATFORM_META[platform].label : " — full package") + (dueDate? ` (due ${fmtDate(dueDate)})` : ""),
-        comment: feedback||null,
+        id:uid("act"), at: now, contentId, contentTitle:item.title, user: me,
+        type: decision==="approved" && !fullyApproved ? "approval" : decision, version:item.currentVersion,
+        detail: decision==="approved"
+          ? (fullyApproved? "Approved"+where+(required.length>1? " (all approvals in)" : "") : "Approved"+where+" — waiting for "+waitingNames.join(" and "))
+          : (decision==="rejected"?"Rejected":"Requested changes") + where + (dueDate? ` (due ${fmtDate(dueDate)})` : ""),
+        comment: feedback||null, waitingFor,
       };
       const historyEntry = {id: log.id, at: log.at, contentId, platform, prevItemStatus, prevVariants, decision};
-      const approvedMsg = "Approved — "+item.title + (autoFilled.length? " · auto-scheduled into next "+autoFilled.join("/")+" slot" : (decision==="approved"? " · waiting for an empty calendar slot" : ""));
+      const approvedMsg = fullyApproved
+        ? "Approved — "+item.title + (autoFilled.length? " · auto-scheduled into next "+autoFilled.join("/")+" slot" : "")
+        : "Your approval is in — waiting for "+waitingNames.join(" and ");
       return {...state, contentItems: items, activityLog:[log, ...state.activityLog], decisionHistory:[...state.decisionHistory, historyEntry],
         toasts:[...state.toasts, {id:uid("toast"), message: decision==="approved"? approvedMsg : decision==="rejected"? "Rejected — "+item.title : "Changes requested — "+item.title, variant: decision==="approved"?"ok": decision==="rejected"?"danger":"warn"}]};
     }
@@ -1042,7 +1078,7 @@ function baseReducer(state, action){
       const variants = {...item.variants};
       Object.entries(patch.variants||{}).forEach(([p,v])=>{ if(!variants[p]) return;
         const moved = "scheduledAt" in v && (v.scheduledAt||null) !== (variants[p].scheduledAt||null);
-        variants[p] = {...variants[p], ...v, ...(moved? {templateRuleId:null} : {}), ...(resubmit? {status:"submitted"} : {})}; });
+        variants[p] = {...variants[p], ...v, ...(moved? {templateRuleId:null} : {}), ...(resubmit? {status:"submitted", approvals:{}} : {})}; });
       if(patch.media && variants){
         // Photos replaced: label each platform's version as a carousel (or back to its normal type).
         const multi = Array.isArray(patch.media.gallery) && patch.media.gallery.length>1;
@@ -1097,7 +1133,7 @@ function Sidebar({open, onClose}){
   const [brandMenu, setBrandMenu] = useState(false);
   const user = USERS.find(u=>u.id===state.currentUserId);
   const perms = PERMS[user.role];
-  const pendingCount = perms.approve ? state.contentItems.filter(i=>i.status==="submitted").length
+  const pendingCount = perms.approve ? buildQueue(state.contentItems, "package", {}, user.id).length
     : state.contentItems.filter(i=>i.status==="changes_requested" && i.creator===user.id).length;
   const brand = state.currentBrandId==="all" ? {name:"All Brands"} : BRANDS.find(b=>b.id===state.currentBrandId);
 
@@ -1755,7 +1791,7 @@ function ContentDetailDrawer({item, onClose}){
             )}
             <div className="cf-field-grid" style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:12}}>
               <InfoField label="Creator" value={creator.name}/>
-              <InfoField label="Approver" value={approverName(item)}/>
+              <InfoField label="Approvers" value={approverName(item) + (item.status==="submitted"? " — "+approvalProgress(item) : "")}/>
               <InfoField label="Content pillar" value={item.pillar}/>
               <InfoField label="Created" value={fmtDate(item.createdAt)}/>
               <InfoField label="Aspect ratio" value={item.media.aspectRatio}/>
@@ -1934,8 +1970,11 @@ function DecisionModal({pending, onCancel, onConfirm}){
 }
 
 /* ============================== APPROVAL QUEUE ============================== */
-function buildQueue(items, mode, filters){
+function buildQueue(items, mode, filters, me){
   let pool = items.filter(i=>i.status==="submitted");
+  const pendingVs = it => Object.entries(it.variants||{}).filter(([p,v])=> v && (v.status==="submitted" || !v.status));
+  // An approver's queue leaves out what they've already approved (it's waiting for the other approver).
+  if(me) pool = pool.filter(it=> pendingVs(it).some(([p,v])=> !(v.approvals||{})[me]));
   if(filters.brand) pool = pool.filter(i=>i.brand===filters.brand);
   if(filters.creator) pool = pool.filter(i=>i.creator===filters.creator);
   if(filters.campaign) pool = pool.filter(i=>matchCampaign(filters.campaign, i.campaign));
@@ -1949,7 +1988,7 @@ function buildQueue(items, mode, filters){
     .map(it=>({key:it.id, contentId:it.id, item:it, platform:null, t: Math.min(...it.platforms.map(p=>when((it.variants||{})[p]))), s: submittedAt(it)}))
     .sort(byDate);
   const flat = [];
-  pool.forEach(it=> it.platforms.forEach(p=> filters.platform && filters.platform!==p ? null : flat.push({key:it.id+"_"+p, contentId:it.id, item:it, platform:p, t: when((it.variants||{})[p]), s: submittedAt(it)})));
+  pool.forEach(it=> it.platforms.forEach(p=> (filters.platform && filters.platform!==p) || !pendingVs(it).some(([q])=>q===p) || (me && ((it.variants[p]||{}).approvals||{})[me]) ? null : flat.push({key:it.id+"_"+p, contentId:it.id, item:it, platform:p, t: when((it.variants||{})[p]), s: submittedAt(it)})));
   return flat.sort(byDate);
 }
 
@@ -2701,6 +2740,7 @@ function SwipeCard({entry, onDecision, onOpenDetails, isTop, narrow, paused, onI
           <span style={{color:"var(--ink-mute)"}}>Publishes</span><span style={{fontWeight:600}}>{(variant && variant.scheduledAt) ? fmtDateTime(variant.scheduledAt) : scheduledAt ? fmtDateTime(scheduledAt) : "Not scheduled"}</span>
           <span style={{color:"var(--ink-mute)"}}>Media</span><span style={{fontWeight:600}}>{item.media.type==="video" ? "Video" : galleryOf(item) ? galleryOf(item).length+" photos (carousel)" : "Image"}{item.media.duration ? " · "+item.media.duration+"s" : ""}{item.media.aspectRatio ? " · "+item.media.aspectRatio : ""}</span>
           <span style={{color:"var(--ink-mute)"}}>Version</span><span style={{fontWeight:600}}>v{item.currentVersion}</span>
+          {item.status==="submitted" && <><span style={{color:"var(--ink-mute)"}}>Approvals</span><span style={{fontWeight:600}}>{approvalProgress(item)}</span></>}
         </div>
         {warningList}
         <span style={{flex:1}}/>
@@ -2713,7 +2753,8 @@ function SwipeCard({entry, onDecision, onOpenDetails, isTop, narrow, paused, onI
 /* Approval Queue has three tabs: To review (approvers), Needs changes and Rejected (where creators fix and resubmit). */
 function QueueTabs({tab, setTab, canReview}){
   const {state} = useApp();
-  const count = (st, k) => state.contentItems.filter(i=>i.status===st && (k!=="waiting" || i.creator===state.currentUserId)).length;
+  const count = (st, k) => k==="review" ? buildQueue(state.contentItems, "package", {}, state.currentUserId).length
+    : state.contentItems.filter(i=>i.status===st && (k!=="waiting" || i.creator===state.currentUserId)).length;
   const tabs = [...(canReview? [["review","To review","submitted"]] : [["waiting","Waiting for approval","submitted"]]), ["changes","Needs changes","changes_requested"], ["rejected","Rejected","rejected"]];
   return (
     <div className="cf-noscrollbar" style={{display:"flex", gap:4, borderBottom:"1px solid var(--border)", marginBottom:16, overflowX:"auto"}}>
@@ -2964,7 +3005,7 @@ function ApprovalQueuePage(){
   const [immersive, setImmersive] = useState(null); // preferred platform while full-screen review is open
   const narrow = useIsNarrow(900);
 
-  const queue = useMemo(()=>buildQueue(state.contentItems, mode, filters), [state.contentItems, mode, filters]);
+  const queue = useMemo(()=>buildQueue(state.contentItems, mode, filters, state.currentUserId), [state.contentItems, mode, filters, state.currentUserId]);
   useEffect(()=>{ setReviewedKeys([]); }, [mode, JSON.stringify(filters)]);
   const remaining = queue.filter(e=>!reviewedKeys.includes(e.key));
   const reviewed = reviewedKeys.length;
@@ -4447,7 +4488,7 @@ function CreateContentPage(){
   const user = USERS.find(u=>u.id===state.currentUserId);
   const [step, setStep] = useState(0);
   const [form, setForm] = useState({
-    title:"", campaign: "", brand: BRANDS[0].id, pillar: PILLARS[0], creator: user.id, approver: reviewers().length>1 ? ANY_APPROVER : ((reviewers()[0]||USERS[0]).id), priority:"normal", notes:"",
+    title:"", campaign: "", brand: BRANDS[0].id, pillar: PILLARS[0], creator: user.id, approver: ANY_APPROVER, priority:"normal", notes:"",
     format:"post", mediaType:"video", aspectRatio:"9:16", duration:20, fileName:"", gallery:[], galleryStatus:"",
     platforms:["instagram"], scheduledAt:"", variants:{},
     ...(state.createPrefill || {}),

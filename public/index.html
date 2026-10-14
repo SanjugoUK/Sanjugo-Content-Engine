@@ -726,7 +726,14 @@ function savePersisted(state){
    every device and every teammate sees — lives in /api/state, backed by D1. We fetch it once on load and
    push the whole content-relevant slice back up (debounced) whenever it changes. */
 // Signed out while the app was open (2 days unused, password reset, removed): reload into the sign-in screen.
-function signedOutReload(res){ if(res && res.status===401){ try{ localStorage.removeItem(LS_KEY); }catch(e){} window.location.reload(); return true; } return false; }
+// Only when this page *was* signed in — on a fresh page that isn't, the sign-in screen handles it (reloading here
+// would loop forever).
+let SIGNED_IN = false;
+function signedOutReload(res){
+  if(!res || res.status!==401) return false;
+  if(SIGNED_IN){ SIGNED_IN = false; try{ localStorage.removeItem(LS_KEY); }catch(e){} window.location.reload(); }
+  return true;
+}
 async function fetchServerState(){
   try{
     const res = await fetch("/api/state");
@@ -6389,7 +6396,7 @@ function App(){
         const d = await r.json().catch(()=>({}));
         if(cancelled) return;
         if(r.status===401 || r.status===403) { dispatch({type:"SET_ME", me:null, lock:{code:d.code, message:d.error, signin:d.signin}}); dispatch({type:"BOOT_DONE"}); return; }
-        if(r.ok) dispatch({type:"SET_ME", me:d});
+        if(r.ok){ SIGNED_IN = !!(d && d.member); dispatch({type:"SET_ME", me:d}); }
         const t = await fetch("/api/team", {cache:"no-store"});
         if(t.ok && !cancelled){ const td = await t.json(); if(Array.isArray(td.members) && td.members.length) dispatch({type:"TEAM_LOADED", members:td.members}); }
       }catch(e){ /* offline or no server: keep the built-in team */ }

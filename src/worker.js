@@ -27,11 +27,28 @@ export default {
     if (url.pathname === "/api/make/callback") {
       try { return await makeRoute(request, env, url, viewer, ctx); } catch (e) { return json({ error: e.message || "Make error" }, e.status || 500); }
     }
+    // Make, Instagram, Facebook, YouTube and Google fetch post files by link when publishing — they can't sign in.
+    // These links are long random keys (R2 object / Drive file ids), so they're safe to leave unsigned.
+    const publicFile = request.method === "GET" && (/^\/api\/media\/.+/.test(url.pathname) || /^\/api\/library\/thumb\/[\w-]{10,}$/.test(url.pathname));
+    if (publicFile) {
+      const thumb = url.pathname.match(/^\/api\/library\/thumb\/([\w-]{10,})$/);
+      try { return thumb ? await libraryThumb(thumb[1], env, url.searchParams.get("s")) : await serveMedia(url.pathname.slice("/api/media/".length), request, env); }
+      catch (e) { return json({ error: e.message || "File error" }, e.status || 500); }
+    }
+    if (url.pathname === "/api/auth/login" && request.method === "POST") {
+      try { return await signIn(request, env); } catch (e) { return json({ error: e.message || "Sign-in failed" }, e.status || 500); }
+    }
+    if (url.pathname === "/api/auth/logout" && request.method === "POST") {
+      try { return await signOut(request, env); } catch (e) { return json({ error: e.message || "Sign-out failed" }, e.status || 500); }
+    }
     if (url.pathname.startsWith("/api/")) {
       try {
         viewer = await identify(request, env);
       } catch (e) {
-        return json({ error: e.message || "Sign-in check failed", code: e.code || "auth" }, e.status || 401);
+        return json({ error: e.message || "Sign-in check failed", code: e.code || "auth", signin: e.signin || null }, e.status || 401);
+      }
+      if (url.pathname === "/api/auth/password" && request.method === "POST") {
+        try { return json(await changeOwnPassword(request, env, viewer)); } catch (e) { return json({ error: e.message }, e.status || 500); }
       }
       if (url.pathname === "/api/me") return json(meResponse(viewer, request));
       if (url.pathname === "/api/team") {
@@ -932,6 +949,9 @@ async function ensureTeamTable(env) {
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS team_members (
     id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT, role TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1,
     added_at TEXT NOT NULL, added_by TEXT, last_seen TEXT)`).run();
+  for (const col of ["password_hash TEXT", "password_set_at TEXT"]) { try { await env.DB.prepare("ALTER TABLE team_members ADD COLUMN " + col).run(); } catch (e) { /* already there */ } }
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS sessions (
+    token_hash TEXT PRIMARY KEY, member_id TEXT NOT NULL, created_at TEXT NOT NULL, expires_at TEXT NOT NULL, last_seen TEXT, device TEXT)`).run();
   const n = await env.DB.prepare("SELECT COUNT(*) AS n FROM team_members").first();
   if (!n.n) {
     const now = new Date().toISOString();
@@ -941,7 +961,7 @@ async function ensureTeamTable(env) {
   }
   teamTableReady = true;
 }
-const memberOut = (r) => ({ id: r.id, name: r.name, email: r.email || "", role: r.role, active: !!r.active, addedAt: r.added_at, lastSeen: r.last_seen || null });
+const memberOut = (r) => ({ id: r.id, name: r.name, email: r.email || "", role: r.role, active: !!r.active, addedAt: r.added_at, lastSeen: r.last_seen || null, hasPassword: !!r.password_hash });
 
 async function listTeam(env) {
   await ensureTeamTable(env);
@@ -975,13 +995,91 @@ async function saveMember(request, env, viewer) {
     const others = await env.DB.prepare("SELECT COUNT(*) AS n FROM team_members WHERE role = 'admin' AND active = 1 AND id != ?1").bind(id).first();
     if (!others.n) throw new HttpError(400, "Keep at least one active admin.");
   }
+  const password = b.password == null ? null : String(b.password);
+  if (password !== null && password.length < 8) throw new HttpError(400, "Passwords need at least 8 characters.");
+  if (password !== null && !email) throw new HttpError(400, "Add an email first — people sign in with their email and password.");
   if (existing) {
     await env.DB.prepare("UPDATE team_members SET name = ?2, email = ?3, role = ?4, active = ?5 WHERE id = ?1").bind(id, name, email || null, role, active).run();
   } else {
     await env.DB.prepare("INSERT INTO team_members (id, name, email, role, active, added_at, added_by) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)")
       .bind(id, name, email || null, role, active, new Date().toISOString(), viewer.member ? viewer.member.email : null).run();
   }
+  if (password !== null) {
+    await env.DB.prepare("UPDATE team_members SET password_hash = ?2, password_set_at = ?3 WHERE id = ?1").bind(id, await hashPassword(password), new Date().toISOString()).run();
+    await env.DB.prepare("DELETE FROM sessions WHERE member_id = ?1").bind(id).run(); // a reset signs them out everywhere
+    if (email) await env.DB.prepare("DELETE FROM app_kv WHERE k = ?1").bind("signin_fail_" + (await sha256hex(email)).slice(0, 24)).run(); // and lifts a too-many-tries lock
+  }
+  if (!active) await env.DB.prepare("DELETE FROM sessions WHERE member_id = ?1").bind(id).run();
   return { member: memberOut(await env.DB.prepare("SELECT * FROM team_members WHERE id = ?1").bind(id).first()) };
+}
+
+// ---- Built-in sign-in (SIGNIN = "password"): email + password, then a 60-day session cookie per device.
+// Passwords are stored only as salted PBKDF2-SHA256 hashes; sessions are random tokens stored hashed, so a copy
+// of the database can't be used to sign in. Admins set/reset passwords in Settings → Team & access.
+const SESSION_COOKIE = "cs_session", SESSION_DAYS = 60, PBKDF2_ITER = 100000;
+const b64 = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf)));
+const unb64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+async function pbkdf2(password, salt, iter) {
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
+  return crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt, iterations: iter }, key, 256);
+}
+async function hashPassword(password) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  return `pbkdf2$${PBKDF2_ITER}$${b64(salt)}$${b64(await pbkdf2(password, salt, PBKDF2_ITER))}`;
+}
+async function checkPassword(password, stored) {
+  const [kind, iter, salt, hash] = String(stored || "").split("$");
+  if (kind !== "pbkdf2" || !hash) return false;
+  const got = new Uint8Array(await pbkdf2(password, unb64(salt), Number(iter)));
+  const want = unb64(hash);
+  if (got.length !== want.length) return false;
+  let diff = 0; for (let i = 0; i < got.length; i++) diff |= got[i] ^ want[i];
+  return diff === 0;
+}
+const sha256hex = async (s) => [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)))].map((b) => b.toString(16).padStart(2, "0")).join("");
+const sessionCookie = (token, maxAge) => `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAge}`;
+
+async function signIn(request, env) {
+  const b = await request.json().catch(() => ({}));
+  const email = String(b.email || "").trim().toLowerCase();
+  const password = String(b.password || "");
+  if (!email || !password) throw new HttpError(400, "Enter your email and password.");
+  await ensureTeamTable(env);
+  // Slow down guessing: 8 wrong tries for an email locks it for 15 minutes.
+  const lockKey = "signin_fail_" + (await sha256hex(email)).slice(0, 24);
+  const fails = (await kvGet(env, lockKey)) || { n: 0, since: Date.now() };
+  if (Date.now() - fails.since > 15 * 60e3) { fails.n = 0; fails.since = Date.now(); }
+  if (fails.n >= 8) throw new HttpError(429, "Too many tries — wait 15 minutes, or ask an admin to reset your password.");
+  const row = await env.DB.prepare("SELECT * FROM team_members WHERE email = ?1").bind(email).first();
+  const ok = row && row.active && row.password_hash && await checkPassword(password, row.password_hash);
+  if (!ok) {
+    fails.n++; await kvSet(env, lockKey, fails);
+    throw new HttpError(401, row && row.active && !row.password_hash ? "No password has been set for this email yet — ask an admin." : "That email and password don't match.");
+  }
+  await kvSet(env, lockKey, { n: 0, since: Date.now() });
+  const token = b64(crypto.getRandomValues(new Uint8Array(32))).replace(/[+/=]/g, (c) => ({ "+": "-", "/": "_", "=": "" }[c]));
+  const now = new Date();
+  await env.DB.prepare("INSERT INTO sessions (token_hash, member_id, created_at, expires_at, last_seen, device) VALUES (?1, ?2, ?3, ?4, ?3, ?5)")
+    .bind(await sha256hex(token), row.id, now.toISOString(), new Date(now.getTime() + SESSION_DAYS * 86400e3).toISOString(), String(request.headers.get("user-agent") || "").slice(0, 160)).run();
+  return new Response(JSON.stringify({ ok: true, member: memberOut(row) }), { headers: { "Content-Type": "application/json", "Set-Cookie": sessionCookie(token, SESSION_DAYS * 86400) } });
+}
+async function signOut(request, env) {
+  const token = cookie(request, SESSION_COOKIE);
+  if (token) { await ensureTeamTable(env); await env.DB.prepare("DELETE FROM sessions WHERE token_hash = ?1").bind(await sha256hex(token)).run(); }
+  return new Response(JSON.stringify({ ok: true }), { headers: { "Content-Type": "application/json", "Set-Cookie": sessionCookie("", 0) } });
+}
+async function changeOwnPassword(request, env, viewer) {
+  const b = await request.json().catch(() => ({}));
+  if (!viewer.member) throw new HttpError(401, "Please sign in again.");
+  const row = await env.DB.prepare("SELECT * FROM team_members WHERE id = ?1").bind(viewer.member.id).first();
+  if (row.password_hash && !(await checkPassword(String(b.current || ""), row.password_hash))) throw new HttpError(403, "Your current password isn't right.");
+  const next = String(b.next || "");
+  if (next.length < 8) throw new HttpError(400, "Passwords need at least 8 characters.");
+  await env.DB.prepare("UPDATE team_members SET password_hash = ?2, password_set_at = ?3 WHERE id = ?1").bind(row.id, await hashPassword(next), new Date().toISOString()).run();
+  // Stay signed in here; sign out every other device.
+  const mine = cookie(request, SESSION_COOKIE);
+  await env.DB.prepare("DELETE FROM sessions WHERE member_id = ?1 AND token_hash != ?2").bind(row.id, mine ? await sha256hex(mine) : "").run();
+  return { ok: true };
 }
 
 // ---- Cloudflare Access token check (RS256 JWT signed by the team's Access certs)
@@ -1020,6 +1118,21 @@ async function verifyAccessJwt(token, env) {
 }
 
 async function identify(request, env) {
+  if (env.SIGNIN === "password") {
+    const token = cookie(request, SESSION_COOKIE);
+    const signedOut = () => { const e = new HttpError(401, "Please sign in."); e.code = "signed_out"; e.signin = "password"; return e; };
+    if (!token) throw signedOut();
+    await ensureTeamTable(env);
+    const sess = await env.DB.prepare("SELECT * FROM sessions WHERE token_hash = ?1").bind(await sha256hex(token)).first();
+    if (!sess || Date.parse(sess.expires_at) < Date.now()) throw signedOut();
+    const row = await env.DB.prepare("SELECT * FROM team_members WHERE id = ?1").bind(sess.member_id).first();
+    if (!row || !row.active) throw signedOut();
+    if (!sess.last_seen || Date.now() - Date.parse(sess.last_seen) > 3600e3) {
+      await env.DB.prepare("UPDATE sessions SET last_seen = ?2 WHERE token_hash = ?1").bind(sess.token_hash, new Date().toISOString()).run();
+      await env.DB.prepare("UPDATE team_members SET last_seen = ?2 WHERE id = ?1").bind(row.id, new Date().toISOString()).run();
+    }
+    return { accessEnabled: true, signin: "password", email: row.email, member: memberOut(row) };
+  }
   if (!env.ACCESS_TEAM_DOMAIN || !env.ACCESS_AUD) return { accessEnabled: false, member: null };
   const token = request.headers.get("Cf-Access-Jwt-Assertion") || cookie(request, "CF_Authorization");
   const claims = token ? await verifyAccessJwt(token, env) : null;
@@ -1044,8 +1157,9 @@ async function identify(request, env) {
 function meResponse(viewer, request) {
   return {
     accessEnabled: viewer.accessEnabled,
+    signin: viewer.signin || (viewer.accessEnabled ? "access" : null),
     member: viewer.member,
-    logoutUrl: viewer.accessEnabled ? new URL("/cdn-cgi/access/logout", request.url).toString() : null,
+    logoutUrl: viewer.signin === "password" ? null : viewer.accessEnabled ? new URL("/cdn-cgi/access/logout", request.url).toString() : null,
   };
 }
 

@@ -1182,7 +1182,9 @@ function Sidebar({open, onClose}){
               <div style={{color:"var(--sidebar-title)", fontSize:13, fontWeight:600, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>{user.name}</div>
               <div style={{color:"var(--sidebar-text-dim)", fontSize:11, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>{ROLE_META[user.role].label} · {state.me.member && state.me.member.email}</div>
             </div>
-            <a href={state.me.logoutUrl || "/cdn-cgi/access/logout"} title="Sign out" style={{color:"var(--sidebar-text-dim)", fontSize:11.5, fontWeight:600, textDecoration:"none"}}>Sign out</a>
+            {state.me.signin==="password"
+              ? <button onClick={signOutNow} title="Sign out" style={{border:"none", background:"none", padding:0, cursor:"pointer", color:"var(--sidebar-text-dim)", fontSize:11.5, fontWeight:600}}>Sign out</button>
+              : <a href={state.me.logoutUrl || "/cdn-cgi/access/logout"} title="Sign out" style={{color:"var(--sidebar-text-dim)", fontSize:11.5, fontWeight:600, textDecoration:"none"}}>Sign out</a>}
           </div>
         ) : <>
         <button onClick={()=>setUserMenu(v=>!v)} style={{width:"100%", display:"flex", alignItems:"center", gap:10, padding:"8px", borderRadius:10, background:"var(--sidebar-2)", border:"1px solid var(--sidebar-line)", cursor:"pointer"}}>
@@ -4276,6 +4278,32 @@ function ConfirmButton({children, confirmLabel, onConfirm, disabled, size="sm", 
 
 /* Settings → Team & access: add a new hire by email, change roles, remove people. With sign-in on, the list is
    the guest list — only these emails get past the one-time-code sign-in. */
+/* Admin sets or resets someone's sign-in password. It's shown once so it can be passed on; they can change it in Settings. */
+function PasswordButton({member, onSave, disabled}){
+  const [open, setOpen] = useState(false);
+  const [pw, setPw] = useState("");
+  const [show, setShow] = useState(true);
+  const suggest = ()=>{ const w = ["sushi","maki","wasabi","nori","ramen","matcha","tempura","sake","yuzu","miso"]; const a = crypto.getRandomValues(new Uint32Array(3)); return w[a[0]%w.length]+"-"+w[a[1]%w.length]+"-"+(1000+a[2]%9000); };
+  return <>
+    <Button variant="ghost" size="sm" disabled={disabled || !member.email} title={!member.email? "Add their email first" : ""} onClick={()=>{ setPw(suggest()); setOpen(true); }}>{member.hasPassword? "Reset password" : "Set password"}</Button>
+    <Modal open={open} onClose={()=>setOpen(false)} width={400}>
+      <div style={{padding:20}}>
+        <div style={{fontSize:16, fontWeight:600, marginBottom:4}}>{member.hasPassword? "Reset" : "Set"} {member.name}'s password</div>
+        <div style={{fontSize:12.5, color:"var(--ink-soft)", lineHeight:1.5, marginBottom:12}}>They sign in with <strong>{member.email}</strong> and this password, and can change it in Settings. {member.hasPassword? "Resetting signs them out on every device." : ""}</div>
+        <div style={{display:"flex", gap:6}}>
+          <input value={pw} onChange={e=>setPw(e.target.value)} type={show? "text" : "password"} autoComplete="new-password" style={{flex:1, padding:"9px 11px", borderRadius:8, border:"1px solid var(--border)", fontSize:14, background:"var(--surface)", color:"var(--ink)", fontFamily:"ui-monospace, Menlo, monospace"}}/>
+          <Button variant="ghost" size="sm" onClick={()=>setShow(v=>!v)}>{show? "Hide" : "Show"}</Button>
+        </div>
+        <div style={{fontSize:11.5, color: pw.length<8? "var(--red)" : "var(--ink-mute)", marginTop:6}}>{pw.length<8? "At least 8 characters." : "Copy it before saving — it won't be shown again."}</div>
+        <div style={{display:"flex", gap:8, justifyContent:"flex-end", marginTop:16}}>
+          <Button variant="ghost" onClick={()=>{ try{ navigator.clipboard.writeText(pw); }catch(e){} }}>Copy</Button>
+          <Button variant="primary" disabled={pw.length<8} onClick={async()=>{ const ok = await onSave(pw); if(ok) setOpen(false); }}>Save password</Button>
+        </div>
+      </div>
+    </Modal>
+  </>;
+}
+
 function TeamAccessSettings(){
   const {state, dispatch} = useApp();
   const [members, setMembers] = useState(null);
@@ -4315,7 +4343,7 @@ function TeamAccessSettings(){
       <div style={{display:"flex", gap:10, alignItems:"flex-start", padding:"10px 12px", borderRadius:8, background: accessOn? "var(--green-soft)" : "var(--amber-soft)", fontSize:12.5, lineHeight:1.55, marginBottom:14}}>
         <span style={{width:8, height:8, borderRadius:99, marginTop:6, flexShrink:0, background: accessOn? "var(--green)" : "var(--amber)"}}/>
         {accessOn
-          ? <span><strong>Sign-in is on.</strong> Only the active people below can open Creator Studio. They sign in with their email and a one-time code sent to it. Signed in as <strong>{state.me.member && state.me.member.email}</strong>.</span>
+          ? <span><strong>Sign-in is on.</strong> Only the active people below can open Creator Studio. They sign in with their email and {state.me.signin==="password"? "the password set here" : "a one-time code sent to it"}. Signed in as <strong>{state.me.member && state.me.member.email}</strong>.</span>
           : <span><strong>Sign-in is off — anyone with the link can open Creator Studio.</strong> You can build the team list now; once sign-in is switched on, only these emails get in. {missingEmail>0 && <>Add an email for the {missingEmail} {missingEmail===1? "person":"people"} below without one first.</>}</span>}
       </div>
 
@@ -4327,6 +4355,8 @@ function TeamAccessSettings(){
             <Select value={m.role} onChange={v=>save({...m, role:v})} options={roleOpts} style={{width:"100%"}}/>
             <div style={{display:"flex", gap:6, alignItems:"center", justifyContent:"flex-end"}}>
               <span style={{fontSize:11, color:"var(--ink-mute)", whiteSpace:"nowrap"}} className="cf-hide-narrow">{m.lastSeen? "seen "+fmtDate(m.lastSeen,{day:"numeric",month:"short"}) : accessOn? "not signed in yet" : ""}</span>
+              {m.active && (m.hasPassword ? <Badge label="Password set" color="var(--green)" soft="var(--green-soft)"/> : <Badge label="No password" color="var(--amber)" soft="var(--amber-soft)"/>)}
+              {m.active && <PasswordButton member={m} disabled={busy} onSave={async pw=>{ const r = await save({...m, password:pw}); if(r) dispatch({type:"ADD_TOAST", message:"Password saved for "+m.name}); return !!r; }}/>}
               {m.active
                 ? <ConfirmButton disabled={busy} confirmLabel={"Remove "+m.name+"?"} onConfirm={()=>save({...m, active:false})}>Remove</ConfirmButton>
                 : <Button variant="ghost" size="sm" disabled={busy} onClick={()=>save({...m, active:true})}>Restore</Button>}
@@ -4351,14 +4381,12 @@ function TeamAccessSettings(){
           <Button variant="ghost" size="sm" onClick={()=>{ try{ navigator.clipboard.writeText(siteUrl); dispatch({type:"ADD_TOAST", message:"Link copied"}); }catch(e){} }}>Copy link</Button>
         </div>
       </div>}
-      {!accessOn && <details style={{marginTop:16, fontSize:12.5, color:"var(--ink-soft)", lineHeight:1.7}}>
-        <summary style={{cursor:"pointer", fontWeight:600, color:"var(--ink)"}}>How to switch sign-in on (one time, ~10 minutes)</summary>
+      {!accessOn && <details open style={{marginTop:16, fontSize:12.5, color:"var(--ink-soft)", lineHeight:1.7}}>
+        <summary style={{cursor:"pointer", fontWeight:600, color:"var(--ink)"}}>Getting ready for sign-in</summary>
         <ol style={{margin:"8px 0 0", paddingLeft:20}}>
-          <li>Make sure every active person above has their email filled in (admin@sanjugo.co.uk can always get in).</li>
-          <li>Cloudflare dashboard → <strong>Zero Trust</strong> (choose the Free plan if asked) → <strong>Access → Applications → Add an application → Self-hosted</strong>.</li>
-          <li>Application domain: <span style={code}>{window.location.host}</span>. Session duration: 1 month.</li>
-          <li>Policy: action <strong>Allow</strong>, include <strong>Everyone</strong>; login method <strong>One-time PIN</strong>. (Creator Studio's own team list decides who's really let in — so you never touch Cloudflare again to add people.)</li>
-          <li>Save, then copy the application's <strong>Audience (AUD) tag</strong> and your team domain (<span style={code}>yourteam.cloudflareaccess.com</span>) and send them to whoever maintains Creator Studio to switch it on.</li>
+          <li>Give every active person above their real email.</li>
+          <li>Tap <strong>Set password</strong> for each person, copy the password and send it to them privately.</li>
+          <li>When everyone shows <strong>Password set</strong>, ask whoever maintains Creator Studio to switch sign-in on. From then on only these people can open it, with their email and password.</li>
         </ol>
       </details>}
       <style>{`@media (max-width:760px){ .cf-team-row, .cf-team-add{ grid-template-columns:1fr 1fr !important; } }`}</style>
@@ -6098,6 +6126,37 @@ function PushSettings(){
   );
 }
 
+function ChangePasswordBox(){
+  const {dispatch} = useApp();
+  const [open, setOpen] = useState(false);
+  const [cur, setCur] = useState(""), [next, setNext] = useState(""), [busy, setBusy] = useState(false), [err, setErr] = useState("");
+  const input = {padding:"8px 10px", borderRadius:8, border:"1px solid var(--border)", fontSize:13.5, background:"var(--surface)", color:"var(--ink)", minWidth:0, flex:"1 1 160px"};
+  async function save(){
+    setBusy(true); setErr("");
+    try{
+      const r = await fetch("/api/auth/password", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({current:cur, next})});
+      const d = await r.json().catch(()=>({}));
+      if(!r.ok) throw new Error(d.error || "Couldn't change it ("+r.status+")");
+      dispatch({type:"ADD_TOAST", message:"Password changed — other devices were signed out"}); setOpen(false); setCur(""); setNext("");
+    }catch(e){ setErr(e.message); }
+    setBusy(false);
+  }
+  if(!open) return <div style={{marginTop:12}}><Button variant="ghost" size="sm" onClick={()=>setOpen(true)}>Change my password</Button></div>;
+  return (
+    <div style={{marginTop:12, padding:12, border:"1px solid var(--border)", borderRadius:10}}>
+      <div style={{display:"flex", gap:8, flexWrap:"wrap"}}>
+        <input type="password" autoComplete="current-password" placeholder="Current password" value={cur} onChange={e=>setCur(e.target.value)} style={input}/>
+        <input type="password" autoComplete="new-password" placeholder="New password (8+ characters)" value={next} onChange={e=>setNext(e.target.value)} style={input}/>
+      </div>
+      {err && <div style={{fontSize:12.5, color:"var(--red)", marginTop:8}}>{err}</div>}
+      <div style={{display:"flex", gap:8, marginTop:10}}>
+        <Button size="sm" variant="primary" disabled={busy || next.length<8 || !cur} onClick={save}>{busy? "Saving…" : "Save new password"}</Button>
+        <Button size="sm" variant="ghost" onClick={()=>{ setOpen(false); setErr(""); }}>Cancel</Button>
+      </div>
+    </div>
+  );
+}
+
 function SettingsPage(){
   const {state, dispatch, caps, viewerIsRealAdmin} = useApp();
   const user = USERS.find(u=>u.id===state.currentUserId);
@@ -6135,7 +6194,8 @@ function SettingsPage(){
             <span key={l} style={{display:"inline-flex", alignItems:"center", gap:5, fontSize:12, padding:"4px 9px", borderRadius:99, border:"1px solid var(--border)", color: v? "var(--ink)" : "var(--ink-mute)", background: v? "var(--surface)" : "var(--surface-2)"}}>{yes(v)}{l}</span>
           ))}
         </div>
-        <div style={{fontSize:12, color:"var(--ink-mute)", marginTop:10}}>To switch person, tap your name at the bottom of the menu.{!canManage && admins.length? " Admins ("+admins.join(", ")+") manage the team-wide settings." : ""}</div>
+        {state.me && state.me.signin==="password" && <ChangePasswordBox/>}
+        <div style={{fontSize:12, color:"var(--ink-mute)", marginTop:10}}>{state.me && state.me.accessEnabled ? "Sign out from the bottom of the menu." : "To switch person, tap your name at the bottom of the menu."}{!canManage && admins.length? " Admins ("+admins.join(", ")+") manage the team-wide settings." : ""}</div>
       </Card>
 
       <SectionTitle>Notifications</SectionTitle>
@@ -6314,7 +6374,7 @@ function App(){
         const r = await fetch("/api/me", {cache:"no-store"});
         const d = await r.json().catch(()=>({}));
         if(cancelled) return;
-        if(r.status===401 || r.status===403) { dispatch({type:"SET_ME", me:null, lock:{code:d.code, message:d.error}}); return; }
+        if(r.status===401 || r.status===403) { dispatch({type:"SET_ME", me:null, lock:{code:d.code, message:d.error, signin:d.signin}}); dispatch({type:"BOOT_DONE"}); return; }
         if(r.ok) dispatch({type:"SET_ME", me:d});
         const t = await fetch("/api/team", {cache:"no-store"});
         if(t.ok && !cancelled){ const td = await t.json(); if(Array.isArray(td.members) && td.members.length) dispatch({type:"TEAM_LOADED", members:td.members}); }
@@ -6486,7 +6546,52 @@ function WelcomeScreen({dispatch}){
   );
 }
 
+/* Email + password sign-in (built-in sign-in). On success the server sets a 60-day cookie and the app reloads. */
+function SignInScreen(){
+  const [email, setEmail] = useState(()=>{ try{ return localStorage.getItem("cs_last_email") || ""; }catch(e){ return ""; } });
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  async function submit(e){
+    e.preventDefault(); if(busy) return;
+    setBusy(true); setError("");
+    try{
+      const r = await fetch("/api/auth/login", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({email, password})});
+      const d = await r.json().catch(()=>({}));
+      if(!r.ok) throw new Error(d.error || "Couldn't sign in ("+r.status+")");
+      try{ localStorage.setItem("cs_last_email", email.trim().toLowerCase()); localStorage.removeItem(LS_KEY); }catch(err){}
+      window.location.reload();
+    }catch(err){ setError(err.message); setBusy(false); }
+  }
+  const input = {width:"100%", padding:"12px 14px", borderRadius:10, border:"1px solid var(--border)", background:"var(--surface)", color:"var(--ink)", fontSize:15, boxSizing:"border-box"};
+  return (
+    <div style={{minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center", padding:"calc(24px + env(safe-area-inset-top, 0px)) 20px calc(24px + env(safe-area-inset-bottom, 0px))", background:"var(--bg)"}}>
+      <form onSubmit={submit} style={{maxWidth:400, width:"100%", textAlign:"center"}}>
+        <img src={LOGO_SANJUGO} alt="Sanjugo" style={{width:84, height:84, borderRadius:99, marginBottom:18, boxShadow:"0 0 0 6px var(--surface), var(--shadow-md)"}}/>
+        <div style={{fontSize:13, fontWeight:600, letterSpacing:".8px", textTransform:"uppercase", color:"var(--accent)", marginBottom:6}}>Sanjugo</div>
+        <h1 style={{fontSize:28, margin:"0 0 8px", fontWeight:600}}>Sign in to Creator Studio</h1>
+        <div style={{fontSize:14.5, color:"var(--ink-soft)", lineHeight:1.55, marginBottom:24}}>For the Sanjugo content team only.</div>
+        <div style={{background:"var(--surface)", border:"1px solid var(--border)", borderRadius:14, padding:20, textAlign:"left", boxShadow:"var(--shadow-sm)"}}>
+          <label htmlFor="cs-email" style={{display:"block", fontSize:13, fontWeight:600, marginBottom:6}}>Email</label>
+          <input id="cs-email" type="email" autoComplete="username" value={email} onChange={e=>setEmail(e.target.value)} required style={{...input, marginBottom:14}}/>
+          <label htmlFor="cs-pw" style={{display:"block", fontSize:13, fontWeight:600, marginBottom:6}}>Password</label>
+          <input id="cs-pw" type="password" autoComplete="current-password" value={password} onChange={e=>setPassword(e.target.value)} required style={{...input, marginBottom:14}}/>
+          {error && <div role="alert" style={{fontSize:13, color:"var(--red)", background:"var(--red-soft)", borderRadius:8, padding:"8px 10px", marginBottom:12, lineHeight:1.45}}>{error}</div>}
+          <Button type="submit" variant="primary" size="lg" disabled={busy || !email || !password} style={{width:"100%", justifyContent:"center"}}>{busy? "Signing in…" : "Sign in"}</Button>
+        </div>
+        <div style={{fontSize:12, color:"var(--ink-mute)", marginTop:16, lineHeight:1.5}}>Forgot your password? Ask an admin (Cyrus or Yan Yan) to reset it in Settings → Team &amp; access.</div>
+      </form>
+    </div>
+  );
+}
+async function signOutNow(){
+  try{ await fetch("/api/auth/logout", {method:"POST"}); }catch(e){}
+  try{ localStorage.removeItem(LS_KEY); }catch(e){}
+  window.location.reload();
+}
+
 function LockScreen({lock}){
+  if(lock.signin==="password" && lock.code==="signed_out") return <SignInScreen/>;
   const signedOut = lock.code==="signed_out";
   return (
     <div style={{minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center", padding:24, background:"var(--bg)"}}>

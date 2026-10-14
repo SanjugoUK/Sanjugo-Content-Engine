@@ -70,16 +70,16 @@ redeploys automatically. No Terminal commands needed unless a future change adds
 
 ## Team & access (sign-in)
 
-Settings → **Team & access** is the team list: name, email, role (Creator, Social Media Manager, Approver,
-Admin). Add a new hire there and send them the link; remove people there. The list lives in D1 (`team_members`).
+Settings → **Team & access** is the team list: name, email, role, and a **Set / Reset password** button per person.
+Sign-in is built in (no Cloudflare Zero Trust needed — the site is on workers.dev, where Access can't exempt paths):
 
-Sign-in is Cloudflare Access (email + one-time code) in front of the site. Access proves who someone is; the
-team list decides who gets in, so you never change Cloudflare to add or remove people. To switch it on:
-1. Cloudflare → Zero Trust → Access → Applications → Add → Self-hosted, domain
-   `sanjugo-content-engine.rapid-dust-8baf.workers.dev`, policy **Allow · Everyone**, login method **One-time PIN**.
-2. Put the team domain (e.g. `sanjugo.cloudflareaccess.com`) and the application's **AUD tag** into
-   `ACCESS_TEAM_DOMAIN` / `ACCESS_AUD` in `wrangler.toml`, then push.
-`BOOTSTRAP_ADMINS` (admin@sanjugo.co.uk) always gets in as an admin, so nobody can be locked out.
+- `SIGNIN = "password"` in `wrangler.toml` turns it on. Without it the site stays open with the name picker.
+- People sign in with their email + password. Passwords are stored as salted PBKDF2-SHA256 hashes; a sign-in
+  creates a random 60-day session (stored hashed in D1 `sessions`, `HttpOnly; Secure; SameSite=Lax` cookie).
+- 8 wrong passwords for an email locks it for 15 minutes; an admin password reset lifts the lock and signs that
+  person out everywhere. Removing someone signs them out everywhere. Everyone can change their own password in Settings.
+- Still reachable without signing in (needed for publishing): `/api/make/callback` (job-token checked),
+  `/api/media/<key>` and `/api/library/thumb/<id>` (long random keys fetched by Make/Meta/YouTube/Google).
 
 ## (Older note) login wall
 

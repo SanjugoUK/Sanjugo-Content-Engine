@@ -725,9 +725,12 @@ function savePersisted(state){
    localStorage above is just an instant-paint cache for one browser. The real shared record — the one
    every device and every teammate sees — lives in /api/state, backed by D1. We fetch it once on load and
    push the whole content-relevant slice back up (debounced) whenever it changes. */
+// Signed out while the app was open (2 days unused, password reset, removed): reload into the sign-in screen.
+function signedOutReload(res){ if(res && res.status===401){ try{ localStorage.removeItem(LS_KEY); }catch(e){} window.location.reload(); return true; } return false; }
 async function fetchServerState(){
   try{
     const res = await fetch("/api/state");
+    if(signedOutReload(res)) return null;
     if(!res.ok) return null;
     return await res.json();
   }catch(e){ return null; /* offline, or running somewhere /api isn't wired up yet */ }
@@ -740,6 +743,7 @@ function pushServerState(state){
     chatUpdates: state.chatUpdates !== false, deletedIds: state.deletedIds || [],
   };
   fetch("/api/state", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload)}).then(res=>{
+    if(signedOutReload(res)) return;
     // 409 = the shared workspace was reset after this page loaded. Don't write the old copy back — reload fresh.
     if(res.status===409){
       try{ localStorage.removeItem(LS_KEY); }catch(e){}
@@ -6141,7 +6145,17 @@ function ChangePasswordBox(){
     }catch(e){ setErr(e.message); }
     setBusy(false);
   }
-  if(!open) return <div style={{marginTop:12}}><Button variant="ghost" size="sm" onClick={()=>setOpen(true)}>Change my password</Button></div>;
+  async function others(){
+    try{
+      const r = await fetch("/api/auth/others", {method:"POST"}); const d = await r.json().catch(()=>({}));
+      if(!r.ok) throw new Error(d.error || "Couldn't do that");
+      dispatch({type:"ADD_TOAST", message: d.signedOut ? "Signed out on "+d.signedOut+" other device"+(d.signedOut>1?"s":"") : "No other devices were signed in"});
+    }catch(e){ dispatch({type:"ADD_TOAST", message:e.message, variant:"danger"}); }
+  }
+  if(!open) return <div style={{marginTop:12, display:"flex", gap:8, flexWrap:"wrap"}}>
+    <Button variant="ghost" size="sm" onClick={()=>setOpen(true)}>Change my password</Button>
+    <ConfirmButton confirmLabel="Sign out other devices?" onConfirm={others}>Sign out on all other devices</ConfirmButton>
+  </div>;
   return (
     <div style={{marginTop:12, padding:12, border:"1px solid var(--border)", borderRadius:10}}>
       <div style={{display:"flex", gap:8, flexWrap:"wrap"}}>
@@ -6547,7 +6561,7 @@ function WelcomeScreen({dispatch}){
 }
 
 /* Email + password sign-in (built-in sign-in). On success the server sets a 60-day cookie and the app reloads. */
-function SignInScreen(){
+function SignInScreen({notice}){
   const [email, setEmail] = useState(()=>{ try{ return localStorage.getItem("cs_last_email") || ""; }catch(e){ return ""; } });
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
@@ -6571,6 +6585,7 @@ function SignInScreen(){
         <div style={{fontSize:13, fontWeight:600, letterSpacing:".8px", textTransform:"uppercase", color:"var(--accent)", marginBottom:6}}>Sanjugo</div>
         <h1 style={{fontSize:28, margin:"0 0 8px", fontWeight:600}}>Sign in to Creator Studio</h1>
         <div style={{fontSize:14.5, color:"var(--ink-soft)", lineHeight:1.55, marginBottom:24}}>For the Sanjugo content team only.</div>
+        {notice && notice!=="Please sign in." && <div style={{fontSize:13, color:"var(--ink)", background:"var(--amber-soft)", borderRadius:10, padding:"10px 12px", marginBottom:14, lineHeight:1.5, textAlign:"left"}}>{notice}</div>}
         <div style={{background:"var(--surface)", border:"1px solid var(--border)", borderRadius:14, padding:20, textAlign:"left", boxShadow:"var(--shadow-sm)"}}>
           <label htmlFor="cs-email" style={{display:"block", fontSize:13, fontWeight:600, marginBottom:6}}>Email</label>
           <input id="cs-email" type="email" autoComplete="username" value={email} onChange={e=>setEmail(e.target.value)} required style={{...input, marginBottom:14}}/>
@@ -6591,7 +6606,7 @@ async function signOutNow(){
 }
 
 function LockScreen({lock}){
-  if(lock.signin==="password" && lock.code==="signed_out") return <SignInScreen/>;
+  if(lock.signin==="password" && lock.code==="signed_out") return <SignInScreen notice={lock.message}/>;
   const signedOut = lock.code==="signed_out";
   return (
     <div style={{minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center", padding:24, background:"var(--bg)"}}>

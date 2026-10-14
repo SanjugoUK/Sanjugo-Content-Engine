@@ -75,9 +75,13 @@ Sign-in is built in (no Cloudflare Zero Trust needed — the site is on workers.
 
 - `SIGNIN = "password"` in `wrangler.toml` turns it on. Without it the site stays open with the name picker.
 - People sign in with their email + password. Passwords are stored as salted PBKDF2-SHA256 hashes; a sign-in
-  creates a random 60-day session (stored hashed in D1 `sessions`, `HttpOnly; Secure; SameSite=Lax` cookie).
-- 8 wrong passwords for an email locks it for 15 minutes; an admin password reset lifts the lock and signs that
+  creates a random session (stored hashed in D1 `sessions`, `HttpOnly; Secure; SameSite=Lax` cookie) that ends after
+  **2 days without use** or 30 days at most. Settings → "Sign out on all other devices".
+- 8 wrong passwords for an email (or 30 from one connection) locks sign-in for 15 minutes; the answer never reveals whether an email is on the team; an admin password reset lifts the lock and signs that
   person out everywhere. Removing someone signs them out everywhere. Everyone can change their own password in Settings.
+- The server re-checks two-person approval on every save (you can only add your own approval, only approvers/admins
+  can approve, and a post only becomes Approved with every approver's approval) and refuses changes sent from other
+  websites (Origin / Sec-Fetch-Site check). Pages send CSP, frame-ancestors 'none', HSTS and nosniff (`public/_headers`).
 - Still reachable without signing in (needed for publishing): `/api/make/callback` (job-token checked),
   `/api/media/<key>` and `/api/library/thumb/<id>` (long random keys fetched by Make/Meta/YouTube/Google).
 

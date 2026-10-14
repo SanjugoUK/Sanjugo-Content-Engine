@@ -1,0 +1,10 @@
+# Security headers for the app's pages and files (Cloudflare Workers static assets).
+# - No other website may show Creator Studio inside a frame (stops click-jacking tricks).
+# - Scripts only from this site and cdnjs (React + Babel); Drive previews are the only allowed frames.
+/*
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: https:; media-src 'self' blob: https:; frame-src https://drive.google.com; connect-src 'self' blob: data:; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'
+  X-Frame-Options: DENY
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  Strict-Transport-Security: max-age=31536000
+  Permissions-Policy: geolocation=(), microphone=(), payment=(), usb=()

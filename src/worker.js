@@ -35,6 +35,12 @@ export default {
       try { return thumb ? await libraryThumb(thumb[1], env, url.searchParams.get("s")) : await serveMedia(url.pathname.slice("/api/media/".length), request, env); }
       catch (e) { return json({ error: e.message || "File error" }, e.status || 500); }
     }
+    // Changes must come from Creator Studio itself, never from another website (blocks cross-site request forgery).
+    if (url.pathname.startsWith("/api/") && request.method !== "GET" && request.method !== "HEAD" && url.pathname !== "/api/make/callback") {
+      const origin = request.headers.get("Origin");
+      const site = request.headers.get("Sec-Fetch-Site");
+      if ((origin && origin !== url.origin) || site === "cross-site") return json({ error: "Blocked: request didn't come from Creator Studio." }, 403);
+    }
     if (url.pathname === "/api/auth/login" && request.method === "POST") {
       try { return await signIn(request, env); } catch (e) { return json({ error: e.message || "Sign-in failed" }, e.status || 500); }
     }
@@ -46,6 +52,9 @@ export default {
         viewer = await identify(request, env);
       } catch (e) {
         return json({ error: e.message || "Sign-in check failed", code: e.code || "auth", signin: e.signin || null }, e.status || 401);
+      }
+      if (url.pathname === "/api/auth/others" && request.method === "POST") {
+        try { return json(await signOutOthers(request, env, viewer)); } catch (e) { return json({ error: e.message }, e.status || 500); }
       }
       if (url.pathname === "/api/auth/password" && request.method === "POST") {
         try { return json(await changeOwnPassword(request, env, viewer)); } catch (e) { return json({ error: e.message }, e.status || 500); }
@@ -88,7 +97,7 @@ export default {
 
     if (url.pathname === "/api/state") {
       if (request.method === "GET") return getState(env);
-      if (request.method === "POST") return postState(request, env, ctx);
+      if (request.method === "POST") return postState(request, env, ctx, viewer);
     }
 
     if (url.pathname === "/api/upload" && request.method === "POST") {
@@ -170,7 +179,37 @@ async function getState(env) {
   });
 }
 
-async function postState(request, env, ctx) {
+// Two-person approval is checked here on the server too, so it can't be faked by sending a doctored save:
+// someone can only add their OWN approval, only approvers/admins can approve, and a post only becomes
+// Approved once every approver has approved each platform. Anything else in that post is kept as stored.
+async function guardApprovals(env, body, stored, viewer) {
+  if (!viewer || !viewer.member || !Array.isArray(body.contentItems)) return 0;
+  const { members } = await listTeam(env);
+  const reviewers = members.filter((m) => m.active && (m.role === "approver" || m.role === "admin")).map((m) => m.id);
+  const me = viewer.member.id, canApprove = reviewers.includes(me);
+  const old = new Map((Array.isArray(stored.contentItems) ? stored.contentItems : []).map((i) => [i && i.id, i]));
+  let fixed = 0;
+  body.contentItems = body.contentItems.map((it) => {
+    const prev = it && old.get(it.id);
+    if (!it || !prev) return it;
+    let bad = false;
+    for (const [p, v] of Object.entries(it.variants || {})) {
+      const was = ((prev.variants || {})[p] || {}).approvals || {};
+      const added = Object.keys((v && v.approvals) || {}).filter((id) => !was[id]);
+      if (added.some((id) => id !== me || !canApprove)) bad = true;
+      const wasApproved = ((prev.variants || {})[p] || {}).status === "approved";
+      if (v && v.status === "approved" && !wasApproved && !reviewers.every((id) => (v.approvals || {})[id])) bad = true;
+    }
+    if (it.status === "approved" && prev.status !== "approved" && prev.status !== "scheduled" &&
+        Object.values(it.variants || {}).some((v) => v && v.status !== "approved")) bad = true;
+    if (!bad) return it;
+    fixed++;
+    return prev;
+  });
+  return fixed;
+}
+
+async function postState(request, env, ctx, viewer) {
   let body;
   try {
     body = await request.json();
@@ -220,6 +259,8 @@ async function postState(request, env, ctx) {
     body.decisionHistory = [...extra, ...body.decisionHistory].filter((d) => d && !gone.has(d.id))
       .sort((x, y) => String(x.at || "").localeCompare(String(y.at || ""))).slice(-100);
   }
+  const blocked = await guardApprovals(env, body, stored, viewer);
+  if (blocked) console.warn("Blocked " + blocked + " post change(s) that broke the two-person approval rule", viewer && viewer.member && viewer.member.id);
   const json = JSON.stringify(body);
   await env.DB.prepare(
     `INSERT INTO app_state (id, data, updated_at) VALUES (1, ?1, datetime('now'))
@@ -397,7 +438,7 @@ class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
 function json(data, status = 200) {
-  return new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
+  return new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
 }
 const LIBRARY_INDEX_KEY = "meta/library-index.json";
 const DRIVE_FOLDER = "application/vnd.google-apps.folder";
@@ -1016,7 +1057,8 @@ async function saveMember(request, env, viewer) {
 // ---- Built-in sign-in (SIGNIN = "password"): email + password, then a 60-day session cookie per device.
 // Passwords are stored only as salted PBKDF2-SHA256 hashes; sessions are random tokens stored hashed, so a copy
 // of the database can't be used to sign in. Admins set/reset passwords in Settings → Team & access.
-const SESSION_COOKIE = "cs_session", SESSION_DAYS = 60, PBKDF2_ITER = 100000;
+// A session ends after 2 days without using Creator Studio, and after 30 days whatever happens.
+const SESSION_COOKIE = "cs_session", SESSION_DAYS = 30, SESSION_IDLE_MS = 48 * 3600e3, PBKDF2_ITER = 100000;
 const b64 = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf)));
 const unb64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
 async function pbkdf2(password, salt, iter) {
@@ -1050,11 +1092,19 @@ async function signIn(request, env) {
   const fails = (await kvGet(env, lockKey)) || { n: 0, since: Date.now() };
   if (Date.now() - fails.since > 15 * 60e3) { fails.n = 0; fails.since = Date.now(); }
   if (fails.n >= 8) throw new HttpError(429, "Too many tries — wait 15 minutes, or ask an admin to reset your password.");
+  // And from one connection: 30 wrong tries in 15 minutes (any emails) pauses sign-in from there.
+  const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+  const ipKey = "signin_ip_" + (await sha256hex(ip)).slice(0, 24);
+  const ipFails = (await kvGet(env, ipKey)) || { n: 0, since: Date.now() };
+  if (Date.now() - ipFails.since > 15 * 60e3) { ipFails.n = 0; ipFails.since = Date.now(); }
+  if (ipFails.n >= 30) throw new HttpError(429, "Too many sign-in attempts from this connection — wait 15 minutes.");
   const row = await env.DB.prepare("SELECT * FROM team_members WHERE email = ?1").bind(email).first();
-  const ok = row && row.active && row.password_hash && await checkPassword(password, row.password_hash);
+  // Same work and the same answer whether or not the email is on the team, so nobody can probe for members.
+  const ok = row && row.active && row.password_hash ? await checkPassword(password, row.password_hash) : (await hashPassword(password), false);
   if (!ok) {
     fails.n++; await kvSet(env, lockKey, fails);
-    throw new HttpError(401, row && row.active && !row.password_hash ? "No password has been set for this email yet — ask an admin." : "That email and password don't match.");
+    ipFails.n++; await kvSet(env, ipKey, ipFails);
+    throw new HttpError(401, "That email and password don't match.");
   }
   await kvSet(env, lockKey, { n: 0, since: Date.now() });
   const token = b64(crypto.getRandomValues(new Uint8Array(32))).replace(/[+/=]/g, (c) => ({ "+": "-", "/": "_", "=": "" }[c]));
@@ -1067,6 +1117,12 @@ async function signOut(request, env) {
   const token = cookie(request, SESSION_COOKIE);
   if (token) { await ensureTeamTable(env); await env.DB.prepare("DELETE FROM sessions WHERE token_hash = ?1").bind(await sha256hex(token)).run(); }
   return new Response(JSON.stringify({ ok: true }), { headers: { "Content-Type": "application/json", "Set-Cookie": sessionCookie("", 0) } });
+}
+async function signOutOthers(request, env, viewer) {
+  if (!viewer.member) throw new HttpError(401, "Please sign in again.");
+  const mine = cookie(request, SESSION_COOKIE);
+  const r = await env.DB.prepare("DELETE FROM sessions WHERE member_id = ?1 AND token_hash != ?2").bind(viewer.member.id, mine ? await sha256hex(mine) : "").run();
+  return { ok: true, signedOut: (r.meta && r.meta.changes) || 0 };
 }
 async function changeOwnPassword(request, env, viewer) {
   const b = await request.json().catch(() => ({}));
@@ -1124,10 +1180,14 @@ async function identify(request, env) {
     if (!token) throw signedOut();
     await ensureTeamTable(env);
     const sess = await env.DB.prepare("SELECT * FROM sessions WHERE token_hash = ?1").bind(await sha256hex(token)).first();
-    if (!sess || Date.parse(sess.expires_at) < Date.now()) throw signedOut();
+    if (!sess || Date.parse(sess.expires_at) < Date.now()) { if (sess) await env.DB.prepare("DELETE FROM sessions WHERE token_hash = ?1").bind(sess.token_hash).run(); throw signedOut(); }
+    if (Date.now() - Date.parse(sess.last_seen || sess.created_at) > SESSION_IDLE_MS) {
+      await env.DB.prepare("DELETE FROM sessions WHERE token_hash = ?1").bind(sess.token_hash).run();
+      const e = signedOut(); e.message = "You were signed out because Creator Studio wasn't used for 2 days. Please sign in again."; throw e;
+    }
     const row = await env.DB.prepare("SELECT * FROM team_members WHERE id = ?1").bind(sess.member_id).first();
     if (!row || !row.active) throw signedOut();
-    if (!sess.last_seen || Date.now() - Date.parse(sess.last_seen) > 3600e3) {
+    if (!sess.last_seen || Date.now() - Date.parse(sess.last_seen) > 10 * 60e3) {
       await env.DB.prepare("UPDATE sessions SET last_seen = ?2 WHERE token_hash = ?1").bind(sess.token_hash, new Date().toISOString()).run();
       await env.DB.prepare("UPDATE team_members SET last_seen = ?2 WHERE id = ?1").bind(row.id, new Date().toISOString()).run();
     }

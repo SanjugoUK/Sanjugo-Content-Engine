@@ -16,6 +16,8 @@ ACCESS_TEAM_DOMAIN = ""
 ACCESS_AUD = ""
 # These emails always get in as admins, so the team can never be locked out.
 BOOTSTRAP_ADMINS = "admin@sanjugo.co.uk"
+# Built-in sign-in: email + password set in Settings → Team & access. Remove this line to open the site again.
+SIGNIN = "password"
 
 [assets]
 directory = "./public"

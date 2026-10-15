@@ -2254,7 +2254,7 @@ function IGReelScreen({item, variant, brand, playing, muted}){
   return (
     <>
       {/* Reels are 9:16: shown whole at full width (as on a tall iPhone), never cropped at the sides. */}
-      <div style={chrome ? {position:"absolute", left:0, right:0, top:pt(48), height:"calc(100cqw * 16 / 9)", overflow:"hidden", background:"#000"} : {position:"absolute", inset:0}}>
+      <div style={chrome ? {position:"absolute", left:0, right:0, top:pt(58), height:"calc(100cqw * 16 / 9)", overflow:"hidden", background:"#000"} : {position:"absolute", inset:0}}>
         <ScreenMedia item={item}/>
       </div>
       {shade(.3, .7)}
@@ -2518,7 +2518,7 @@ function StoryScreen({platform, item, variant, brand}){
   const {progress, chrome} = React.useContext(PhoneCtx);
   // Stories are 9:16. On a phone taller than that (the preview iPhone is 9:19.5) Instagram shows the story at full
   // width below the status bar with the reply bar underneath — it never crops the sides. Full screen is already 9:16.
-  const frameTop = chrome ? pt(48) : "0px";
+  const frameTop = chrome ? pt(58) : "0px";
   const frame = chrome ? {position:"absolute", left:0, right:0, top:frameTop, height:"calc(100cqw * 16 / 9)", borderRadius:pt(10), overflow:"hidden", background:"#111"}
     : {position:"absolute", inset:0, overflow:"hidden"};
   const below = (n) => `calc(${frameTop} + ${pt(n)})`;
@@ -2551,7 +2551,7 @@ function StoryScreen({platform, item, variant, brand}){
         <svg viewBox="0 0 24 24" width={pt(16)} height={pt(16)} fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round"><path d="M10 14a4.5 4.5 0 0 0 6.4 0l3-3a4.5 4.5 0 0 0-6.4-6.4l-1 1"/><path d="M14 10a4.5 4.5 0 0 0-6.4 0l-3 3a4.5 4.5 0 0 0 6.4 6.4l1-1"/></svg>
         {linkLabel.toUpperCase()}
       </div>}
-      <div style={{position:"absolute", left:pt(12), right:pt(12), bottom: chrome? pt(46) : pt(40), display:"flex", alignItems:"center", gap:pt(14), color:"#fff", pointerEvents:"none"}}>
+      <div style={{position:"absolute", left:pt(12), right:pt(12), ...(chrome ? {top:`calc(${frameTop} + 100cqw * 16 / 9 + ${pt(10)})`} : {bottom:pt(40)}), display:"flex", alignItems:"center", gap:pt(14), color:"#fff", pointerEvents:"none"}}>
         <div style={{flex:1, height:pt(44), borderRadius:pt(22), border:"1px solid rgba(255,255,255,.7)", display:"flex", alignItems:"center", padding:`0 ${pt(16)}`, fontSize:pt(14.5), color:"rgba(255,255,255,.9)"}}>{reply}</div>
         {platform==="facebook" ? <span style={{fontSize:pt(24), letterSpacing:pt(2)}}>👍❤️😆</span> : <>
           <AppGlyph name="heart" size={pt(27)}/>

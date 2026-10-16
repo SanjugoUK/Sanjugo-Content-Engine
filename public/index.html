@@ -234,12 +234,16 @@ function canDeleteContent(item, userId){
 }
 const isReviewer = u => !!u && u.active!==false && (u.role==="approver" || u.role==="admin");
 const reviewers = () => activeUsers().filter(isReviewer);
-// Every post needs approval from everyone who approves (Cyrus and Yan Yan) — two-person sign-off.
-const requiredApprovers = () => reviewers().map(u=>u.id);
-function approversOf(item){ return reviewers(); }
+// Who must approve a post: "both" (ANY_APPROVER → every approver: Cyrus and Yan Yan), or one named approver.
+function requiredApprovers(item){
+  const all = reviewers();
+  if(item && item.approver && item.approver!==ANY_APPROVER && all.some(u=>u.id===item.approver)) return [item.approver];
+  return all.map(u=>u.id);
+}
+function approversOf(item){ const ids = requiredApprovers(item); return reviewers().filter(u=>ids.includes(u.id)); }
 // "Yan Yan ✓ · waiting for Cyrus" — who has approved a waiting post so far.
 function approvalProgress(item){
-  const req = reviewers(); const vs = Object.values(item.variants||{});
+  const req = approversOf(item); const vs = Object.values(item.variants||{});
   const done = req.filter(u=> vs.length && vs.every(v=> v.status==="approved" || (v.approvals||{})[u.id]));
   const left = req.filter(u=> !done.includes(u));
   if(!done.length) return "0 of "+req.length+" — waiting for "+left.map(u=>u.name).join(" and ");
@@ -249,14 +253,15 @@ function approvalProgress(item){
 function stillToApprove(item){
   if(!item || item.status!=="submitted") return [];
   const pend = Object.values(item.variants||{}).filter(v=>v && v.status!=="approved" && v.status!=="rejected" && v.status!=="changes_requested");
-  return reviewers().filter(u=> pend.some(v=> !(v.approvals||{})[u.id]));
+  return approversOf(item).filter(u=> pend.some(v=> !(v.approvals||{})[u.id]));
 }
 function approverName(item){
-  const n = reviewers().map(u=>u.name); return n.length ? n.join(" and ") : "—";
+  const n = approversOf(item).map(u=>u.name); return n.length ? n.join(" and ") : "—";
 }
 function approverOptions(){
   const list = reviewers();
-  return [{value:ANY_APPROVER, label: list.length>1 ? list.map(u=>u.name).join(" and ")+" (both must approve)" : (list[0]||{}).name || "Approver"}];
+  if(list.length<2) return [{value:ANY_APPROVER, label:(list[0]||{}).name || "Approver"}];
+  return [{value:ANY_APPROVER, label:list.map(u=>u.name).join(" and ")+" (both must approve)"}, ...list.map(u=>({value:u.id, label:u.name+" only"}))];
 }
 const BRANDS = [
   {id:"sanjugo", name:"Sanjugo", color:"#D9642A", logo:true, accounts:{instagram:"@sanjugo", facebook:"Sanjugo", tiktok:"@sanjugo", youtube:"Sanjugo", gbp:"Sanjugo — Shoreditch, Angel, Victoria"}},
@@ -937,7 +942,7 @@ function baseReducer(state, action){
       const item = state.contentItems.find(i=>i.id===contentId);
       if(!item) return state;
       const me = state.currentUserId, now = new Date().toISOString();
-      const required = requiredApprovers();
+      const required = requiredApprovers(item);
       const prevItemStatus = item.status;
       const prevVariants = JSON.parse(JSON.stringify(item.variants));
       const statusMap = {approved:"approved", rejected:"rejected", changes_requested:"changes_requested"};
@@ -1987,7 +1992,7 @@ function buildQueue(items, mode, filters, me){
   let pool = items.filter(i=>i.status==="submitted");
   const pendingVs = it => Object.entries(it.variants||{}).filter(([p,v])=> v && (v.status==="submitted" || !v.status));
   // An approver's queue leaves out what they've already approved (it's waiting for the other approver).
-  if(me) pool = pool.filter(it=> pendingVs(it).some(([p,v])=> !(v.approvals||{})[me]));
+  if(me) pool = pool.filter(it=> requiredApprovers(it).includes(me) && pendingVs(it).some(([p,v])=> !(v.approvals||{})[me]));
   if(filters.brand) pool = pool.filter(i=>i.brand===filters.brand);
   if(filters.creator) pool = pool.filter(i=>i.creator===filters.creator);
   if(filters.campaign) pool = pool.filter(i=>matchCampaign(filters.campaign, i.campaign));

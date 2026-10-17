@@ -3,7 +3,7 @@
 // and only fall back to the cached shell if the network is actually unreachable. This avoids
 // the classic PWA bug where people get stuck on a stale cached version after an update.
 
-const CACHE_NAME = "contentflow-shell-v3";
+const CACHE_NAME = "contentflow-shell-v4";
 const SHELL_FILES = ["/", "/manifest.json", "/favicon-32.png", "/icon-192.png", "/icon-512.png"];
 
 self.addEventListener("install", (event) => {
@@ -27,6 +27,10 @@ self.addEventListener("fetch", (event) => {
 
   // Never intercept API calls — those must always hit the real server.
   if (request.url.includes("/api/")) return;
+  // Only this site's own files. React/Babel (cdnjs), fonts and Drive images load straight from the network:
+  // the page's security policy doesn't let this worker fetch other sites, and the old fallback then answered
+  // those script requests with the cached app page — a blank screen on every visit after the first.
+  if (request.method !== "GET" || new URL(request.url).origin !== self.location.origin) return;
 
   event.respondWith(
     fetch(request)

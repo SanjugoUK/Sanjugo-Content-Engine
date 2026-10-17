@@ -1567,6 +1567,14 @@ function makeStatus(cfg) {
   }
   return out;
 }
+// Google Business listings (Make's "Publish · Google Business" posts to each one sent). A post's gbp variant
+// picks one with variant.listing; missing or "all" = all three.
+const GBP_ACCOUNT = "accounts/104977954501162337577";
+const GBP_LOCATIONS = { shoreditch: "16835292729078583249", angel: "10144825567996062942", victoria: "2180749039694857931" };
+function gbpLocations(listing) {
+  const keys = GBP_LOCATIONS[listing] ? [listing] : Object.keys(GBP_LOCATIONS);
+  return keys.map((k) => `${GBP_ACCOUNT}/locations/${GBP_LOCATIONS[k]}`).join(",");
+}
 const GBP_CTA = { "learn more": "LEARN_MORE", book: "BOOK", "order online": "ORDER", order: "ORDER", shop: "SHOP", buy: "SHOP", "sign up": "SIGN_UP", call: "CALL", "call now": "CALL" };
 const hookLabel = (u) => (u ? u.replace(/^(https:\/\/hook\.[^/]+\/)(.{4}).*$/, "$1$2…") : "");
 
@@ -1675,6 +1683,7 @@ async function sendPublishJobs(env, { item, platforms, origin, userId, trigger }
       mediaFormat: isPhoto || gbpImage ? "PHOTO" : "VIDEO",
       // Google Business button: needs a link unless it's "Call" (which uses the listing's phone number).
       ctaType: !v.url ? "CALL" : cta, ctaUrl: v.url || "",
+      ...(platform === "gbp" ? { listing: GBP_LOCATIONS[v.listing] ? v.listing : "all", locations: gbpLocations(v.listing) } : {}),
     };
     const now = new Date().toISOString();
     await env.DB.prepare(

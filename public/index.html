@@ -395,6 +395,16 @@ function makeVariant(platform, over){
   return Object.assign(base, over);
 }
 
+// Google Business: which branch listing(s) an update goes to. Missing = all three (posts made before the picker).
+const GBP_LISTINGS = [
+  {value:"all", label:"All three listings"},
+  {value:"shoreditch", label:"Shoreditch"},
+  {value:"angel", label:"Angel"},
+  {value:"victoria", label:"Victoria"},
+];
+const gbpListing = v => GBP_LISTINGS.some(l=>l.value===(v&&v.listing)) ? v.listing : "all";
+const gbpListingLabel = v => GBP_LISTINGS.find(l=>l.value===gbpListing(v)).label;
+
 /* Go-live: the workspace starts empty — everything shown comes from the shared server copy (real posts from the team)
    and real stats from Make. The only made-up numbers left are the clearly labelled "Sample data" in Analytics. */
 const CONTENT_ITEMS = [];
@@ -1842,6 +1852,7 @@ function ContentDetailDrawer({item, onClose}){
                     <StatusBadge status={v.status}/>
                   </div>
                   <div style={{display:"flex", flexDirection:"column", gap:7, fontSize:12.5}}>
+                    {p==="gbp" && <FieldRow label="Listing" value={gbpListingLabel(v)}/>}
                     {v.title && <FieldRow label="Title" value={v.title}/>}
                     {v.caption && <FieldRow label="Caption" value={v.caption}/>}
                     {v.description && <FieldRow label="Description" value={v.description}/>}
@@ -2484,8 +2495,10 @@ function FacebookScreen({item, variant, brand, playing, muted}){
   );
 }
 
-function GBPScreen({item, variant, brand, playing, muted}){
+function GBPScreen({item, variant, brand: b, playing, muted}){
   const ink = "#202124", mute = "#5f6368";
+  // Show the branch listing the update goes to (e.g. "Sanjugo Angel"); "all" keeps the plain brand name.
+  const brand = gbpListing(variant)==="all" ? b : {...b, name: b.name+" "+gbpListingLabel(variant)};
   const rating = (4.5 + seedNum(brand.id+"rt", 0, 5)/10).toFixed(1);
   return (
     <div style={{position:"absolute", inset:0, background:"#fff", color:ink, fontFamily:'Roboto, "Google Sans", Arial, sans-serif'}}>
@@ -2649,7 +2662,7 @@ function variantFields(platform, v){
   if(!v) return [];
   if(v.postType==="Story") return [["Link sticker", v.url || "None"], ["Posting notes", v.storyNotes]];
   if(platform==="youtube") return [["Title", v.title], ["Description", v.description]];
-  if(platform==="gbp") return [["Update text", v.caption], ["Button", v.cta || "Learn more"]];
+  if(platform==="gbp") return [["Listing", gbpListingLabel(v)], ["Update text", v.caption], ["Button", v.cta || "Learn more"]];
   return [["Caption", v.caption], ["Hashtags", (v.hashtags||[]).join(" ")]];
 }
 
@@ -2875,7 +2888,7 @@ function RevisionEditor({item, onClose}){
   useEffect(()=>{
     if(!item){ setF(null); return; }
     const variants = {};
-    Object.entries(item.variants||{}).forEach(([p,v])=>{ variants[p] = {caption:v.caption||"", hashtags:(v.hashtags||[]).join(" "), title:v.title||"", description:v.description||"", cta:v.cta||"", url:v.url||"", storyNotes:v.storyNotes||"", scheduledAt: v.scheduledAt ? isoToLocalInput(v.scheduledAt) : ""}; });
+    Object.entries(item.variants||{}).forEach(([p,v])=>{ variants[p] = {caption:v.caption||"", hashtags:(v.hashtags||[]).join(" "), title:v.title||"", description:v.description||"", cta:v.cta||"", url:v.url||"", listing:gbpListing(v), storyNotes:v.storyNotes||"", scheduledAt: v.scheduledAt ? isoToLocalInput(v.scheduledAt) : ""}; });
     setF({title:item.title, variants, media:null, libraryRef:undefined, note:"", mediaStatus:""});
     setTab(item.platforms[0]);
     setNotify(true);
@@ -2923,7 +2936,7 @@ function RevisionEditor({item, onClose}){
   function patchFromForm(){
     const variants = {};
     Object.entries(f.variants).forEach(([p,v])=>{
-      variants[p] = {caption:v.caption, hashtags: v.hashtags.split(/[\s,]+/).filter(Boolean).map(t=> t.startsWith("#")? t : "#"+t), title:v.title, description:v.description, cta:v.cta, url:v.url.trim(), storyNotes:v.storyNotes,
+      variants[p] = {caption:v.caption, hashtags: v.hashtags.split(/[\s,]+/).filter(Boolean).map(t=> t.startsWith("#")? t : "#"+t), title:v.title, description:v.description, cta:v.cta, url:v.url.trim(), storyNotes:v.storyNotes, ...(p==="gbp"? {listing:v.listing} : {}),
         scheduledAt: v.scheduledAt ? new Date(v.scheduledAt).toISOString() : null};
     });
     return {title:f.title.trim() || item.title, variants, ...(f.media? {media:f.media} : {}), ...(f.libraryRef!==undefined? {libraryRef:f.libraryRef} : {})};
@@ -3001,7 +3014,12 @@ function RevisionEditor({item, onClose}){
         </> : <>
           <textarea value={v.caption} onChange={e=>setV(tab,{caption:e.target.value})} placeholder="Caption" rows={4} style={{...input, resize:"vertical", marginBottom:8}}/>
           {tab==="gbp"
-            ? <input value={v.cta} onChange={e=>setV(tab,{cta:e.target.value})} placeholder="Button text, e.g. Book" style={input}/>
+            ? <>
+              <input value={v.cta} onChange={e=>setV(tab,{cta:e.target.value})} placeholder="Button text, e.g. Book" style={{...input, marginBottom:8}}/>
+              <select aria-label="Google Business listing" value={v.listing} onChange={e=>setV(tab,{listing:e.target.value})} style={input}>
+                {GBP_LISTINGS.map(l=><option key={l.value} value={l.value}>Post to: {l.label}</option>)}
+              </select>
+            </>
             : <input value={v.hashtags} onChange={e=>setV(tab,{hashtags:e.target.value})} placeholder="#Sanjugo #sushi" style={input}/>}
         </>}
 
@@ -4951,6 +4969,11 @@ function CreateContentPage(){
                       </div>
                     </>}
                     {p==="gbp" && <>
+                      <div style={{marginBottom:14}}>
+                        <label style={{fontSize:12.5,fontWeight:700,display:"block",marginBottom:6}}>Google listing</label>
+                        <Select value={gbpListing(v)} onChange={val=>setVariant(p,{listing:val})} options={GBP_LISTINGS}/>
+                        <div style={{fontSize:11, color:"var(--ink-mute)", marginTop:4}}>Which branch's Google Business listing shows this update.</div>
+                      </div>
                       <TextField label="Post description" value={v.caption||""} onChange={val=>setVariant(p,{caption:val})} textarea placeholder="What's the update?"/>
                       <div className="cf-field-grid" style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:14}}>
                         <div><label style={{fontSize:12.5,fontWeight:700,display:"block",marginBottom:6}}>CTA type</label><Select value={v.cta||"Learn More"} onChange={val=>setVariant(p,{cta:val})} options={["Learn More","Order Online","Book","Call Now"].map(x=>({value:x,label:x}))}/></div>

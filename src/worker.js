@@ -1571,6 +1571,9 @@ function makeStatus(cfg) {
 // picks one with variant.listing; missing or "all" = all three.
 const GBP_ACCOUNT = "accounts/104977954501162337577";
 const GBP_LOCATIONS = { shoreditch: "16835292729078583249", angel: "10144825567996062942", victoria: "2180749039694857931" };
+// Google Business "Gallery photo" posts: photos go into the listing's Photos under one of these categories.
+const GBP_PHOTO_CATEGORIES = ["FOOD_AND_DRINK", "INTERIOR", "EXTERIOR", "AT_WORK", "TEAMS", "COMMON_AREA", "MENU", "ADDITIONAL", "COVER"];
+const GBP_MAX_PHOTO_BYTES = 5 * 1024 * 1024;
 function gbpLocations(listing) {
   const keys = GBP_LOCATIONS[listing] ? [listing] : Object.keys(GBP_LOCATIONS);
   return keys.map((k) => `${GBP_ACCOUNT}/locations/${GBP_LOCATIONS[k]}`).join(",");
@@ -1653,9 +1656,29 @@ async function sendPublishJobs(env, { item, platforms, origin, userId, trigger }
     if (photos && platform === "youtube") { results.push({ platform, skipped: "YouTube can't post photos — this is a multi-photo post." }); continue; }
     if (isStory(item, v)) { results.push({ platform, skipped: "Stories can't be posted through Make — post it from the " + PLATFORM_NAMES[platform] + " app, then mark it as published." }); continue; }
     if (!mediaUrl) { results.push({ platform, skipped: "The video or photo hasn't finished uploading to Creator Studio." }); continue; }
+    // Google Business "Gallery photo": every photo of the post goes into each chosen listing's Photos (a cover takes the first only).
+    const gbpGallery = platform === "gbp" && v.gbpType === "photo";
+    let gallery = null;
+    if (gbpGallery) {
+      const srcs = (photos ? item.media.gallery.map((g) => g && g.fileUrl) : item.media.type === "image" ? [item.media.fileUrl] : []).filter(Boolean);
+      if (!srcs.length) { results.push({ platform, skipped: "Google gallery photos need a photo — this post is a video." }); continue; }
+      const category = GBP_PHOTO_CATEGORIES.includes(v.category) ? v.category : "FOOD_AND_DRINK";
+      const use = category === "COVER" ? srcs.slice(0, 1) : srcs;
+      const missing = [], tooBig = [];
+      for (const [n, u] of use.entries()) {
+        const k = mediaKeyOf(u); if (!k) continue;
+        const head = await env.MEDIA.head(k);
+        if (!head) missing.push(n + 1); else if (head.size > GBP_MAX_PHOTO_BYTES) tooBig.push(n + 1);
+      }
+      const which = (list) => (use.length > 1 ? "Photo " + list.join(", ") : "The photo");
+      if (missing.length) { results.push({ platform, skipped: which(missing) + " is no longer in Creator Studio — open the post, Edit & resubmit, and add it again." }); continue; }
+      if (tooBig.length) { results.push({ platform, skipped: which(tooBig) + " is over Google's 5MB limit — export a smaller JPG and replace it." }); continue; }
+      const urls = use.map((u) => absoluteMediaUrl(u, origin));
+      gallery = { mediaCategory: category, galleryItems: gbpLocations(v.listing).split(",").flatMap((location) => urls.map((sourceUrl) => ({ location, sourceUrl }))) };
+    }
     // Google Business posts take a photo: for a video, send its cover image instead.
     const gbpImage = platform === "gbp" ? (item.media.type === "image" ? mediaUrl : absoluteMediaUrl(item.media.previewUrl, origin)) : null;
-    if (platform === "gbp" && !gbpImage) { results.push({ platform, skipped: "Google Business needs a photo — this video has no stored cover image." }); continue; }
+    if (platform === "gbp" && !gbpGallery && !gbpImage) { results.push({ platform, skipped: "Google Business needs a photo — this video has no stored cover image." }); continue; }
     const busy = await env.DB.prepare(
       "SELECT id FROM make_jobs WHERE kind = 'publish' AND content_id = ?1 AND platform = ?2 AND (status = 'done' OR (status = 'sent' AND created_at > ?3))"
     ).bind(item.id, platform, new Date(Date.now() - 20 * 60e3).toISOString()).first();
@@ -1674,7 +1697,7 @@ async function sendPublishJobs(env, { item, platforms, origin, userId, trigger }
     const carousel = photos && (platform === "instagram" || platform === "facebook");
     const payload = {
       token: job.token, jobId: job.id, contentId: item.id, platform,
-      kind: carousel ? "carousel" : isPhoto ? "photo" : platform === "youtube" ? "short" : platform === "gbp" ? "update" : "reel",
+      kind: gallery ? "gallery" : carousel ? "carousel" : isPhoto ? "photo" : platform === "youtube" ? "short" : platform === "gbp" ? "update" : "reel",
       // Ready-made lists for Make's "Create a carousel post" (Instagram) and "Create a Post with Photos" (Facebook).
       ...(carousel ? { photoCount: photos.length, igFiles: photos.map((u) => ({ media_type: "IMAGE", image_url: u })), fbPhotos: photos.map((u) => ({ type: "url", url: u })) } : {}),
       title: String(v.title || item.title || "Sanjugo").replace(/[<>]/g, "").slice(0, 100),
@@ -1684,6 +1707,7 @@ async function sendPublishJobs(env, { item, platforms, origin, userId, trigger }
       // Google Business button: needs a link unless it's "Call" (which uses the listing's phone number).
       ctaType: !v.url ? "CALL" : cta, ctaUrl: v.url || "",
       ...(platform === "gbp" ? { listing: GBP_LOCATIONS[v.listing] ? v.listing : "all", locations: gbpLocations(v.listing) } : {}),
+      ...(gallery || {}),
     };
     const now = new Date().toISOString();
     await env.DB.prepare(

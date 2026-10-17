@@ -91,6 +91,27 @@
 </style>
 <div id="cf-root"></div>
 
+<script>
+// If React didn't load (an older service worker answered the script request with the app page), fetch the fixed
+// sw.js, wait for it to take over, then reload once. Updating (not unregistering) keeps push alerts subscribed.
+// sessionStorage stops it looping if the network is really down.
+window.addEventListener("load", function(){
+  var k = "cs-reloaded";
+  if (typeof React !== "undefined") { try { sessionStorage.removeItem(k); } catch(e){} return; }
+  try { if (sessionStorage.getItem(k)) return; sessionStorage.setItem(k, "1"); } catch(e){ return; }
+  var done = false, reload = function(){ if (!done) { done = true; location.reload(); } };
+  setTimeout(reload, 8000);
+  if (!navigator.serviceWorker) return reload();
+  navigator.serviceWorker.getRegistration().then(function(reg){
+    if (!reg) return reload();
+    return reg.update().then(function(){
+      var w = reg.installing || reg.waiting;
+      if (!w) return reload();
+      w.addEventListener("statechange", function(){ if (w.state === "activated") reload(); });
+    });
+  }).catch(reload);
+});
+</script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
@@ -404,6 +425,25 @@ const GBP_LISTINGS = [
 ];
 const gbpListing = v => GBP_LISTINGS.some(l=>l.value===(v&&v.listing)) ? v.listing : "all";
 const gbpListingLabel = v => GBP_LISTINGS.find(l=>l.value===gbpListing(v)).label;
+// What a Google Business variant posts: an Update (default) or photo(s) added to the listing's Photos gallery.
+const GBP_TYPES = [
+  {value:"update", label:"Update post"},
+  {value:"photo", label:"Gallery photo"},
+];
+const GBP_PHOTO_CATEGORIES = [
+  {value:"FOOD_AND_DRINK", label:"Food & drink"},
+  {value:"INTERIOR", label:"Interior"},
+  {value:"EXTERIOR", label:"Exterior"},
+  {value:"AT_WORK", label:"At work"},
+  {value:"TEAMS", label:"Team"},
+  {value:"COMMON_AREA", label:"Common area"},
+  {value:"MENU", label:"Menu"},
+  {value:"ADDITIONAL", label:"Other"},
+  {value:"COVER", label:"Cover (main listing photo)"},
+];
+const isGbpPhoto = v => !!v && v.gbpType==="photo";
+const gbpCategory = v => GBP_PHOTO_CATEGORIES.some(c=>c.value===(v&&v.category)) ? v.category : "FOOD_AND_DRINK";
+const gbpCategoryLabel = v => GBP_PHOTO_CATEGORIES.find(c=>c.value===gbpCategory(v)).label;
 
 /* Go-live: the workspace starts empty — everything shown comes from the shared server copy (real posts from the team)
    and real stats from Make. The only made-up numbers left are the clearly labelled "Sample data" in Analytics. */
@@ -1853,6 +1893,7 @@ function ContentDetailDrawer({item, onClose}){
                   </div>
                   <div style={{display:"flex", flexDirection:"column", gap:7, fontSize:12.5}}>
                     {p==="gbp" && <FieldRow label="Listing" value={gbpListingLabel(v)}/>}
+                    {p==="gbp" && <FieldRow label="Type" value={isGbpPhoto(v)? "Gallery photo · "+gbpCategoryLabel(v) : "Update"}/>}
                     {v.title && <FieldRow label="Title" value={v.title}/>}
                     {v.caption && <FieldRow label="Caption" value={v.caption}/>}
                     {v.description && <FieldRow label="Description" value={v.description}/>}
@@ -2499,6 +2540,7 @@ function GBPScreen({item, variant, brand: b, playing, muted}){
   const ink = "#202124", mute = "#5f6368";
   // Show the branch listing the update goes to (e.g. "Sanjugo Angel"); "all" keeps the plain brand name.
   const brand = gbpListing(variant)==="all" ? b : {...b, name: b.name+" "+gbpListingLabel(variant)};
+  const photo = isGbpPhoto(variant), tabOn = photo ? "Photos" : "Updates";
   const rating = (4.5 + seedNum(brand.id+"rt", 0, 5)/10).toFixed(1);
   return (
     <div style={{position:"absolute", inset:0, background:"#fff", color:ink, fontFamily:'Roboto, "Google Sans", Arial, sans-serif'}}>
@@ -2514,8 +2556,15 @@ function GBPScreen({item, variant, brand: b, playing, muted}){
           </div>
         </div>
         <div style={{display:"flex", gap:pt(22), padding:`0 ${pt(16)}`, borderBottom:"1px solid #dadce0", fontSize:pt(14), fontWeight:500, color:mute}}>
-          {["Overview","Updates","Reviews","Photos"].map(t=><span key={t} style={{padding:`${pt(8)} 0`, color: t==="Updates"?"#1a73e8":mute, borderBottom: t==="Updates"? `${pt(3)} solid #1a73e8`:"none"}}>{t}</span>)}
+          {["Overview","Updates","Reviews","Photos"].map(t=><span key={t} style={{padding:`${pt(8)} 0`, color: t===tabOn?"#1a73e8":mute, borderBottom: t===tabOn? `${pt(3)} solid #1a73e8`:"none"}}>{t}</span>)}
         </div>
+        {photo ? (
+          <div style={{margin:pt(14)}}>
+            <div style={{fontSize:pt(13), color:mute, marginBottom:pt(8)}}>{gbpCategoryLabel(variant)}</div>
+            <div style={{position:"relative", width:"100%", aspectRatio:"1/1", background:"#000", borderRadius:pt(8), overflow:"hidden"}}><ScreenMedia item={item} single/></div>
+            {variant.caption && <div style={{fontSize:pt(13), color:ink, marginTop:pt(8)}}>{variant.caption}</div>}
+          </div>
+        ) : (
         <div style={{margin:pt(14), border:"1px solid #dadce0", borderRadius:pt(12), overflow:"hidden"}}>
           <div style={{display:"flex", alignItems:"center", gap:pt(10), padding:pt(12)}}>
             <BrandAvatar brand={brand} size={pt(34)}/>
@@ -2525,6 +2574,7 @@ function GBPScreen({item, variant, brand: b, playing, muted}){
           <PhoneCaption lines={4} style={{padding:`${pt(10)} ${pt(12)} ${pt(4)}`, fontSize:pt(14), lineHeight:1.45}}>{variant.caption || <span style={{color:mute}}>No update text</span>}</PhoneCaption>
           <div style={{padding:pt(12)}}><span style={{display:"inline-block", border:"1px solid #dadce0", color:"#1a73e8", borderRadius:99, padding:`${pt(8)} ${pt(18)}`, fontSize:pt(14), fontWeight:500}}>{variant.cta || "Learn more"}</span></div>
         </div>
+        )}
       </div>
       <HomeIndicator dark/>
     </div>
@@ -2662,6 +2712,7 @@ function variantFields(platform, v){
   if(!v) return [];
   if(v.postType==="Story") return [["Link sticker", v.url || "None"], ["Posting notes", v.storyNotes]];
   if(platform==="youtube") return [["Title", v.title], ["Description", v.description]];
+  if(platform==="gbp" && isGbpPhoto(v)) return [["Listing", gbpListingLabel(v)], ["Gallery photo", gbpCategoryLabel(v)], ["Description", v.caption]];
   if(platform==="gbp") return [["Listing", gbpListingLabel(v)], ["Update text", v.caption], ["Button", v.cta || "Learn more"]];
   return [["Caption", v.caption], ["Hashtags", (v.hashtags||[]).join(" ")]];
 }
@@ -2888,7 +2939,7 @@ function RevisionEditor({item, onClose}){
   useEffect(()=>{
     if(!item){ setF(null); return; }
     const variants = {};
-    Object.entries(item.variants||{}).forEach(([p,v])=>{ variants[p] = {caption:v.caption||"", hashtags:(v.hashtags||[]).join(" "), title:v.title||"", description:v.description||"", cta:v.cta||"", url:v.url||"", listing:gbpListing(v), storyNotes:v.storyNotes||"", scheduledAt: v.scheduledAt ? isoToLocalInput(v.scheduledAt) : ""}; });
+    Object.entries(item.variants||{}).forEach(([p,v])=>{ variants[p] = {caption:v.caption||"", hashtags:(v.hashtags||[]).join(" "), title:v.title||"", description:v.description||"", cta:v.cta||"", url:v.url||"", listing:gbpListing(v), gbpType: isGbpPhoto(v)? "photo" : "update", category:gbpCategory(v), storyNotes:v.storyNotes||"", scheduledAt: v.scheduledAt ? isoToLocalInput(v.scheduledAt) : ""}; });
     setF({title:item.title, variants, media:null, libraryRef:undefined, note:"", mediaStatus:""});
     setTab(item.platforms[0]);
     setNotify(true);
@@ -2936,7 +2987,7 @@ function RevisionEditor({item, onClose}){
   function patchFromForm(){
     const variants = {};
     Object.entries(f.variants).forEach(([p,v])=>{
-      variants[p] = {caption:v.caption, hashtags: v.hashtags.split(/[\s,]+/).filter(Boolean).map(t=> t.startsWith("#")? t : "#"+t), title:v.title, description:v.description, cta:v.cta, url:v.url.trim(), storyNotes:v.storyNotes, ...(p==="gbp"? {listing:v.listing} : {}),
+      variants[p] = {caption:v.caption, hashtags: v.hashtags.split(/[\s,]+/).filter(Boolean).map(t=> t.startsWith("#")? t : "#"+t), title:v.title, description:v.description, cta:v.cta, url:v.url.trim(), storyNotes:v.storyNotes, ...(p==="gbp"? {listing:v.listing, gbpType:v.gbpType, ...(v.gbpType==="photo"? {category:v.category} : {})} : {}),
         scheduledAt: v.scheduledAt ? new Date(v.scheduledAt).toISOString() : null};
     });
     return {title:f.title.trim() || item.title, variants, ...(f.media? {media:f.media} : {}), ...(f.libraryRef!==undefined? {libraryRef:f.libraryRef} : {})};
@@ -3015,7 +3066,14 @@ function RevisionEditor({item, onClose}){
           <textarea value={v.caption} onChange={e=>setV(tab,{caption:e.target.value})} placeholder="Caption" rows={4} style={{...input, resize:"vertical", marginBottom:8}}/>
           {tab==="gbp"
             ? <>
-              <input value={v.cta} onChange={e=>setV(tab,{cta:e.target.value})} placeholder="Button text, e.g. Book" style={{...input, marginBottom:8}}/>
+              <select aria-label="Google Business post type" value={v.gbpType} onChange={e=>setV(tab,{gbpType:e.target.value})} style={{...input, marginBottom:8}}>
+                {GBP_TYPES.map(t=><option key={t.value} value={t.value}>{t.label}</option>)}
+              </select>
+              {v.gbpType==="photo"
+                ? <select aria-label="Google photo category" value={v.category} onChange={e=>setV(tab,{category:e.target.value})} style={{...input, marginBottom:8}}>
+                    {GBP_PHOTO_CATEGORIES.map(c=><option key={c.value} value={c.value}>Category: {c.label}</option>)}
+                  </select>
+                : <input value={v.cta} onChange={e=>setV(tab,{cta:e.target.value})} placeholder="Button text, e.g. Book" style={{...input, marginBottom:8}}/>}
               <select aria-label="Google Business listing" value={v.listing} onChange={e=>setV(tab,{listing:e.target.value})} style={input}>
                 {GBP_LISTINGS.map(l=><option key={l.value} value={l.value}>Post to: {l.label}</option>)}
               </select>
@@ -4669,7 +4727,7 @@ function CreateContentPage(){
     if(form.gallery.length>1){
       if(form.platforms.includes("youtube")) w.push("YouTube can't post photos — untick YouTube for this multi-photo post.");
       if(form.platforms.includes("tiktok")) w.push("TikTok photo posts go up from the TikTok app (Make can't post them), then mark them as published.");
-      if(form.platforms.includes("gbp")) w.push("Google Business shows the first photo only.");
+      if(form.platforms.includes("gbp")) w.push(isGbpPhoto(form.variants.gbp) ? (gbpCategory(form.variants.gbp)==="COVER" ? "Google uses only the first photo as the cover." : "All "+form.gallery.length+" photos go into the Google gallery.") : "Google Business shows the first photo only.");
       if(form.gallery.some(x=>x.trimmed)) w.push("Some photos were trimmed to fit Instagram's 4:5–1.91:1 shape — check the preview.");
     }
     if(form.galleryStatus) w.push("Still preparing photos — wait for them to finish before submitting.");
@@ -4680,7 +4738,8 @@ function CreateContentPage(){
     if(!story) form.platforms.forEach(p=>{
       const v = form.variants[p]||{};
       if(p==="youtube" && !v.title) w.push("YouTube Shorts is missing a title.");
-      if((p==="instagram"||p==="facebook"||p==="gbp") && !v.caption && !v.postDescription) w.push(PLATFORM_META[p].label+" is missing a caption.");
+      if((p==="instagram"||p==="facebook"||(p==="gbp" && !isGbpPhoto(v))) && !v.caption && !v.postDescription) w.push(PLATFORM_META[p].label+" is missing a caption.");
+      if(p==="gbp" && isGbpPhoto(v) && form.mediaType==="video" && form.gallery.length<2) w.push("Google gallery photos need a photo — this post is a video.");
       if(p==="tiktok" && !v.caption) w.push("TikTok is missing a caption.");
     });
     if((form.platforms.includes("tiktok")||form.platforms.includes("youtube")) && form.aspectRatio!=="9:16") w.push("TikTok / YouTube Shorts expect a 9:16 aspect ratio — current media is "+form.aspectRatio+".");
@@ -4972,13 +5031,27 @@ function CreateContentPage(){
                       <div style={{marginBottom:14}}>
                         <label style={{fontSize:12.5,fontWeight:700,display:"block",marginBottom:6}}>Google listing</label>
                         <Select value={gbpListing(v)} onChange={val=>setVariant(p,{listing:val})} options={GBP_LISTINGS}/>
-                        <div style={{fontSize:11, color:"var(--ink-mute)", marginTop:4}}>Which branch's Google Business listing shows this update.</div>
+                        <div style={{fontSize:11, color:"var(--ink-mute)", marginTop:4}}>Which branch's Google Business listing gets this.</div>
                       </div>
-                      <TextField label="Post description" value={v.caption||""} onChange={val=>setVariant(p,{caption:val})} textarea placeholder="What's the update?"/>
-                      <div className="cf-field-grid" style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:14}}>
-                        <div><label style={{fontSize:12.5,fontWeight:700,display:"block",marginBottom:6}}>CTA type</label><Select value={v.cta||"Learn More"} onChange={val=>setVariant(p,{cta:val})} options={["Learn More","Order Online","Book","Call Now"].map(x=>({value:x,label:x}))}/></div>
-                        <TextField label="CTA URL" value={v.url||""} onChange={val=>setVariant(p,{url:val})} placeholder="https://…"/>
+                      <div style={{marginBottom:14}}>
+                        <label style={{fontSize:12.5,fontWeight:700,display:"block",marginBottom:6}}>What to post</label>
+                        <Select value={isGbpPhoto(v)? "photo" : "update"} onChange={val=>setVariant(p,{gbpType:val, ...(val==="photo"? {category:gbpCategory(v)} : {})})} options={GBP_TYPES}/>
+                        <div style={{fontSize:11, color:"var(--ink-mute)", marginTop:4}}>{isGbpPhoto(v) ? "Adds the photo(s) to the listing's Photos." : "Shows under Updates on the listing, with a button."}</div>
                       </div>
+                      {isGbpPhoto(v) ? <>
+                        <div style={{marginBottom:14}}>
+                          <label style={{fontSize:12.5,fontWeight:700,display:"block",marginBottom:6}}>Photo category</label>
+                          <Select value={gbpCategory(v)} onChange={val=>setVariant(p,{category:val})} options={GBP_PHOTO_CATEGORIES}/>
+                          <div style={{fontSize:11, color:"var(--ink-mute)", marginTop:4}}>{gbpCategory(v)==="COVER" ? "Replaces the main photo people see first on the listing." : "Every photo in this post is added to the listing's Photos (max 5MB each)."}</div>
+                        </div>
+                        <TextField label="Photo description (optional)" value={v.caption||""} onChange={val=>setVariant(p,{caption:val})} placeholder="e.g. Salmon don with ikura"/>
+                      </> : <>
+                        <TextField label="Post description" value={v.caption||""} onChange={val=>setVariant(p,{caption:val})} textarea placeholder="What's the update?"/>
+                        <div className="cf-field-grid" style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:14}}>
+                          <div><label style={{fontSize:12.5,fontWeight:700,display:"block",marginBottom:6}}>CTA type</label><Select value={v.cta||"Learn More"} onChange={val=>setVariant(p,{cta:val})} options={["Learn More","Order Online","Book","Call Now"].map(x=>({value:x,label:x}))}/></div>
+                          <TextField label="CTA URL" value={v.url||""} onChange={val=>setVariant(p,{url:val})} placeholder="https://…"/>
+                        </div>
+                      </>}
                     </>}
                   </Card>
                 );

@@ -113,12 +113,35 @@ export default {
       if (request.method === "GET") return getChat(url, env);
       if (request.method === "POST") return postChat(request, env, ctx);
     }
+    if ((url.pathname === "/api/chat/react" || url.pathname === "/api/chat/pin") && request.method === "POST") {
+      try { return json({ message: await chatUpdate(request, env, url, viewer) }); } catch (e) { return json({ error: e.message || "Chat error" }, e.status || 500); }
+    }
 
     if (url.pathname === "/api/make" || url.pathname.startsWith("/api/make/")) {
       try {
         return await makeRoute(request, env, url, viewer, ctx);
       } catch (e) {
         return json({ error: e.message || "Make error" }, e.status || 500);
+      }
+    }
+
+    if (url.pathname === "/api/study" || url.pathname.startsWith("/api/study/")) {
+      try { return await studyRoute(request, env, url, viewer); } catch (e) { return json({ error: e.message || "Study error" }, e.status || 500); }
+    }
+
+    if (url.pathname === "/api/occasions" || url.pathname === "/api/occasions/status") {
+      try { return await occasionsRoute(request, env, url, viewer); } catch (e) { return json({ error: e.message || "Occasions error" }, e.status || 500); }
+    }
+
+    if (url.pathname === "/api/notes") {
+      try { return await notesRoute(request, env, url, viewer); } catch (e) { return json({ error: e.message || "Notes error" }, e.status || 500); }
+    }
+
+    if (url.pathname === "/api/workspace" || url.pathname.startsWith("/api/workspace/")) {
+      try {
+        return await workspaceRoute(request, env, url, viewer, ctx);
+      } catch (e) {
+        return json({ error: e.message || "Workspace error" }, e.status || 500);
       }
     }
 
@@ -142,6 +165,7 @@ export default {
 
     if (url.pathname.startsWith("/api/library")) {
       try {
+        if (url.pathname === "/api/library/used") return await libraryUsedRoute(request, env, viewer);
         if (url.pathname === "/api/library" && request.method === "GET") return await getLibrary(request, env);
         if (url.pathname === "/api/library/status" && request.method === "GET") return await libraryStatus(env);
         if (url.pathname === "/api/library/refresh" && request.method === "POST") return json(await refreshLibrary(env));
@@ -307,7 +331,9 @@ async function uploadFile(request, env) {
   const safeExt = (file.name && file.name.includes("."))
     ? file.name.split(".").pop().replace(/[^a-zA-Z0-9]/g, "").slice(0, 8)
     : "bin";
-  const key = `${crypto.randomUUID()}.${safeExt || "bin"}`;
+  // Workspace drafts live under workspace/ so the post clean-up never mistakes them for unused uploads.
+  const folder = form.get("folder") === "workspace" ? "workspace/" : "";
+  const key = `${folder}${crypto.randomUUID()}.${safeExt || "bin"}`;
 
   await env.MEDIA.put(key, file.stream(), {
     httpMetadata: { contentType: file.type || "application/octet-stream" },
@@ -383,23 +409,44 @@ async function ensureChatTable(env) {
   ).run();
   // Workflow updates carry the activity id they came from, so each event is posted exactly once.
   try { await env.DB.prepare("ALTER TABLE chat_messages ADD COLUMN event_id TEXT").run(); } catch (e) { /* already there */ }
+  // Replies, reactions, pins and attached cards (a Workspace project, a post or a calendar day).
+  for (const col of ["reply_to INTEGER", "reactions TEXT", "pinned_at TEXT", "pinned_by TEXT", "card TEXT", "updated_at TEXT"]) {
+    try { await env.DB.prepare("ALTER TABLE chat_messages ADD COLUMN " + col).run(); } catch (e) { /* already there */ }
+  }
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS chat_messages_updated ON chat_messages(updated_at)").run();
   await env.DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS chat_messages_event ON chat_messages(event_id)").run();
   chatTableReady = true;
 }
 
 function rowToMessage(r) {
-  let mentions = [];
-  try { mentions = JSON.parse(r.mentions || "[]"); } catch (e) {}
-  return { id: r.id, author: r.author, text: r.text, mentions, contentId: r.content_id || null, createdAt: r.created_at };
+  const parse = (v, d) => { try { return v ? JSON.parse(v) : d; } catch (e) { return d; } };
+  return { id: r.id, author: r.author, text: r.text, mentions: parse(r.mentions, []), contentId: r.content_id || null, createdAt: r.created_at,
+    replyTo: r.reply_to || null, reactions: parse(r.reactions, {}), pinnedAt: r.pinned_at || null, pinnedBy: r.pinned_by || null, card: parse(r.card, null), updatedAt: r.updated_at || null };
+}
+const CHAT_CARD_TYPES = ["project", "post", "day"];
+function chatCard(c) {
+  if (!c || !CHAT_CARD_TYPES.includes(c.type)) return null;
+  const id = String(c.id || "").slice(0, 64);
+  if (c.type === "day" ? !/^\d{4}-\d{2}-\d{2}$/.test(id) : !/^[\w-]{3,64}$/.test(id)) return null;
+  return { type: c.type, id };
 }
 
 async function getChat(url, env) {
   await ensureChatTable(env);
   const since = Number(url.searchParams.get("since") || 0);
+  const changedSince = url.searchParams.get("changed") || "";
   const { results } = since > 0
     ? await env.DB.prepare("SELECT * FROM chat_messages WHERE id > ?1 ORDER BY id ASC LIMIT 500").bind(since).all()
     : await env.DB.prepare("SELECT * FROM (SELECT * FROM chat_messages ORDER BY id DESC LIMIT 300) ORDER BY id ASC").all();
-  return new Response(JSON.stringify({ messages: (results || []).map(rowToMessage) }), {
+  // Reactions and pins change older messages — send those again too.
+  const changed = since > 0 && changedSince
+    ? (await env.DB.prepare("SELECT * FROM chat_messages WHERE id <= ?1 AND updated_at > ?2 ORDER BY id ASC LIMIT 300").bind(since, changedSince).all()).results || []
+    : [];
+  // Pinned messages always come along, even when they're older than the last 300.
+  const pinned = since > 0 ? [] : (await env.DB.prepare("SELECT * FROM chat_messages WHERE pinned_at IS NOT NULL ORDER BY pinned_at DESC LIMIT 30").all()).results || [];
+  const seen = new Set((results || []).map((r) => r.id));
+  const extra = [...changed, ...pinned].filter((r) => !seen.has(r.id) && seen.add(r.id));
+  return new Response(JSON.stringify({ messages: [...extra, ...(results || [])].map(rowToMessage), serverTime: new Date().toISOString() }), {
     headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
   });
 }
@@ -414,10 +461,12 @@ async function postChat(request, env, ctx) {
   if (!author || !text) return new Response(JSON.stringify({ error: "author and text are required" }), { status: 400 });
   const mentions = Array.isArray(body.mentions) ? body.mentions.map(String).slice(0, 20) : [];
   const contentId = body.contentId ? String(body.contentId).slice(0, 64) : null;
+  const card = chatCard(body.card);
+  const replyTo = Number(body.replyTo) > 0 ? Number(body.replyTo) : null;
   await ensureChatTable(env);
   const row = await env.DB.prepare(
-    "INSERT INTO chat_messages (author, text, mentions, content_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5) RETURNING *"
-  ).bind(author, text, JSON.stringify(mentions), contentId, new Date().toISOString()).first();
+    "INSERT INTO chat_messages (author, text, mentions, content_id, created_at, reply_to, card) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) RETURNING *"
+  ).bind(author, text, JSON.stringify(mentions), contentId, new Date().toISOString(), replyTo, card ? JSON.stringify(card) : null).first();
   const notify = mentions.filter((id) => id !== author);
   if (ctx && notify.length) {
     ctx.waitUntil((async () => {
@@ -520,8 +569,13 @@ async function refreshLibrary(env) {
   const root = env.LIBRARY_FOLDER_ID;
   if (!root) throw new HttpError(500, "LIBRARY_FOLDER_ID is not set in wrangler.toml");
   const folders = new Map([[root, { name: null, parent: null }]]);
+  // Finished Workspace videos are saved to Creator Studio's own Drive folder (Drive only lets the app write
+  // to folders it made), so that folder is walked as a second library root — its branch subfolders sit beside the library's.
+  const wsRoot = await kvGet(env, "ws_drive_folder");
+  if (wsRoot && wsRoot.id && wsRoot.id !== root) folders.set(wsRoot.id, { name: null, parent: null });
+  const roots = [...folders.keys()];
   const items = [];
-  let frontier = [root], calls = 0;
+  let frontier = roots, calls = 0;
   while (frontier.length) {
     const next = [];
     for (let i = 0; i < frontier.length; i += 40) {
@@ -554,7 +608,7 @@ async function refreshLibrary(env) {
   }
   const pathOf = (folderId) => { // folder names from just under the root down to this folder
     const names = [];
-    for (let id = folderId, guard = 0; id && id !== root && guard < 25; guard++) {
+    for (let id = folderId, guard = 0; id && !roots.includes(id) && guard < 25; guard++) {
       const f = folders.get(id);
       if (!f) break;
       names.unshift(f.name);
@@ -832,6 +886,7 @@ function storageCategory(key) {
   if (key.startsWith("thumbs/")) return "thumbnails";
   if (key.startsWith("library/")) return "library";
   if (key.startsWith("meta/")) return "system";
+  if (key.startsWith("workspace/")) return "workspace";
   return "uploads";
 }
 const mediaKeyOf = (url) => { const m = /^\/api\/media\/([^?#]+)/.exec(url || ""); return m ? decodeURIComponent(m[1]) : null; };
@@ -882,7 +937,7 @@ async function planCleanup(env, now = Date.now()) {
 
 async function storageReport(env) {
   const { objects, actions } = await planCleanup(env);
-  const byCategory = { uploads: { bytes: 0, count: 0 }, library: { bytes: 0, count: 0 }, thumbnails: { bytes: 0, count: 0 }, system: { bytes: 0, count: 0 } };
+  const byCategory = { uploads: { bytes: 0, count: 0 }, library: { bytes: 0, count: 0 }, workspace: { bytes: 0, count: 0 }, thumbnails: { bytes: 0, count: 0 }, system: { bytes: 0, count: 0 } };
   let total = 0;
   for (const o of objects) { const c = byCategory[storageCategory(o.key)]; c.bytes += o.size; c.count++; total += o.size; }
   const ready = actions.filter((a) => a.ready !== false);
@@ -1600,11 +1655,11 @@ async function readState(env) {
   return row ? JSON.parse(row.data) : {};
 }
 
-async function postSystemChat(env, { text, mentions = [], contentId = null, eventId }) {
+async function postSystemChat(env, { text, mentions = [], contentId = null, eventId, card = null }) {
   await ensureChatTable(env);
   const res = await env.DB.prepare(
-    "INSERT OR IGNORE INTO chat_messages (author, text, mentions, content_id, created_at, event_id) VALUES ('system', ?1, ?2, ?3, ?4, ?5)"
-  ).bind(text, JSON.stringify(mentions), contentId, new Date().toISOString(), eventId).run();
+    "INSERT OR IGNORE INTO chat_messages (author, text, mentions, content_id, created_at, event_id, card) VALUES ('system', ?1, ?2, ?3, ?4, ?5, ?6)"
+  ).bind(text, JSON.stringify(mentions), contentId, new Date().toISOString(), eventId, card ? JSON.stringify(chatCard(card)) : null).run();
   return !!(res.meta && res.meta.changes > 0);
 }
 
@@ -1728,7 +1783,7 @@ async function sendPublishJobs(env, { item, platforms, origin, userId, trigger }
 async function triggerAnalyticsPull(env, { trigger }) {
   const cfg = await makeConfig(env);
   const platforms = pullPlatforms(cfg);
-  if (!platforms.length) throw new HttpError(400, "Add at least one Pull webhook in Settings → Make.com first.");
+  if (!platforms.length) throw new HttpError(400, "Add at least one Pull webhook in Settings → Make.com connections first.");
   await ensureMakeTables(env);
   const id = "pull_" + crypto.randomUUID().slice(0, 12);
   const token = crypto.randomUUID() + crypto.randomUUID().slice(0, 8);
@@ -2051,21 +2106,21 @@ How to answer:
 - If a question is ambiguous, make a sensible assumption, say it in a few words, and answer.
 
 What Creator Studio can do (use this to explain how things work):
-- Dashboard: counts of posts awaiting approval, changes requested, scheduled this week, published, failed; views and engagement from real stats (last 30 days); Smart insights (Claude's read of the pipeline); upcoming content; recent approvals. Tiles are clickable.
+- Dashboard ("Sanjugo Dashboard", top of the menu): a greeting and "Waiting on you" — everything that needs this person, most urgent first (failed posts, posts to approve, Workspace cuts to approve, file names to confirm, ideas to vote on, posts sent back, and reminders for coming-up occasions with Plan / Done / Not for us); Last 7 days vs the week before (views, engagement, posts out vs the weekly goal, saves + shares); private sticky notes ("My notes", only that person sees them); This week (Mon–Sun, empty days in orange with "+ add"); a slim row with the best post ("make another" starts a Workspace project), Workspace stage counts and finished videos not posted yet.
 - Approvers per post (chosen in Create Content): "Cyrus and Yan Yan (both must approve)" — the default — or "Cyrus only" / "Yan Yan only". With both: every post needs BOTH Cyrus and Yan Yan to approve. The first approval is recorded ("Yan Yan ✓ · waiting for Cyrus") and the post stays in "To review" for the other approver; only the second approval makes it Approved and schedules it. Either approver can Reject or Request Edits on their own, which clears approvals; resubmitting starts approvals again.
 - Approval reminders: if a post, reel or story is still waiting for approval 1 hour before its publish time, Creator Studio @mentions the assigned approver(s) in Team Chat and sends a phone/desktop alert — once per publish time. Approved, sent-back or rejected posts aren't reminded.
 - Multi-photo (carousel) posts: in Create Content pick several photos at once (up to 10), or tap "Add photo" / pick more from the library under "Photos in this post"; reorder with ‹ and remove with ✕. Photos are re-saved as JPEG and trimmed to Instagram's 4:5–1.91:1 shape. Make posts them as an Instagram carousel and a Facebook multi-photo post; Google Business gets the first photo; YouTube can't post photos; TikTok photo posts go up from the TikTok app.
 - Create Content: first pick the content style — "Post / Reel" or "Story" (full-screen 9:16, Instagram/Facebook/TikTok only, with an optional link sticker and posting notes instead of a caption; approvers see it as a real story; Make can't post stories, so after approval someone posts it from the phone app and uses "Mark as published"). Then upload a video/photo, or pick one from the Content Library by barcode (e.g. G219). Choose platforms, write a caption per platform, pick a campaign (or "No campaign"), priority, and the approvers — every post needs both Cyrus and Yan Yan to approve. Then submit for approval, or "Save as Draft" (drafts show in the Content Calendar and can be opened, finished and submitted later). To delete a post: open it (tap it in the Calendar, Approval Queue or Dashboard) and tap "Delete draft" / "Delete post" at the top, then confirm. Creators can delete their own post while it is a draft, sent back for changes, or rejected; admins (Cyrus, Yan Yan) can delete any post that is not published. Published posts can\'t be deleted in Creator Studio (delete them in the social app itself).
-- Content Library: the Google Drive folder "Sanjugo Marketing Contents Final" (about 1,600 files). File names end with a barcode like G219; search by barcode, dish or stage, watch videos, see where a file has already been used (post, platform, date), and start a post from it.
+- Content Library: the Google Drive folder "Sanjugo Marketing Contents Final" (about 1,600 files) plus finished Workspace videos. Files posted outside Creator Studio can be marked used: open the file → "Mark as already used" (where, when, note; Undo to clear). File names end with a barcode like G219; search by barcode, dish or stage, watch videos, see where a file has already been used (post, platform, date), and start a post from it.
 - Approval Queue: tabs To review / Needs changes / Rejected. Posts are previewed exactly as they'll look on each app (Reels, TikTok, Shorts, Facebook, Google Business), with full-screen playback. Decide with the buttons under each post (no swiping): ✓ Approve, ✕ Reject, or Request Edits for changes (with feedback tags and a due date); each asks for confirmation. "Full package" reviews the whole post; "Per platform" reviews each platform separately. Undo Last Decision exists. Creators fix posts from Needs changes / Rejected and resubmit, optionally telling the approver in chat. Approved posts are auto-placed into the next free slot of the recurring calendar template (Settings) if they have no time.
-- Content Calendar: month, week and list views; filter by platform, campaign, status; tap a date to see that day or create content for it; drag or edit times.
-- Team Chat: @name mentions (with a badge, pop-up and phone/desktop alert), @everyone, attach a post, Mentions and Updates filters. "Creator Studio" posts automatic updates when something is sent for approval, resubmitted, approved, sent back, rejected, published, or fails to publish.
-- Publishing: on an approved post, "Publish…" → "Publish now with Make" posts to the platforms connected in Make (Instagram reel/photo, Facebook reel/photo, YouTube Short, Google Business update); the live link comes back to the post and Team Chat. Or switch on "Auto-publish at the scheduled time" (Settings → Make.com; checks every 5 minutes). TikTok can't be posted through Make — post it in the TikTok app, then use "Mark as published". Instagram reels need MP4/MOV, H.264/HEVC, max 1920 px wide, max 5 Mbps; Facebook reels 9:16, 3–90 s; best to export 1080p vertical.
-- Stats: Make pulls the latest posts with likes, comments, shares, saves, reach and views every night (about 4am UK time), or any time with "Get latest stats now" (Settings → Make.com). TikTok stats come from the public @sanjugouk profile via HasData. Each platform has its own Make scenario ("Pull · Instagram", "Publish · Facebook", …) so one can be fixed without touching the others; "Clear stats" removes a platform's stats (e.g. after switching accounts).
+- Content Calendar (tile "Calendar"): month, week and list views; filter by platform, campaign, status; tap a date to see that day or create content for it. Shows UK bank holidays and food/marketing dates (Halloween, Christmas, Valentine's, Mother's Day, Lunar New Year, Sushi Day, Black Friday…) on the days, plus a "Coming up" list beside the calendar.
+- Team Chat: @name mentions (badge, pop-up and phone alert), @everyone, @AI Dev +. Hover a message (tap on a phone) to react (👍 ✅ 👀 ❤️ 😂 🔥), reply, pin (pinned bar at the top and a Pinned tab) or 📁 make a Workspace project from it. The + button shares a Workspace project, a post or a calendar day as a live card with the next action (Approve cut, Vote, Review). Reel links play in the chat and can be added to a project's ideas. Tabs: All, Mentions of me, Updates, Pinned; plus Search. "Creator Studio" posts automatic updates for approvals, publishing and the Workspace.
+- Publishing: on an approved post, "Publish…" → "Publish now with Make" posts to the platforms connected in Make (Instagram reel/photo, Facebook reel/photo, YouTube Short, Google Business update); the live link comes back to the post and Team Chat. Or switch on "Auto-publish at the scheduled time" (Settings → Make.com connections; checks every 5 minutes). TikTok can't be posted through Make — post it in the TikTok app, then use "Mark as published". Instagram reels need MP4/MOV, H.264/HEVC, max 1920 px wide, max 5 Mbps; Facebook reels 9:16, 3–90 s; best to export 1080p vertical.
+- Stats: Make pulls the latest posts with likes, comments, shares, saves, reach and views every night (about 4am UK time), or any time with "Get latest" (Settings → Stats). TikTok stats come from the public @sanjugouk profile via HasData. Each platform has its own Make scenario ("Pull · Instagram", "Publish · Facebook", …) so one can be fixed without touching the others; "Clear stats" removes a platform's stats (e.g. after switching accounts).
 - Analytics: Real data (from Make) or Sample data; ranges 7/30/90 days, 12 months, All time, custom; filters by platform, campaign, content pillar, post; per-platform and per-post views, reach, likes, comments, shares, saves, engagement rate; best time to post; top posts; a growth forecaster.
-- Published Content: every live post on the connected accounts with its stats and a link to it.
-- Team: workload per person and real approval turnaround.
-- Settings (admins — Cyrus, Yan Yan): Make.com webhooks per platform, auto-publish, stats; Platforms; Notifications (chat workflow updates, and "Turn on alerts on this device" for phone/desktop push — on iPhone this only works from the Home Screen app: Safari → Share → Add to Home Screen, iOS 16.4+); Team & access (add people by email with a role: Creator, Approver, Admin); Google Drive connection; Storage (files move to a Drive archive 7 days after publishing, keeping 10 GB of Cloudflare storage free); Smart insights; Campaigns; recurring calendar template.
+- Published Content: a study page for every live post (and influencer posts added with "Add influencer post" — their link and numbers typed in from their insights). Filter by period, platform, Collabs only, search; "Compare by" Influencer / Promotion / Content type / Branch / Dish / Platform / Day / Time of day with average views or engagement; a day × time heatmap; each post shows how it did against the usual. Open a post for the caption breakdown (hook, words, emojis, hashtags, call to action), editable tags (guessed from the caption, marked "auto"), "Explain" (AI says why it worked), team notes, and "Make another like it".
+- Workspace (tile in the menu): one project per video. Create project (name, branch, category, dish, creator — or "not assigned yet", due date). Tabs: Ideas (paste reel links or write ideas; everyone except the project's creator votes Yes/No and comments on each with 💬; best first, three No's removes an idea; cards you haven't voted on say "Your vote?"), Plan (the idea text and a shot list the creator ticks off while filming), Draft review (upload cuts; notes at a second or on the whole cut, ticked Fixed; "Chat about all cuts" where "cut 1 at 0:12" becomes a link; "Send for approval"). Then the cut plays in a phone preview; anyone except the uploader taps "Approve content" or "Request changes". The uploader confirms the file name (SANJUGO filing system, e.g. 20261031_AL_FC_SP_FIN_v1_S465.mp4) and it is saved to Google Drive (Creator Studio Projects folder) and the Content Library. "Create post from this" then starts a normal post for the Approval Queue. This is content approval only — publishing still goes through the Approval Queue.
+- Settings: Stats (Get latest), Notifications, and for admins Team workload, Recent activity, Content library (Google Drive), Storage, Campaigns, Smart insights, Weekly posting slots, Platforms, Make.com connections (webhooks, auto-publish) and Team & access (roles, passwords). Your name and password are under your name at the top right of Settings. There is no separate Team page any more.
 - Roles: Creator — create, edit, submit. Approver — approve and schedule. Admin — everything including team and settings.`;
 
 async function botSnapshot(env, askerId) {
@@ -2217,4 +2272,683 @@ async function handleBotQuestion(request, env, ctx) {
   ctx.waitUntil(work.catch(() => {}));
   const message = await work;
   return json({ message });
+}
+
+// ---------------------------------------------------------------------------
+// Workspace — one project per video. The team collects reference reels and ideas (Yes/No votes), plans the
+// shot list, the creator uploads cuts, everyone leaves notes pinned to a moment in the video, and once anyone
+// else approves the final cut it's named with the SANJUGO filing system, saved to Google Drive and added to the
+// Content Library. This is content approval only — captions and publishing come later, in Create Content.
+// Projects and their items are separate rows (not the /api/state blob) so two people editing at once never clash.
+// ---------------------------------------------------------------------------
+
+const WS_BRANCHES = {
+  shoreditch: { letter: "S", folder: "Shoreditch", label: "Shoreditch" },
+  angel: { letter: "A", folder: "Angel", label: "Angel" },
+  victoria: { letter: "V", folder: "Victoria", label: "Victoria" },
+  all: { letter: "G", folder: "All-Branches", label: "All branches" },
+};
+const WS_SOCIAL = ["AL", "IV", "IS", "TK", "YT"];
+const WS_CATEGORIES = { FC: "Food and Craft", AV: "Atmosphere and Vibes", CH: "Culture and History", CM: "Community", PO: "Promos and Offers" };
+const WS_STAGES = ["FIN", "EDT", "RAW"];
+// Dish codes from SANJUGO_Video_Filing_System.docx (as used in the Content Library: Yasai Kakiage = YS, Tonkatsu Don = TN).
+const WS_DISHES = { YK: "Chicken Yakitori", ED: "Edamame", FD: "Fried Dumplings", MS: "Miso Soup", PP: "Padron Pepper", SE: "Spicy Edamame", TS: "Tofu Steak",
+  HS: "Hiramasa Salad", ST: "Salmon Tataki", SW: "Seaweed Salad", TT: "Tuna Tataki", WG: "Wagyu Beef Gunkan", WN: "Wagyu Beef Nigiri", WR: "Wagyu Beef Roll", WT: "Wagyu Beef Tataki",
+  CK: "Chicken Karaage", EF: "Ebi Fry", CT: "Homemade Chicken Tender", IK: "Iidako Karaage", OT: "Oyster Tempura", PT: "Prawn Tempura", SC: "Soft Shell Crab Tempura", TY: "Tako Yaki", YS: "Yasai Kakiage",
+  S3: "3 Sashimi Omakase", S5: "5 Sashimi Omakase", N6: "6 Nigiri Set", S7: "7 Sashimi Omakase", CR: "California Roll", GV: "Green Vege Roll", MP: "Miso Prawn Roll", RB: "Rainbow Roll",
+  SA: "Salmon & Avocado Roll", SJ: "SANJUGO Roll", SS: "Soft Shell Crab Roll", SP: "Spicy Tuna Roll", UR: "Unagi Roll", HK: "Grilled Hamachi Kama", GK: "Grilled Sake Kama",
+  GT: "Grilled Sake Teriyaki", SB: "Grilled Shioyaki Saba", MN: "Misoni Saba", ND: "Nasu Dengaku", PB: "Panko Prawn Bao", CB: "Spicy Chicken Bao", TB: "Teriyaki Bao", VB: "Vegetable Bao",
+  KC: "Chicken Katsu Curry Don", PC: "Prawn Katsu Curry Don", CD: "Chilli Chicken Don", TN: "Tonkatsu Don", GB: "Genki Beef Don", UD: "Unagi Don", SD: "Salmon Don", BC: "Bara Chirashi Don",
+  GH: "Gohan", HR: "Hijiki Rice", MC: "Marinated Chilli Chicken", VC: "Vegetable Croquette" };
+const WS_NAME_RE = /^(\d{8})_([A-Z]{2})_([A-Z]{2})((?:_[A-Z0-9]{2})*)_([A-Z]{3})_v(\d{1,2})_([A-Z])(\d{3})\.([a-z0-9]{2,5})$/;
+const WS_ITEM_KINDS = ["link", "idea", "comment", "draft", "note", "shot"];
+// Ideas and reference reels get a Yes or No from everyone except the project's creator; enough No's and it's dropped.
+function wsVoters(p, members) { return members.filter((m) => m.active !== false && m.id !== p.creatorId).map((m) => m.id); }
+function wsRemoved(it, voters) { return (it.no || []).filter((v) => voters.includes(v)).length >= Math.max(1, Math.min(3, voters.length)); }
+
+let wsTablesReady = false;
+async function ensureWsTables(env) {
+  if (wsTablesReady) return;
+  await env.DB.batch([
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS ws_projects (id TEXT PRIMARY KEY, data TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS ws_items (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, kind TEXT NOT NULL, data TEXT NOT NULL, created_at TEXT NOT NULL)"),
+    env.DB.prepare("CREATE INDEX IF NOT EXISTS ws_items_project ON ws_items(project_id)"),
+  ]);
+  wsTablesReady = true;
+}
+
+const wsId = (p) => p + "_" + crypto.randomUUID().replace(/-/g, "").slice(0, 10);
+const wsText = (v, n) => String(v == null ? "" : v).trim().slice(0, n);
+
+async function wsProject(env, id) {
+  const row = await env.DB.prepare("SELECT data FROM ws_projects WHERE id = ?1").bind(String(id || "")).first();
+  if (!row) throw new HttpError(404, "That project doesn't exist any more.");
+  const p = JSON.parse(row.data);
+  if (p.deleted) throw new HttpError(404, "That project was deleted.");
+  return p;
+}
+async function wsSaveProject(env, p) {
+  p.updatedAt = new Date().toISOString();
+  await env.DB.prepare("INSERT INTO ws_projects (id, data, created_at, updated_at) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at")
+    .bind(p.id, JSON.stringify(p), p.createdAt, p.updatedAt).run();
+  return p;
+}
+async function wsItems(env, projectId) {
+  const { results } = await env.DB.prepare("SELECT data FROM ws_items WHERE project_id = ?1 ORDER BY created_at ASC").bind(projectId).all();
+  return (results || []).map((r) => JSON.parse(r.data)).filter((i) => !i.deleted);
+}
+async function wsItem(env, id) {
+  const row = await env.DB.prepare("SELECT data FROM ws_items WHERE id = ?1").bind(String(id || "")).first();
+  if (!row) throw new HttpError(404, "That item doesn't exist any more.");
+  return JSON.parse(row.data);
+}
+async function wsSaveItem(env, it) {
+  await env.DB.prepare("INSERT INTO ws_items (id, project_id, kind, data, created_at) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(id) DO UPDATE SET data = excluded.data")
+    .bind(it.id, it.projectId, it.kind, JSON.stringify(it), it.createdAt).run();
+  return it;
+}
+
+// Ideas → Draft review → Waiting for approval → Approved (naming) → In Library.
+function wsStatus(p, items) {
+  if (p.filed) return "filed";
+  if (p.approval) return "approved";
+  if (p.submitted) return "waiting";
+  return items.some((i) => i.kind === "draft") ? "review" : "ideas";
+}
+function wsSummary(p, items, members, me) {
+  const voters = members ? wsVoters(p, members) : [];
+  const ideas = items.filter((i) => (i.kind === "link" || i.kind === "idea") && !(members && wsRemoved(i, voters)));
+  const shots = items.filter((i) => i.kind === "shot");
+  const drafts = items.filter((i) => i.kind === "draft");
+  const latest = drafts[drafts.length - 1] || null;
+  const shown = (p.submitted && drafts.find((d) => d.id === p.submitted.draftId)) || latest;
+  return { ...p, status: wsStatus(p, items),
+    finishedAt: p.filed ? p.filed.at : null, voters,
+    counts: { ideas: ideas.length, toVote: me && voters.includes(me) && !p.filed ? ideas.filter((i) => !(i.yes || []).includes(me) && !(i.no || []).includes(me)).length : 0, shots: shots.length, shotsDone: shots.filter((i) => i.done).length,
+      comments: items.filter((i) => i.kind === "comment" && !i.parentId).length, drafts: drafts.length,
+      openNotes: items.filter((i) => i.kind === "note" && !i.resolved && (!shown || i.draftId === shown.id)).length },
+    cover: shown ? { fileUrl: shown.media && shown.media.fileUrl, mime: shown.media && shown.media.mime, cut: shown.cut } : null,
+    lastActivity: items.reduce((t, i) => (i.createdAt > t ? i.createdAt : t), p.updatedAt) };
+}
+
+// Who is acting: the signed-in member, or (with sign-in off, e.g. local testing) whoever the browser says it is.
+async function wsActor(env, viewer, body) {
+  const { members } = await listTeam(env);
+  const id = viewer.accessEnabled ? viewer.member && viewer.member.id : String((body && body.userId) || "");
+  const m = members.find((x) => x.id === id && x.active !== false);
+  if (!m) throw new HttpError(403, "Sign in to use the Workspace.");
+  return { me: m, members };
+}
+
+// Everyone else on the team hears about it: a line in Team Chat (optional) plus a phone alert.
+async function wsNotify(env, ctx, { actor, members, project, text, push, eventId, chat = true, only }) {
+  const others = members.filter((m) => m.active !== false && m.id !== actor.id && (!only || only.includes(m.id))).map((m) => m.id);
+  const work = (async () => {
+    if (chat) await postSystemChat(env, { text, mentions: others, eventId: eventId || ("ws_" + crypto.randomUUID()), card: { type: "project", id: project.id } });
+    if (others.length) await pushToUsers(env, others, { title: push.title, body: push.body.slice(0, 180), url: "/#/workspace?p=" + project.id, tag: "ws-" + project.id });
+  })().catch((e) => console.error("workspace notify", e));
+  if (ctx) ctx.waitUntil(work); else await work;
+}
+
+async function workspaceRoute(request, env, url, viewer, ctx) {
+  await ensureWsTables(env);
+  const path = url.pathname.replace(/^\/api\/workspace\/?/, "");
+  if (request.method === "GET") {
+    if (path === "") {
+      const [{ results: rows }, { results: itemRows }] = await Promise.all([
+        env.DB.prepare("SELECT data FROM ws_projects ORDER BY updated_at DESC").all(),
+        env.DB.prepare("SELECT data FROM ws_items").all(),
+      ]);
+      const byProject = new Map();
+      for (const r of itemRows || []) { const it = JSON.parse(r.data); if (it.deleted) continue; if (!byProject.has(it.projectId)) byProject.set(it.projectId, []); byProject.get(it.projectId).push(it); }
+      const { members } = await listTeam(env);
+      const projects = (rows || []).map((r) => JSON.parse(r.data)).filter((p) => !p.deleted).map((p) => wsSummary(p, byProject.get(p.id) || [], members, url.searchParams.get("me")));
+      return json({ projects }, 200);
+    }
+    if (path === "project") {
+      const p = await wsProject(env, url.searchParams.get("id"));
+      const items = await wsItems(env, p.id);
+      const { members } = await listTeam(env);
+      return json({ project: wsSummary(p, items, members), items });
+    }
+    if (path === "name") {
+      const p = await wsProject(env, url.searchParams.get("id"));
+      return json(await wsNameSuggestion(env, request, p, await wsItems(env, p.id)));
+    }
+    throw new HttpError(404, "Unknown workspace request");
+  }
+  if (request.method !== "POST") throw new HttpError(405, "Method not allowed");
+  const body = await request.json().catch(() => ({}));
+  const { me, members } = await wsActor(env, viewer, body);
+  const now = new Date().toISOString();
+
+  if (path === "project") { // create or edit a project's details
+    const isNew = !body.id;
+    const p = isNew ? { id: wsId("wp"), createdBy: me.id, createdAt: now } : await wsProject(env, body.id);
+    if (!isNew && p.filed) throw new HttpError(409, "This project is already in the Content Library.");
+    if (isNew || body.title !== undefined) p.title = wsText(body.title, 120) || "Untitled project";
+    if (isNew || body.branch !== undefined) p.branch = WS_BRANCHES[body.branch] ? body.branch : "all";
+    if (isNew || body.category !== undefined) p.category = WS_CATEGORIES[body.category] ? body.category : "FC";
+    if (isNew || body.dishes !== undefined) p.dishes = (Array.isArray(body.dishes) ? body.dishes : []).map(String).filter((d) => WS_DISHES[d]).slice(0, 3);
+    // "" = not assigned yet (e.g. a project started from Team Chat) — then everyone votes on its ideas.
+    if (isNew || body.creatorId !== undefined) p.creatorId = members.some((m) => m.id === body.creatorId) ? body.creatorId : body.creatorId === "" ? null : me.id;
+    if (isNew || body.due !== undefined) p.due = /^\d{4}-\d{2}-\d{2}$/.test(body.due || "") ? body.due : null;
+    if (isNew || body.brief !== undefined) p.brief = wsText(body.brief, 2000);
+    await wsSaveProject(env, p);
+    if (isNew) await wsNotify(env, ctx, { actor: me, members, project: p, text: `📁 ${me.name} started a Workspace project: "${p.title}"`, push: { title: "New Workspace project", body: `${me.name}: ${p.title}` } });
+    return json({ project: wsSummary(p, await wsItems(env, p.id), members) });
+  }
+
+  if (path === "project/delete") {
+    const p = await wsProject(env, body.id);
+    if (me.role !== "admin" && p.createdBy !== me.id) throw new HttpError(403, "Only admins or the person who started it can delete a project.");
+    if (p.filed) throw new HttpError(409, "This project's video is already in the Content Library, so the project is kept.");
+    p.deleted = { by: me.id, at: now };
+    await wsSaveProject(env, p);
+    return json({ ok: true });
+  }
+
+  if (path === "item") { // add a link, idea, comment, draft (a cut) or a note on a draft
+    const p = await wsProject(env, body.projectId);
+    if (p.filed && body.kind !== "comment") throw new HttpError(409, "This project is finished — only comments can be added now.");
+    const kind = String(body.kind || "");
+    if (!WS_ITEM_KINDS.includes(kind)) throw new HttpError(400, "Unknown item type");
+    const it = { id: wsId("wi"), projectId: p.id, kind, author: me.id, createdAt: now, text: wsText(body.text, 4000) };
+    if (kind === "link") {
+      const u = wsText(body.url, 600);
+      if (!/^https:\/\/[^\s]+$/i.test(u)) throw new HttpError(400, "Paste a full link that starts with https://");
+      it.url = u; it.yes = []; it.no = [];
+    } else if (kind === "idea") {
+      if (!it.text) throw new HttpError(400, "Write the idea first.");
+      it.yes = []; it.no = [];
+    } else if (kind === "shot") {
+      if (!it.text) throw new HttpError(400, "Describe the shot first.");
+    } else if (kind === "comment") {
+      if (!it.text) throw new HttpError(400, "Write a comment first.");
+      if (body.parentId) { // a comment on one idea or reel
+        const parent = await wsItem(env, body.parentId);
+        if (parent.projectId !== p.id || (parent.kind !== "idea" && parent.kind !== "link")) throw new HttpError(400, "That idea isn't part of this project.");
+        it.parentId = parent.id;
+      }
+    } else if (kind === "draft") {
+      if (p.submitted || p.approval) throw new HttpError(409, "A cut is waiting for approval — wait for the decision before uploading another.");
+      const m = body.media || {};
+      if (!/^\/api\/media\/workspace\/[\w.-]+$/.test(m.fileUrl || "")) throw new HttpError(400, "Upload the video first.");
+      if (!/^video\//.test(m.mime || "")) throw new HttpError(400, "Drafts must be videos.");
+      const existing = (await wsItems(env, p.id)).filter((i) => i.kind === "draft");
+      it.cut = existing.length + 1;
+      it.media = { fileUrl: m.fileUrl, mime: wsText(m.mime, 60), name: wsText(m.name, 200), size: Number(m.size) || null, duration: Number(m.duration) || null, w: Number(m.w) || null, h: Number(m.h) || null };
+    } else if (kind === "note") {
+      const d = await wsItem(env, body.draftId);
+      if (d.projectId !== p.id || d.kind !== "draft") throw new HttpError(400, "That cut isn't part of this project.");
+      if (!it.text) throw new HttpError(400, "Write the note first.");
+      it.draftId = d.id;
+      // null = a note on the whole cut rather than one moment
+      it.t = body.t === null ? null : Math.max(0, Math.round((Number(body.t) || 0) * 10) / 10);
+    }
+    await wsSaveItem(env, it);
+    if (kind === "draft") {
+      await wsNotify(env, ctx, { actor: me, members, project: p, text: `🎬 ${me.name} uploaded cut ${it.cut} of "${p.title}" in the Workspace — have a look and leave notes.`, push: { title: `New cut: ${p.title}`, body: `${me.name} uploaded cut ${it.cut}` } });
+    } else if (kind !== "shot" && (kind !== "link" || it.text)) {
+      const label = { link: "added a reference", idea: "added an idea", comment: "commented", note: "left a note" }[kind];
+      await wsNotify(env, ctx, { actor: me, members, project: p, chat: false, push: { title: p.title, body: `${me.name} ${label}: ${it.text || it.url}` } });
+    }
+    return json({ item: it });
+  }
+
+  if (path === "item/vote" || path === "item/resolve" || path === "item/delete") {
+    const it = await wsItem(env, body.id);
+    const p = await wsProject(env, it.projectId);
+    if (path === "item/vote") {
+      if (it.kind !== "link" && it.kind !== "idea") throw new HttpError(400, "Only ideas and reels take votes.");
+      if (me.id === p.creatorId) throw new HttpError(403, "The project's creator doesn't vote — the rest of the team decides.");
+      const v = body.vote === "yes" || body.vote === "no" ? body.vote : null;
+      it.yes = (it.yes || []).filter((x) => x !== me.id);
+      it.no = (it.no || []).filter((x) => x !== me.id);
+      if (v) it[v].push(me.id);
+    } else if (path === "item/resolve") {
+      if (it.kind === "note") it.resolved = body.resolved === false ? null : { by: me.id, at: now };
+      else if (it.kind === "shot") it.done = body.resolved === false ? null : { by: me.id, at: now };
+      else throw new HttpError(400, "Only notes and shots can be ticked off.");
+    } else {
+      if (it.author !== me.id && me.role !== "admin") throw new HttpError(403, "You can only delete what you added.");
+      if (it.kind === "draft" && ((p.submitted && p.submitted.draftId === it.id) || p.approval || p.filed)) throw new HttpError(409, "This cut is in approval or already approved, so it's kept.");
+      it.deleted = { by: me.id, at: now };
+    }
+    await wsSaveItem(env, it);
+    return json({ item: it });
+  }
+
+  if (path === "submit") { // the creator says a cut is ready → it waits for anyone else to approve it
+    const p = await wsProject(env, body.projectId);
+    if (p.filed || p.approval) throw new HttpError(409, "This project is already approved.");
+    const d = await wsItem(env, body.draftId);
+    if (d.projectId !== p.id || d.kind !== "draft" || d.deleted) throw new HttpError(400, "Pick a cut from this project.");
+    p.submitted = { draftId: d.id, cut: d.cut, by: me.id, at: now };
+    await wsSaveProject(env, p);
+    await wsNotify(env, ctx, { actor: me, members, project: p, text: `🙋 ${me.name} sent cut ${d.cut} of "${p.title}" for content approval — open it in the Workspace to approve or ask for changes.`, push: { title: `Ready for approval: ${p.title}`, body: `${me.name} sent cut ${d.cut} for content approval` }, eventId: "ws_submit_" + d.id });
+    return json({ project: wsSummary(p, await wsItems(env, p.id), members) });
+  }
+
+  if (path === "withdraw") {
+    const p = await wsProject(env, body.projectId);
+    if (!p.submitted || p.approval) throw new HttpError(409, "Nothing is waiting for approval.");
+    if (p.submitted.by !== me.id && me.role !== "admin") throw new HttpError(403, "Only the person who sent it can take it back.");
+    delete p.submitted;
+    await wsSaveProject(env, p);
+    return json({ project: wsSummary(p, await wsItems(env, p.id), members) });
+  }
+
+  if (path === "review") { // any one teammate other than whoever uploaded the cut decides
+    const p = await wsProject(env, body.projectId);
+    if (!p.submitted || p.approval) throw new HttpError(409, "Nothing is waiting for approval.");
+    const d = await wsItem(env, p.submitted.draftId);
+    if (d.author === me.id) throw new HttpError(403, "Someone other than the person who uploaded this cut has to approve it.");
+    const note = wsText(body.note, 2000);
+    if (body.decision === "approve") {
+      p.approval = { draftId: d.id, cut: d.cut, by: me.id, at: now, note };
+      await wsSaveProject(env, p);
+      await wsNotify(env, ctx, { actor: me, members, project: p, text: `✅ ${me.name} approved cut ${d.cut} of "${p.title}". Next: confirm the file name so it can go to Google Drive.`, push: { title: `Approved: ${p.title}`, body: `${me.name} approved cut ${d.cut} — confirm the file name next` }, eventId: "ws_approve_" + d.id });
+    } else if (body.decision === "changes") {
+      if (!note) throw new HttpError(400, "Say what needs to change.");
+      delete p.submitted;
+      await wsSaveProject(env, p);
+      await wsSaveItem(env, { id: wsId("wi"), projectId: p.id, kind: "comment", author: me.id, createdAt: now, text: `Changes needed on cut ${d.cut}: ${note}`, decision: "changes", draftId: d.id });
+      await wsNotify(env, ctx, { actor: me, members, project: p, text: `✏️ ${me.name} asked for changes on cut ${d.cut} of "${p.title}": ${note}`, push: { title: `Changes needed: ${p.title}`, body: `${me.name}: ${note}` }, eventId: "ws_changes_" + d.id + "_" + Date.now() });
+    } else throw new HttpError(400, "Choose approve or changes.");
+    return json({ project: wsSummary(p, await wsItems(env, p.id), members) });
+  }
+
+  if (path === "unapprove") { // undo an approval before the file is saved
+    const p = await wsProject(env, body.projectId);
+    if (!p.approval || p.filed) throw new HttpError(409, "There's no approval to undo.");
+    if (p.approval.by !== me.id && me.role !== "admin") throw new HttpError(403, "Only the person who approved it can undo that.");
+    delete p.approval;
+    await wsSaveProject(env, p);
+    return json({ project: wsSummary(p, await wsItems(env, p.id), members) });
+  }
+
+  if (path === "file") return json(await wsFile(env, request, ctx, body, me, members));
+
+  throw new HttpError(404, "Unknown workspace request");
+}
+
+// Every barcode in use: the Content Library (live index, or the bundled snapshot) plus anything Workspace has filed.
+async function wsUsedBarcodes(env, request) {
+  let files = [];
+  const obj = await env.MEDIA.get(LIBRARY_INDEX_KEY);
+  if (obj) files = (await obj.json().catch(() => ({}))).files || [];
+  else {
+    const r = await env.ASSETS.fetch(new Request(new URL("/library.json", request.url)));
+    if (r.ok) files = (await r.json().catch(() => ({}))).files || [];
+  }
+  const used = new Set();
+  for (const f of files) { const m = /_([A-Z]\d{3})(?:\.[^.]+)?$/.exec(f.name || ""); if (m) used.add(m[1]); }
+  const { results } = await env.DB.prepare("SELECT data FROM ws_projects").all();
+  for (const r of results || []) { const p = JSON.parse(r.data); if (p.filed && p.filed.barcode) used.add(p.filed.barcode); }
+  return used;
+}
+function wsNextBarcode(letter, used) {
+  let max = 0;
+  for (const c of used) if (c[0] === letter) max = Math.max(max, Number(c.slice(1)));
+  return letter + String(max + 1).padStart(3, "0");
+}
+const wsExtOf = (fileUrl) => ((/\.([a-z0-9]{2,5})$/i.exec(fileUrl || "") || [])[1] || "mp4").toLowerCase();
+function londonDate(d = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/London", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(d);
+  const v = (t) => parts.find((x) => x.type === t).value;
+  return v("year") + v("month") + v("day");
+}
+
+async function wsNameSuggestion(env, request, p, items) {
+  const d = items.find((i) => p.approval && i.id === p.approval.draftId);
+  if (!d) throw new HttpError(409, "Approve a cut first.");
+  const used = await wsUsedBarcodes(env, request);
+  const branch = WS_BRANCHES[p.branch] || WS_BRANCHES.all;
+  const parts = { date: londonDate(), social: "AL", category: p.category || "FC", dishes: p.dishes || [], stage: "FIN", version: "v" + d.cut,
+    barcode: wsNextBarcode(branch.letter, used), ext: wsExtOf(d.media && d.media.fileUrl) };
+  return { parts, name: wsBuildName(parts), branchLetter: branch.letter, usedBarcodes: [...used].filter((c) => c[0] === branch.letter).length,
+    codes: { social: WS_SOCIAL, categories: WS_CATEGORIES, dishes: WS_DISHES, stages: WS_STAGES } };
+}
+function wsBuildName(x) {
+  return [x.date, x.social, x.category, ...(x.dishes || []), x.stage, x.version, x.barcode].join("_") + "." + x.ext;
+}
+// The same checks the pop-up shows, done again here so nothing badly named ever reaches Drive.
+function wsCheckName(name, used, ext) {
+  const m = WS_NAME_RE.exec(name || "");
+  const problems = [];
+  if (!m) return { ok: false, problems: ["The name doesn't follow DATE_SOCIAL_CATEGORY_[DISH]_STAGE_v#_BARCODE.ext"] };
+  const [, date, social, category, dishPart, stage, , letter, num, fileExt] = m;
+  const dt = new Date(Date.UTC(+date.slice(0, 4), +date.slice(4, 6) - 1, +date.slice(6, 8)));
+  if (dt.getUTCFullYear() !== +date.slice(0, 4) || dt.getUTCMonth() + 1 !== +date.slice(4, 6) || dt.getUTCDate() !== +date.slice(6, 8)) problems.push("The date isn't a real YYYYMMDD date.");
+  if (!WS_SOCIAL.includes(social)) problems.push(`${social} isn't a social media code (${WS_SOCIAL.join(", ")}).`);
+  if (!WS_CATEGORIES[category]) problems.push(`${category} isn't a category code.`);
+  for (const dish of dishPart.split("_").filter(Boolean)) if (!WS_DISHES[dish]) problems.push(`${dish} isn't a dish code in the rule book.`);
+  if (!WS_STAGES.includes(stage)) problems.push(`${stage} isn't a stage (FIN, EDT or RAW).`);
+  if (!"SAVG".includes(letter)) problems.push("The barcode starts with S, A, V or G.");
+  if (used.has(letter + num)) problems.push(`Barcode ${letter + num} is already used in the Content Library.`);
+  if (fileExt !== ext) problems.push(`The file is a .${ext}, so the name should end in .${ext}.`);
+  return { ok: !problems.length, problems, barcode: letter + num };
+}
+
+async function wsDriveFolder(env, token, branchKey) {
+  const branch = WS_BRANCHES[branchKey] || WS_BRANCHES.all;
+  const headers = { Authorization: "Bearer " + token, "Content-Type": "application/json" };
+  const alive = async (id) => {
+    if (!id) return false;
+    const r = await fetch(`https://www.googleapis.com/drive/v3/files/${id}?fields=id,trashed`, { headers: { Authorization: "Bearer " + token } });
+    const d = await r.json().catch(() => ({}));
+    return r.ok && !d.trashed;
+  };
+  const make = async (name, parent, description) => {
+    const r = await fetch("https://www.googleapis.com/drive/v3/files?fields=id", { method: "POST", headers,
+      body: JSON.stringify({ name, mimeType: DRIVE_FOLDER, description, ...(parent ? { parents: [parent] } : {}) }) });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || !d.id) throw new HttpError(502, `Couldn't create the "${name}" folder in Drive: ` + ((d.error && d.error.message) || r.status));
+    return d.id;
+  };
+  const saved = (await kvGet(env, "ws_drive_folder")) || {};
+  if (!(await alive(saved.id))) {
+    saved.id = await make("Creator Studio Projects", null, "Finished videos approved in Creator Studio's Workspace, named with the SANJUGO filing system. Managed by Sanjugo Creator Studio — part of the Content Library.");
+    saved.branches = {};
+  }
+  saved.branches = saved.branches || {};
+  if (!(await alive(saved.branches[branchKey]))) saved.branches[branchKey] = await make(branch.folder, saved.id, "");
+  await kvSet(env, "ws_drive_folder", saved);
+  return { rootId: saved.id, folderId: saved.branches[branchKey], branch };
+}
+
+async function wsFile(env, request, ctx, body, me, members) {
+  const p = await wsProject(env, body.projectId);
+  if (p.filed) return { project: wsSummary(p, await wsItems(env, p.id), members) };
+  if (!p.approval) throw new HttpError(409, "Approve a cut first.");
+  if (p.filing && Date.now() - Date.parse(p.filing.at) < 5 * 60e3) throw new HttpError(409, "This video is already being saved to Drive — give it a minute.");
+  const items = await wsItems(env, p.id);
+  const d = items.find((i) => i.id === p.approval.draftId);
+  const key = d && mediaKeyOf(d.media && d.media.fileUrl);
+  const obj = key && await env.MEDIA.head(key);
+  if (!obj) throw new HttpError(410, "The approved video file is missing from storage — upload the cut again.");
+  const used = await wsUsedBarcodes(env, request);
+  const name = wsText(body.name, 200);
+  const check = wsCheckName(name, used, wsExtOf(d.media.fileUrl));
+  if (!check.ok) throw new HttpError(400, check.problems.join(" "));
+
+  const auth = serviceAccount(env) ? null : await getGoogleAuth(env);
+  if (!auth || !(auth.scopes || "").includes("drive.file")) throw new HttpError(409, "Creator Studio can't save to Google Drive yet — an admin needs to reconnect Google Drive in Settings.");
+  p.filing = { at: new Date().toISOString(), by: me.id };
+  await wsSaveProject(env, p);
+  try {
+    const token = await getGoogleToken(env);
+    const { rootId, folderId, branch } = await wsDriveFolder(env, token, p.branch);
+    const approver = (members.find((m) => m.id === p.approval.by) || {}).name || "the team";
+    const creator = (members.find((m) => m.id === d.author) || {}).name || "the creator";
+    const description = `Workspace project: ${p.title}. Filmed by ${creator}, cut ${d.cut}, approved by ${approver} on ${p.approval.at.slice(0, 10)}.` + (p.brief ? " Brief: " + p.brief.slice(0, 400) : "");
+    const driveId = await driveUploadFromR2(env, token, key, name, folderId, description);
+    p.filed = { driveId, name, barcode: check.barcode, by: me.id, at: new Date().toISOString(), folderId, rootId, draftId: d.id };
+    delete p.filing;
+    await wsSaveProject(env, p);
+    await wsAddToLibraryIndex(env, request, { id: driveId, name, mime: obj.httpMetadata && obj.httpMetadata.contentType || d.media.mime, size: obj.size, branch: branch.folder, path: [], modified: p.filed.at, note: description });
+  } catch (e) {
+    delete p.filing;
+    await wsSaveProject(env, p);
+    throw e;
+  }
+  await wsNotify(env, ctx, { actor: me, members, project: p, text: `📚 "${p.title}" is in the Content Library as ${name} (barcode ${check.barcode}). Use "Create post from this" in the Workspace when you want to publish it.`, push: { title: `In the library: ${p.title}`, body: `Saved to Drive as ${check.barcode}` }, eventId: "ws_filed_" + p.id });
+  return { project: wsSummary(p, await wsItems(env, p.id), members) };
+}
+
+async function driveUploadFromR2(env, token, key, name, parentId, description) {
+  const obj = await env.MEDIA.get(key);
+  if (!obj) throw new HttpError(410, "The video file is missing from storage.");
+  const type = (obj.httpMetadata && obj.httpMetadata.contentType) || "application/octet-stream";
+  const init = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + token, "Content-Type": "application/json; charset=UTF-8", "X-Upload-Content-Type": type, "X-Upload-Content-Length": String(obj.size) },
+    body: JSON.stringify({ name, parents: [parentId], description }),
+  });
+  const session = init.headers.get("location");
+  if (!init.ok || !session) { obj.body.cancel(); throw new HttpError(502, "Google Drive upload couldn't start (" + init.status + ")"); }
+  const { readable, writable } = new FixedLengthStream(obj.size);
+  const pump = obj.body.pipeTo(writable);
+  const up = await fetch(session, { method: "PUT", headers: { "Content-Type": type }, body: readable });
+  await pump;
+  const res = await up.json().catch(() => ({}));
+  if (!up.ok || !res.id) throw new HttpError(502, "Google Drive upload failed (" + up.status + ")");
+  return res.id;
+}
+
+// Add the new file to the library list straight away (the next full refresh finds it in Drive too).
+async function wsAddToLibraryIndex(env, request, file) {
+  let data = null;
+  const obj = await env.MEDIA.get(LIBRARY_INDEX_KEY);
+  if (obj) data = await obj.json().catch(() => null);
+  if (!data) {
+    const r = await env.ASSETS.fetch(new Request(new URL("/library.json", request.url)));
+    data = r.ok ? await r.json().catch(() => null) : null;
+  }
+  if (!data || !Array.isArray(data.files)) data = { source: "live", files: [] };
+  data.files = [file, ...data.files.filter((f) => f.id !== file.id)];
+  const updatedAt = data.updatedAt || new Date().toISOString();
+  await env.MEDIA.put(LIBRARY_INDEX_KEY, JSON.stringify(data), { httpMetadata: { contentType: "application/json" }, customMetadata: { updatedAt } });
+}
+
+// ---------------------------------------------------------------------------
+// Sticky notes on the Dashboard — private to each person (only the signed-in member's own notes are ever
+// returned). Kept as one small list per person in app_kv.
+// ---------------------------------------------------------------------------
+
+async function notesRoute(request, env, url, viewer) {
+  const body = request.method === "POST" ? await request.json().catch(() => ({})) : {};
+  const id = viewer.accessEnabled ? viewer.member && viewer.member.id : String(url.searchParams.get("userId") || body.userId || "");
+  if (!/^[\w-]{1,64}$/.test(id || "")) throw new HttpError(403, "Sign in to use notes.");
+  const key = "notes_" + id;
+  if (request.method === "GET") return json({ notes: (await kvGet(env, key)) || [] });
+  if (request.method !== "POST") throw new HttpError(405, "Method not allowed");
+  const notes = (Array.isArray(body.notes) ? body.notes : []).slice(0, 30).map((n) => ({
+    id: String(n.id || "").slice(0, 40) || "n_" + crypto.randomUUID().slice(0, 8),
+    text: String(n.text || "").slice(0, 4000),
+    color: ["yellow", "pink", "blue", "green"].includes(n.color) ? n.color : "yellow",
+    updatedAt: String(n.updatedAt || new Date().toISOString()).slice(0, 30),
+  }));
+  await kvSet(env, key, notes);
+  return json({ notes });
+}
+
+// ---------------------------------------------------------------------------
+// Published Content study — tags (collab, promotion, content type, branch, dish), team notes and an AI
+// "why it worked" for each live post, plus influencer posts added by hand (their stats can't be read by API).
+// Keyed by "platform:postId" for pulled posts, "manual:<id>" for hand-added ones.
+// ---------------------------------------------------------------------------
+
+let studyReady = false;
+async function ensureStudy(env) {
+  if (studyReady) return;
+  await env.DB.prepare("CREATE TABLE IF NOT EXISTS study_posts (key TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at TEXT NOT NULL)").run();
+  studyReady = true;
+}
+const STUDY_TAGS = ["collab", "promo", "type", "branch", "dish"];
+async function studyGet(env, key) {
+  const r = await env.DB.prepare("SELECT data FROM study_posts WHERE key = ?1").bind(key).first();
+  return r ? JSON.parse(r.data) : { key };
+}
+async function studyPut(env, d) {
+  d.updatedAt = new Date().toISOString();
+  await env.DB.prepare("INSERT INTO study_posts (key, data, updated_at) VALUES (?1, ?2, ?3) ON CONFLICT(key) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at")
+    .bind(d.key, JSON.stringify(d), d.updatedAt).run();
+  return d;
+}
+const studyNum = (v) => Math.max(0, Math.min(1e10, Math.round(Number(v) || 0)));
+
+async function studyRoute(request, env, url, viewer) {
+  await ensureStudy(env);
+  const path = url.pathname.replace(/^\/api\/study\/?/, "");
+  if (request.method === "GET" && path === "") {
+    const { results } = await env.DB.prepare("SELECT data FROM study_posts").all();
+    return json({ entries: (results || []).map((r) => JSON.parse(r.data)).filter((d) => !d.deleted) });
+  }
+  if (request.method !== "POST") throw new HttpError(405, "Method not allowed");
+  const body = await request.json().catch(() => ({}));
+  const { members } = await listTeam(env);
+  const meId = viewer.accessEnabled ? viewer.member && viewer.member.id : String(body.userId || "");
+  const me = members.find((m) => m.id === meId && m.active !== false);
+  if (!me) throw new HttpError(403, "Sign in first.");
+  const key = String(body.key || "").slice(0, 120);
+
+  if (path === "tags") {
+    if (!/^[\w-]+:[\w.-]+$/.test(key)) throw new HttpError(400, "Unknown post");
+    const d = await studyGet(env, key);
+    d.tags = { ...(d.tags || {}) };
+    for (const t of STUDY_TAGS) if (body.tags && t in body.tags) {
+      const v = String(body.tags[t] == null ? "" : body.tags[t]).trim().slice(0, 80);
+      if (v) d.tags[t] = v; else d.tags[t] = "-"; // "-" = cleared on purpose, so the automatic guess doesn't come back
+    }
+    return json({ entry: await studyPut(env, d) });
+  }
+  if (path === "note") {
+    const text = String(body.text || "").trim().slice(0, 2000);
+    if (!text) throw new HttpError(400, "Write the note first.");
+    const d = await studyGet(env, key);
+    d.notes = [...(d.notes || []), { id: "sn_" + crypto.randomUUID().slice(0, 8), by: me.id, text, at: new Date().toISOString() }];
+    return json({ entry: await studyPut(env, d) });
+  }
+  if (path === "manual") { // add or edit an influencer post entered by hand
+    const m = body.manual || {};
+    const link = String(m.url || "").trim().slice(0, 500);
+    if (!/^https:\/\/\S+$/.test(link)) throw new HttpError(400, "Paste the post's link (https://…).");
+    const k = key && key.startsWith("manual:") ? key : "manual:" + crypto.randomUUID().slice(0, 10);
+    const d = await studyGet(env, k);
+    const when = Date.parse(m.publishedAt || "");
+    d.manual = {
+      platform: ["instagram", "tiktok", "facebook", "youtube"].includes(m.platform) ? m.platform : "instagram",
+      url: link, account: String(m.account || "").trim().replace(/^@?/, "@").slice(0, 60),
+      caption: String(m.caption || "").slice(0, 3000), publishedAt: isNaN(when) ? new Date().toISOString() : new Date(when).toISOString(),
+      views: studyNum(m.views), likes: studyNum(m.likes), comments: studyNum(m.comments), shares: studyNum(m.shares), saves: studyNum(m.saves),
+      addedBy: (d.manual && d.manual.addedBy) || me.id,
+    };
+    d.tags = { ...(d.tags || {}), ...(d.manual.account.length > 1 ? { collab: d.manual.account } : {}) };
+    return json({ entry: await studyPut(env, d) });
+  }
+  if (path === "delete") {
+    if (!key.startsWith("manual:")) throw new HttpError(400, "Only posts added by hand can be removed.");
+    const d = await studyGet(env, key);
+    d.deleted = { by: me.id, at: new Date().toISOString() };
+    await studyPut(env, d);
+    return json({ ok: true });
+  }
+  if (path === "why") return json({ entry: await studyWhy(env, key, body.post || {}) });
+  throw new HttpError(404, "Unknown request");
+}
+
+const STUDY_WHY_SYSTEM = `You are the social media analyst for SANJUGO, a modern Japanese restaurant group in London (Shoreditch, Angel, Victoria). You get one published post with its numbers, its caption and how it compares with the account's usual results. Explain in plain words why it did well or badly, so the team can repeat or avoid it. Reply with 3 to 5 short bullet points starting with "- ", no intro, no headings. Be specific to this post: the hook (first line), the offer or promotion, the collaborator, the timing (day and time), caption length, and the numbers versus usual. Don't invent anything that isn't in the data.`;
+
+async function studyWhy(env, key, post) {
+  if (!/^[\w-]+:[\w.-]+$/.test(key)) throw new HttpError(400, "Unknown post");
+  const lines = [
+    `Platform: ${String(post.platform || "").slice(0, 20)} · type: ${String(post.type || "post").slice(0, 20)}`,
+    `Posted: ${String(post.when || "").slice(0, 60)}`,
+    `Views ${studyNum(post.views)}, likes ${studyNum(post.likes)}, comments ${studyNum(post.comments)}, shares ${studyNum(post.shares)}, saves ${studyNum(post.saves)}, engagement ${Number(post.engagement || 0).toFixed(1)}%.`,
+    `Usual for this platform (median of recent posts): ${studyNum(post.usualViews)} views, ${Number(post.usualEngagement || 0).toFixed(1)}% engagement.`,
+    post.tags ? `Tags: ${String(post.tags).slice(0, 300)}` : "",
+    `Caption:\n${String(post.caption || "(no caption)").slice(0, 2000)}`,
+  ].filter(Boolean).join("\n");
+  let text = "";
+  if (env.ANTHROPIC_API_KEY) {
+    const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
+    const msg = await client.messages.create({ model: "claude-opus-5", max_tokens: 800, system: STUDY_WHY_SYSTEM, messages: [{ role: "user", content: wellFormed(lines) }] });
+    text = msg.content.filter((b) => b.type === "text").map((b) => b.text).join("");
+  } else {
+    const out = await env.AI.run(WORKERS_AI_MODEL, { messages: [{ role: "system", content: STUDY_WHY_SYSTEM }, { role: "user", content: wellFormed(lines) }], max_tokens: 400, temperature: 0.3 });
+    const r = out && (out.response ?? out.result?.response);
+    text = typeof r === "string" ? r : JSON.stringify(r || "");
+  }
+  text = tidyBotText(String(text).trim()).slice(0, 1500);
+  if (!text) throw new HttpError(502, "Couldn't get an answer — try again.");
+  const d = await studyGet(env, key);
+  d.why = { text, at: new Date().toISOString() };
+  return await studyPut(env, d);
+}
+
+// Reactions (one of each emoji per person, tap again to take it back) and pins.
+const CHAT_REACTIONS = ["👍", "✅", "👀", "❤️", "😂", "🔥"];
+async function chatUpdate(request, env, url, viewer) {
+  const body = await request.json().catch(() => ({}));
+  await ensureChatTable(env);
+  const who = viewer.accessEnabled ? viewer.member && viewer.member.id : String(body.author || "").slice(0, 64);
+  if (!who) throw new HttpError(403, "Sign in first.");
+  const row = await env.DB.prepare("SELECT * FROM chat_messages WHERE id = ?1").bind(Number(body.id) || 0).first();
+  if (!row) throw new HttpError(404, "That message is gone.");
+  const now = new Date().toISOString();
+  if (url.pathname.endsWith("/react")) {
+    if (!CHAT_REACTIONS.includes(body.emoji)) throw new HttpError(400, "Unknown reaction");
+    let r = {}; try { r = JSON.parse(row.reactions || "{}"); } catch (e) {}
+    const list = r[body.emoji] || [];
+    r[body.emoji] = list.includes(who) ? list.filter((x) => x !== who) : [...list, who];
+    if (!r[body.emoji].length) delete r[body.emoji];
+    await env.DB.prepare("UPDATE chat_messages SET reactions = ?2, updated_at = ?3 WHERE id = ?1").bind(row.id, JSON.stringify(r), now).run();
+  } else {
+    const pin = body.pinned !== false;
+    await env.DB.prepare("UPDATE chat_messages SET pinned_at = ?2, pinned_by = ?3, updated_at = ?4 WHERE id = ?1").bind(row.id, pin ? now : null, pin ? who : null, now).run();
+  }
+  return rowToMessage(await env.DB.prepare("SELECT * FROM chat_messages WHERE id = ?1").bind(row.id).first());
+}
+
+// ---------------------------------------------------------------------------
+// Occasions for the calendar: official UK bank holidays (gov.uk, England and Wales — refreshed weekly) plus the
+// team's "Done" / "Not for us" answers to the Dashboard reminders (shared, so one person answering is enough).
+// The food and marketing dates themselves (Halloween, Christmas, Lunar New Year…) are worked out in the app.
+// ---------------------------------------------------------------------------
+
+async function occasionsRoute(request, env, url, viewer) {
+  if (request.method === "GET") {
+    let bank = await kvGet(env, "uk_bank_holidays");
+    if (!bank || Date.now() - Date.parse(bank.fetchedAt || 0) > 7 * 86400e3) {
+      try {
+        const r = await fetch("https://www.gov.uk/bank-holidays.json", { headers: { Accept: "application/json" } });
+        const d = await r.json();
+        const events = ((d["england-and-wales"] || {}).events || []).map((e) => ({ date: e.date, title: e.title }));
+        if (events.length) { bank = { fetchedAt: new Date().toISOString(), events }; await kvSet(env, "uk_bank_holidays", bank); }
+      } catch (e) { /* keep the last copy */ }
+    }
+    return json({ bank: (bank && bank.events) || [], status: (await kvGet(env, "occasion_status")) || {} });
+  }
+  if (request.method !== "POST") throw new HttpError(405, "Method not allowed");
+  const body = await request.json().catch(() => ({}));
+  const who = viewer.accessEnabled ? viewer.member && viewer.member.id : String(body.userId || "").slice(0, 64);
+  if (!who) throw new HttpError(403, "Sign in first.");
+  const id = String(body.id || "");
+  if (!/^[a-z0-9-]+-\d{4}$/.test(id)) throw new HttpError(400, "Unknown occasion");
+  const status = (await kvGet(env, "occasion_status")) || {};
+  if (body.status === "done" || body.status === "skip") status[id] = { status: body.status, by: who, at: new Date().toISOString() };
+  else delete status[id];
+  // Keep it small: drop answers older than two years.
+  for (const k of Object.keys(status)) if (Number(k.slice(-4)) < new Date().getFullYear() - 1) delete status[k];
+  await kvSet(env, "occasion_status", status);
+  return json({ status });
+}
+
+// ---------------------------------------------------------------------------
+// "Already used" marks for Content Library files that were posted outside Creator Studio (downloaded, edited and
+// uploaded by hand), so the team can see them as used without making a fake post. Shared by everyone.
+// ---------------------------------------------------------------------------
+
+async function libraryUsedRoute(request, env, viewer) {
+  const marks = (await kvGet(env, "library_used")) || {};
+  if (request.method === "GET") return json({ marks });
+  if (request.method !== "POST") throw new HttpError(405, "Method not allowed");
+  const body = await request.json().catch(() => ({}));
+  const who = viewer.accessEnabled ? viewer.member && viewer.member.id : String(body.userId || "").slice(0, 64);
+  if (!who) throw new HttpError(403, "Sign in first.");
+  const id = String(body.id || "");
+  if (!/^[\w-]{10,}$/.test(id)) throw new HttpError(400, "Unknown file");
+  if (body.used === false) delete marks[id];
+  else {
+    const when = Date.parse(body.at || "");
+    marks[id] = {
+      by: who, markedAt: new Date().toISOString(), at: isNaN(when) ? new Date().toISOString() : new Date(when).toISOString(),
+      platforms: (Array.isArray(body.platforms) ? body.platforms : []).map(String).filter((p) => ["instagram", "facebook", "tiktok", "youtube", "gbp", "other"].includes(p)),
+      note: String(body.note || "").trim().slice(0, 300),
+    };
+  }
+  await kvSet(env, "library_used", marks);
+  return json({ marks });
 }

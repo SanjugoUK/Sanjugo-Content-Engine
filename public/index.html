@@ -2018,59 +2018,39 @@ function ActivityList({items, compact}){
 }
 
 /* ============================== DECISION MODAL ============================== */
+/* "Needs changes": say what to fix and it goes back to the creator. Rejecting outright (don't post it at all) is the
+   rare case, so it lives at the bottom of this same dialog rather than as a third button. Approve needs no dialog. */
 function DecisionModal({pending, onCancel, onConfirm}){
-  const [stage, setStage] = useState(pending && pending.type==="approve" ? "confirm" : "feedback");
+  const [mode, setMode] = useState("edits");
   const [tags, setTags] = useState([]);
   const [text, setText] = useState("");
   const [dueDate, setDueDate] = useState("");
-  useEffect(()=>{ if(pending){ setStage(pending.type==="approve"?"confirm":"feedback"); setTags([]); setText(""); setDueDate(""); } }, [pending && pending.contentId, pending && pending.platform, pending && pending.type]);
+  useEffect(()=>{ if(pending){ setMode(pending.type==="reject" ? "reject" : "edits"); setTags([]); setText(""); setDueDate(""); } }, [pending && pending.contentId, pending && pending.platform, pending && pending.type]);
   if(!pending) return null;
-  const decisionWord = pending.type==="approve"?"Approve": pending.type==="reject"?"Reject":"Request Edits";
-  const decisionColor = pending.type==="approve"?"var(--green)": pending.type==="reject"?"var(--red)":"var(--amber)";
-  const scopeLabel = pending.platform? PLATFORM_META[pending.platform].label+" variant" : "entire content package";
-
-  function toggleTag(t){ setTags(ts=> ts.includes(t)? ts.filter(x=>x!==t) : [...ts, t]); }
-
+  const reject = mode==="reject";
+  const scope = pending.platform ? " (only "+PLATFORM_META[pending.platform].label+")" : "";
+  const ready = reject || text.trim() || tags.length;
+  const toggleTag = t=>setTags(ts=> ts.includes(t)? ts.filter(x=>x!==t) : [...ts, t]);
+  const input = {width:"100%", borderRadius:10, border:"1px solid var(--border)", padding:10, fontSize:13, fontFamily:"inherit", background:"var(--surface)", color:"var(--ink)"};
   return (
     <Modal open={!!pending} onClose={onCancel} width={460}>
-      {stage==="feedback" && (
-        <div style={{padding:22}}>
-          <h3 style={{margin:"0 0 4px"}}>{decisionWord} — {pending.itemTitle}</h3>
-          <div style={{fontSize:12.5, color:"var(--ink-mute)", marginBottom:16}}>Applies to: {scopeLabel}</div>
-          <div style={{fontSize:12.5, fontWeight:700, marginBottom:8}}>Common feedback</div>
-          <div style={{display:"flex", flexWrap:"wrap", gap:7, marginBottom:16}}>
-            {FEEDBACK_TAGS.map(t=>(
-              <button key={t} onClick={()=>toggleTag(t)} style={{padding:"6px 11px", borderRadius:99, border:"1px solid "+(tags.includes(t)?decisionColor:"var(--border)"), background: tags.includes(t)? `color-mix(in srgb, ${decisionColor} 12%, transparent)`:"var(--surface)", color: tags.includes(t)?decisionColor:"var(--ink-soft)", fontSize:12, fontWeight:600, cursor:"pointer"}}>{t}</button>
-            ))}
-          </div>
-          <label style={{fontSize:12.5, fontWeight:700, display:"block", marginBottom:6}}>Feedback for the creator</label>
-          <textarea value={text} onChange={e=>setText(e.target.value)} placeholder="Explain what needs to change…" rows={4}
-            style={{width:"100%", borderRadius:10, border:"1px solid var(--border)", padding:10, fontSize:13, fontFamily:"inherit", resize:"vertical", marginBottom:14, background:"var(--surface)", color:"var(--ink)"}}/>
-          <label style={{fontSize:12.5, fontWeight:700, display:"block", marginBottom:6}}>Due date for revision (optional)</label>
-          <input type="date" value={dueDate} onChange={e=>setDueDate(e.target.value)} style={{width:"100%", borderRadius:10, border:"1px solid var(--border)", padding:9, fontSize:13, marginBottom:18, background:"var(--surface)", color:"var(--ink)"}}/>
-          <div style={{display:"flex", gap:10, justifyContent:"flex-end"}}>
-            <Button variant="ghost" onClick={onCancel}>Cancel</Button>
-            <Button variant={pending.type==="reject"?"danger":"amber"} icon="chevronRight" onClick={()=>setStage("confirm")}>Continue</Button>
-          </div>
+      <div style={{padding:22}}>
+        <h3 style={{margin:"0 0 4px", color: reject? "var(--red)" : "var(--ink)"}}>{reject ? "Reject — don't post this" : "What needs to change?"}</h3>
+        <div style={{fontSize:12.5, color:"var(--ink-mute)", marginBottom:16}}>{pending.itemTitle}{scope}{reject ? " · the creator sees it under Rejected" : " · goes back to "+(pending.creatorName||"the creator")+" to fix"}</div>
+        {!reject && <div style={{display:"flex", flexWrap:"wrap", gap:7, marginBottom:14}}>
+          {FEEDBACK_TAGS.map(t=><button key={t} onClick={()=>toggleTag(t)} style={{padding:"6px 11px", borderRadius:99, fontSize:12.5, fontWeight:600, cursor:"pointer", border:"1px solid "+(tags.includes(t)?"var(--amber)":"var(--border)"), background: tags.includes(t)?"var(--amber-soft)":"var(--surface)", color: tags.includes(t)?"var(--amber)":"var(--ink-soft)"}}>{t}</button>)}
+        </div>}
+        <textarea value={text} onChange={e=>setText(e.target.value)} rows={4} autoFocus placeholder={reject ? "Why? (optional)" : "e.g. Cut the first 2 seconds and use the Shoreditch hashtags"} style={{...input, resize:"vertical", marginBottom:12}}/>
+        {!reject && <label style={{display:"flex", alignItems:"center", gap:8, fontSize:12.5, color:"var(--ink-soft)", marginBottom:18}}>Fix by (optional)
+          <input type="date" value={dueDate} onChange={e=>setDueDate(e.target.value)} style={{...input, width:"auto", padding:"6px 9px"}}/></label>}
+        <div style={{display:"flex", gap:10, justifyContent:"flex-end", alignItems:"center"}}>
+          <Button variant="ghost" onClick={()=> reject ? setMode("edits") : onCancel()}>{reject ? "Back" : "Cancel"}</Button>
+          <Button variant={reject? "danger" : "amber"} icon={reject? "x" : "send"} disabled={!ready} onClick={()=>onConfirm({type: reject? "reject" : "edits", tags, text, dueDate})}>{reject ? "Reject" : "Send back"}</Button>
         </div>
-      )}
-      {stage==="confirm" && (
-        <div style={{padding:22}}>
-          <div style={{width:44,height:44,borderRadius:99,background:`color-mix(in srgb, ${decisionColor} 14%, transparent)`,color:decisionColor,display:"flex",alignItems:"center",justifyContent:"center",marginBottom:14}}>
-            <Icon name={pending.type==="approve"?"check":pending.type==="reject"?"x":"edit"} size={20}/>
-          </div>
-          <h3 style={{margin:"0 0 6px"}}>Confirm: {decisionWord.toLowerCase()}</h3>
-          <p style={{fontSize:13.5, color:"var(--ink-soft)", lineHeight:1.5, margin:"0 0 16px"}}>
-            You're about to <strong>{decisionWord.toLowerCase()}</strong> the {scopeLabel} for <strong>{pending.itemTitle}</strong>.
-            {pending.type!=="approve" && tags.length>0 && <> Feedback tags: {tags.join(", ")}.</>}
-            {" "}This action is recorded to the content's version history.
-          </p>
-          <div style={{display:"flex", gap:10, justifyContent:"flex-end"}}>
-            <Button variant="ghost" onClick={()=> pending.type==="approve" ? onCancel() : setStage("feedback")}>{pending.type==="approve"?"Cancel":"Back"}</Button>
-            <Button variant={pending.type==="approve"?"success":pending.type==="reject"?"danger":"amber"} icon="check" onClick={()=>onConfirm({tags, text, dueDate})}>Confirm {decisionWord}</Button>
-          </div>
-        </div>
-      )}
+        {!reject && <div style={{borderTop:"1px solid var(--border)", marginTop:16, paddingTop:12, fontSize:12, color:"var(--ink-mute)"}}>
+          Shouldn't be posted at all? <button onClick={()=>setMode("reject")} style={{border:"none", background:"none", padding:0, color:"var(--red)", fontWeight:600, fontSize:12, cursor:"pointer"}}>Reject it instead</button>
+        </div>}
+      </div>
     </Modal>
   );
 }
@@ -2707,7 +2687,6 @@ function ImmersiveViewer({entry, platform, onPlatform, onDecision, onClose, busy
     window.addEventListener("keydown", onKey);
     return ()=>window.removeEventListener("keydown", onKey);
   }, [busy, onClose, onDecision]);
-  const round = {borderRadius:99, width:58, height:58, padding:0, justifyContent:"center"};
   return ReactDOM.createPortal(
     <div onPointerDown={e=>e.stopPropagation()} onClick={e=>e.stopPropagation()}
       style={{position:"fixed", inset:0, zIndex:90, background:"#000", display:"flex", flexDirection:"column", paddingTop:"env(safe-area-inset-top, 0px)", animation:"cf-fade-in .18s ease"}}>
@@ -2734,9 +2713,8 @@ function ImmersiveViewer({entry, platform, onPlatform, onDecision, onClose, busy
           <span className="num" style={{fontSize:13, fontWeight:700, color:"#bbb", minWidth:54, textAlign:"center"}}>{browse.index+1} of {browse.total}</span>
           <Button variant="ghost" size="lg" onClick={browse.onNext} disabled={browse.index>=browse.total-1} style={{borderRadius:99, background:"#1c1c1e", color:"#fff", borderColor:"#333"}}>Next ›</Button>
         </div> : <div style={{display:"flex", alignItems:"center", justifyContent:"center", gap:14}}>
-          <Button variant="danger" size="lg" icon="x" onClick={()=>onDecision("reject")} style={round}/>
-          <Button variant="amber" size="lg" icon="edit" onClick={()=>onDecision("edits")} style={{borderRadius:99}}>Request Edits</Button>
-          <Button variant="success" size="lg" icon="check" onClick={()=>onDecision("approve")} style={round}/>
+          <Button variant="ghost" size="lg" icon="edit" onClick={()=>onDecision("edits")} style={{borderRadius:99, minWidth:140, justifyContent:"center", background:"#1c1c1e", color:"#FBBF24", borderColor:"#FBBF24"}}>Needs changes</Button>
+          <Button variant="success" size="lg" icon="check" onClick={()=>onDecision("approve")} style={{borderRadius:99, minWidth:160, justifyContent:"center"}}>Approve</Button>
         </div>}
       </div>
     </div>,
@@ -3166,12 +3144,18 @@ function ApprovalQueuePage(){
   useEffect(()=>{ if(!current) setImmersive(null); }, [current]);
   const immersivePlatform = current && immersive ? (current.platform || (current.item.platforms.includes(immersive) ? immersive : current.item.platforms[0])) : null;
 
+  // Approve is one tap (Undo is at the top); "Needs changes" opens a short note, with Reject tucked inside it.
   function requestDecision(type){
     if(!current) return;
-    setPending({key:current.key, contentId:current.contentId, platform:current.platform, itemTitle:current.item.title, type});
+    if(type==="approve"){
+      dispatch({type:"SUBMIT_DECISION", contentId:current.contentId, platform:current.platform, decision:"approved"});
+      setReviewedKeys(k=>[...k, current.key]);
+      return;
+    }
+    setPending({key:current.key, contentId:current.contentId, platform:current.platform, itemTitle:current.item.title, creatorName:(USERS.find(u=>u.id===current.item.creator)||{}).name, type});
   }
   function confirmDecision(extra){
-    const decision = pending.type==="approve"?"approved": pending.type==="reject"?"rejected":"changes_requested";
+    const decision = extra.type==="reject" ? "rejected" : "changes_requested";
     dispatch({type:"SUBMIT_DECISION", contentId:pending.contentId, platform:pending.platform, decision, feedback:extra.text, tags:extra.tags, dueDate:extra.dueDate});
     setReviewedKeys(k=>[...k, pending.key]);
     setPending(null);
@@ -3186,9 +3170,9 @@ function ApprovalQueuePage(){
 
   return (
     <div>
-      <PageHeader title="Approval Queue" subtitle={qtab==="review" ? "Review each post, then tap ✕ Reject, Request Edits or ✓ Approve." : qtab==="waiting" ? "See your posts exactly as the approver will — tap Next to go through them." : "Fix what the approver asked for, then resubmit."} action={qtab!=="review" ? null :
+      <PageHeader title="Approval Queue" subtitle={qtab==="review" ? "Watch each post, then tap ✓ Approve — or Needs changes to send it back with a note." : qtab==="waiting" ? "See your posts exactly as the approver will — tap Next to go through them." : "Fix what the approver asked for, then resubmit."} action={qtab!=="review" ? null :
         <div style={{display:"flex", gap:8, alignItems:"center"}}>
-          <Button variant="ghost" size="sm" icon="undo" onClick={undo} disabled={state.decisionHistory.length===0}>Undo Last Decision</Button>
+          <Button variant="ghost" size="sm" icon="undo" onClick={undo} disabled={state.decisionHistory.length===0}>Undo</Button>
         </div>
       }/>
 
@@ -3236,9 +3220,8 @@ function ApprovalQueuePage(){
             })}
           </div>
           <div style={{display:"flex", justifyContent:"center", gap:14, marginTop: narrow? 16:22}}>
-            <Button variant="danger" size="lg" icon="x" onClick={()=>requestDecision("reject")} style={{borderRadius:99, width:56, height:56, padding:0, justifyContent:"center"}}/>
-            <Button variant="amber" size="lg" icon="edit" onClick={()=>requestDecision("edits")} style={{borderRadius:99}}>Request Edits</Button>
-            <Button variant="success" size="lg" icon="check" onClick={()=>requestDecision("approve")} style={{borderRadius:99, width:56, height:56, padding:0, justifyContent:"center"}}/>
+            <Button variant="ghost" size="lg" icon="edit" onClick={()=>requestDecision("edits")} style={{borderRadius:99, minWidth:150, justifyContent:"center", color:"var(--amber)", borderColor:"var(--amber)"}}>Needs changes</Button>
+            <Button variant="success" size="lg" icon="check" onClick={()=>requestDecision("approve")} style={{borderRadius:99, minWidth:180, justifyContent:"center"}}>Approve</Button>
           </div>
         </div>
       )}

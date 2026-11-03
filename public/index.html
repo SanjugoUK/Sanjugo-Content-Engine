@@ -1164,11 +1164,20 @@ function baseReducer(state, action){
       }
       const nextVersion = resubmit ? item.currentVersion + 1 : item.currentVersion;
       const versions = resubmit ? [...(item.versions||[]), {version:nextVersion, editor, date:new Date().toISOString(), changes: note || "Revised after feedback", decision:"—", feedback:null}] : item.versions;
-      const updated = {...item, ...(patch.title!=null? {title:patch.title} : {}), ...(patch.media? {media:{...item.media, ...patch.media}} : {}),
-        ...(patch.libraryRef!==undefined? {libraryRef:patch.libraryRef} : {}), variants, versions, currentVersion:nextVersion,
+      let updated = {...item, ...(patch.title!=null? {title:patch.title} : {}), ...(patch.media? {media:{...item.media, ...patch.media}} : {}),
+        ...(patch.libraryRef!==undefined? {libraryRef:patch.libraryRef} : {}), ...(patch.approver? {approver:patch.approver} : {}), variants, versions, currentVersion:nextVersion,
         ...(resubmit? {status:"submitted"} : {})};
+      // New approver who has already approved (e.g. "both" → "Cyrus only" after Cyrus said yes): those platforms are done now.
+      if(patch.approver && !resubmit && updated.status==="submitted"){
+        const req = requiredApprovers(updated);
+        Object.entries(updated.variants).forEach(([p, v])=>{
+          if(v && v.status==="submitted" && req.length && req.every(id=>(v.approvals||{})[id]))
+            updated.variants[p] = {...v, status:"approved", publishStatus: v.scheduledAt? "scheduled" : "not_scheduled"};
+        });
+        if(Object.values(updated.variants).every(v=>v.status==="approved")) updated = {...updated, status:"approved"};
+      }
       const log = {id:uid("act"), at:new Date().toISOString(), contentId, contentTitle:updated.title, user:state.currentUserId, version:nextVersion,
-        type: resubmit? "submitted" : "edited", detail: resubmit? "Resubmitted as v"+nextVersion+" after "+(item.status==="rejected"? "rejection" : "feedback") : "Edited", comment: note || null};
+        type: resubmit? "submitted" : "edited", detail: resubmit? "Resubmitted as v"+nextVersion+" after "+(item.status==="rejected"? "rejection" : "feedback") : patch.approver ? "Approver changed to "+approverName(updated)+(updated.status==="approved" && item.status!=="approved"? " — now approved" : "") : "Edited", comment: note || null};
       return {...state, contentItems: state.contentItems.map(i=> i.id===contentId? updated : i), activityLog:[log, ...state.activityLog],
         toasts:[...state.toasts, {id:uid("toast"), message: resubmit? "Resubmitted for approval — "+updated.title : "Changes saved", variant:"ok"}]};
     }
@@ -2967,7 +2976,7 @@ function RevisionEditor({item, onClose}){
     if(!item){ setF(null); return; }
     const variants = {};
     Object.entries(item.variants||{}).forEach(([p,v])=>{ variants[p] = {caption:v.caption||"", hashtags:(v.hashtags||[]).join(" "), title:v.title||"", description:v.description||"", cta:v.cta||"", url:v.url||"", listing:gbpListing(v), gbpType: isGbpPhoto(v)? "photo" : "update", category:gbpCategory(v), storyNotes:v.storyNotes||"", scheduledAt: v.scheduledAt ? isoToLocalInput(v.scheduledAt) : ""}; });
-    setF({title:item.title, variants, media:null, libraryRef:undefined, note:"", mediaStatus:""});
+    setF({title:item.title, approver:item.approver||ANY_APPROVER, variants, media:null, libraryRef:undefined, note:"", mediaStatus:""});
     setTab(item.platforms[0]);
     setNotify(true);
     // Always start with one date for every platform — creators expect changing it to move the whole post.
@@ -3017,7 +3026,8 @@ function RevisionEditor({item, onClose}){
       variants[p] = {caption:v.caption, hashtags: v.hashtags.split(/[\s,]+/).filter(Boolean).map(t=> t.startsWith("#")? t : "#"+t), title:v.title, description:v.description, cta:v.cta, url:v.url.trim(), storyNotes:v.storyNotes, ...(p==="gbp"? {listing:v.listing, gbpType:v.gbpType, ...(v.gbpType==="photo"? {category:v.category} : {})} : {}),
         scheduledAt: v.scheduledAt ? new Date(v.scheduledAt).toISOString() : null};
     });
-    return {title:f.title.trim() || item.title, variants, ...(f.media? {media:f.media} : {}), ...(f.libraryRef!==undefined? {libraryRef:f.libraryRef} : {})};
+    return {title:f.title.trim() || item.title, variants, ...(f.media? {media:f.media} : {}), ...(f.libraryRef!==undefined? {libraryRef:f.libraryRef} : {}),
+      ...(f.approver !== (item.approver||ANY_APPROVER) ? {approver:f.approver} : {})};
   }
   async function save(resubmit){
     setBusy(true);
@@ -3043,6 +3053,15 @@ function RevisionEditor({item, onClose}){
         {(item.status==="changes_requested" || item.status==="rejected") && <FeedbackBox item={item}/>}
         <label style={label}>Title</label>
         <input value={f.title} onChange={e=>setF(x=>({...x, title:e.target.value}))} style={input}/>
+
+        <label style={label}>Approver</label>
+        {(()=>{ const me = USERS.find(u=>u.id===state.currentUserId)||{}; const can = (PERMS[me.role]||{}).approve || ["draft","changes_requested","rejected"].includes(item.status);
+          return <>
+            <select aria-label="Approver" value={f.approver} disabled={!can} onChange={e=>setF(x=>({...x, approver:e.target.value}))} style={{...input, opacity: can? 1 : .6}}>
+              {approverOptions().map(o=><option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+            {!can && <div style={{fontSize:11.5, color:"var(--ink-mute)", marginTop:-6, marginBottom:10}}>While it's waiting for approval, only Cyrus or Yan Yan can change this.</div>}
+          </>; })()}
 
         <label style={label}>Photo / video</label>
         <div style={{display:"flex", gap:12, alignItems:"center", marginBottom:8}}>

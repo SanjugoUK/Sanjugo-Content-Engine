@@ -3501,6 +3501,35 @@ function SmartInsightsPanel(){
 /* The Dashboard is a morning brief: what's waiting on *you* first (most urgent on top), private sticky notes, then this week's posting days (gaps stand out),
    the last 7 days against the 7 before, the best post, where Workspace projects are, and approved videos
    that haven't been posted yet. */
+// Top-right of the Dashboard: the team's key numbers at a glance; each opens its list.
+function DashGlance({items, go}){
+  const week = Date.now() + 7*86400e3;
+  const failed = items.filter(i=>i.status==="failed" || Object.values(i.variants||{}).some(v=>v.publishStatus==="failed")).length;
+  const n = st=>items.filter(i=>i.status===st).length;
+  const soon = items.filter(i=>["approved","scheduled"].includes(i.status) && Object.values(i.variants||{}).some(v=>v.scheduledAt && v.publishStatus!=="published" && new Date(v.scheduledAt).getTime()>=Date.now() && new Date(v.scheduledAt).getTime()<=week)).length;
+  const tiles = [
+    ["Waiting for approval", n("submitted"), "var(--blue)", "var(--blue-soft)", ()=>go("queue", {queueTab:"review"})],
+    ["Needs changes", n("changes_requested"), "var(--amber)", "var(--amber-soft)", ()=>go("queue", {queueTab:"changes"})],
+    ["Rejected", n("rejected"), "var(--red)", "var(--red-soft)", ()=>go("queue", {queueTab:"rejected"})],
+    failed ? ["Failed to post", failed, "#fff", "var(--red)", ()=>go("calendar", {calendarPreset:{view:"list", status:"failed"}})]
+           : ["Going out this week", soon, "var(--green)", "var(--green-soft)", ()=>go("calendar", {calendarPreset:{view:"week"}})],
+  ];
+  return (
+    <Card style={{padding:12}}>
+      <div style={{fontSize:12, fontWeight:700, color:"var(--ink-mute)", margin:"2px 2px 8px"}}>Team at a glance</div>
+      <div className="cf-glance">
+        {tiles.map(([label, num, color, bg, on])=>(
+          <button key={label} onClick={on} title={"Open: "+label}
+            style={{textAlign:"left", padding:"10px 10px", borderRadius:10, border:"none", background: num ? bg : "var(--surface-2)", cursor:"pointer", minWidth:0}}>
+            <div className="cf-gl-n num" style={{fontSize:24, fontWeight:800, lineHeight:1, color: num ? color : "var(--ink-mute)"}}>{num}</div>
+            <div className="cf-gl-l" style={{fontSize:11.5, fontWeight:600, marginTop:5, color: num ? color : "var(--ink-mute)", lineHeight:1.25}}>{label}</div>
+          </button>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
 function DashboardPage(){
   const {state, openDetails, dispatch} = useApp();
   const me = USERS.find(u=>u.id===state.currentUserId);
@@ -3613,7 +3642,8 @@ function DashboardPage(){
       <PageHeader title={hello} subtitle={fmtDate(new Date().toISOString(), {weekday:"short", day:"numeric", month:"short"})+" · "+(ws===null ? "checking…" : todo.length ? todo.length+" thing"+(todo.length>1?"s":"")+" need"+(todo.length>1?"":"s")+" you" : "nothing waiting for you")}
         action={perms.create && <Button variant="primary" icon="plus" onClick={()=>go("create")}>Create</Button>}/>
 
-      <Card style={{padding:16}}>
+      <div className="cf-dash-head">
+      <Card style={{padding:16, minWidth:0}}>
         {h("bell", "Waiting on you", todo.length>0 && <span style={{fontSize:11, fontWeight:700, padding:"1px 8px", borderRadius:99, background:"var(--accent)", color:"#fff"}}>{todo.length}</span>)}
         {ws===null ? <Skeleton h={60}/> : !todo.length ? <div style={{fontSize:13, color:"var(--ink-mute)", padding:"4px 0"}}>✓ Nothing waiting on you — approvals, votes and fixes show up here.</div> : (
           <div className="cf-dash-todo">
@@ -3633,6 +3663,8 @@ function DashboardPage(){
           </div>
         )}
       </Card>
+      <DashGlance items={items} go={go}/>
+      </div>
 
       <div className="cf-dash-top" style={{marginTop:14}}>
         <Card style={card}>
@@ -3702,6 +3734,10 @@ function DashboardPage(){
       </div>
       <style>{`
         .cf-dash-top{display:grid; grid-template-columns:minmax(0,1.15fr) minmax(0,1fr); gap:14px;}
+        .cf-dash-head{display:grid; grid-template-columns:minmax(0,1fr) 250px; gap:14px; align-items:start;}
+        .cf-glance{display:grid; grid-template-columns:1fr 1fr; gap:8px;}
+        @media (max-width:900px){ .cf-dash-head{grid-template-columns:1fr;} .cf-dash-head > :last-child{order:-1;} .cf-glance{grid-template-columns:repeat(4, minmax(0,1fr));} }
+        @media (max-width:480px){ .cf-glance{gap:6px;} .cf-glance button{padding:8px 6px !important;} .cf-glance .cf-gl-n{font-size:20px !important;} .cf-glance .cf-gl-l{font-size:10.5px !important;} }
         .cf-dash-week{display:grid; grid-template-columns:repeat(7, minmax(0,1fr)); gap:6px; align-items:stretch;}
         .cf-wk-br{display:none;} @media (max-width:600px){ .cf-wk-br{display:inline;} }
         .cf-dash-todo{display:grid; grid-template-columns:repeat(auto-fill, minmax(min(320px, 100%), 1fr)); gap:8px; max-height:340px; overflow-y:auto;}

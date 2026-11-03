@@ -2926,7 +2926,7 @@ async function collabMiss(env, key, handle, error) {
   f.missed = [...new Set([...(f.missed || []), handle])];
   if (f.missed.length >= (f.asked || []).length) {
     f.status = "notfound";
-    f.error = error || `Couldn't find this post in the latest posts of ${f.missed.map((h) => "@" + h).join(" or ")}. It may be on a personal account, too old, or the link/handle is wrong — enter the numbers by hand.`;
+    f.error = error || `This post isn't in ${f.missed.map((h) => "@" + h).join(" or ")}'s latest 60 posts. Use the account that posted it (the first name at the top of the post — not a collaborator), or type the numbers in.`;
   }
   await studyPut(env, d);
 }
@@ -2940,7 +2940,7 @@ async function collabCallback(env, job, body) {
   let found = 0;
   for (const it of detail.items || []) {
     const p = posts.find((x) => x && igShortcode(x.permalink) === it.code);
-    if (!p) { await collabMiss(env, it.key, handle, posts.length ? null : `Instagram didn't return posts for @${handle} — it may be a personal account (only Business and Creator accounts can be read), or the handle is misspelt.`); continue; }
+    if (!p) { await collabMiss(env, it.key, handle, posts.length ? null : `Instagram won't share @${handle}'s posts. It's probably a personal account (only Business and Creator accounts can be read), or the name is spelt differently. Check the name at the top of the post, or type the numbers in.`); continue; }
     const d = await studyGet(env, it.key);
     if (!d.manual) continue;
     const m = d.manual;
@@ -3033,6 +3033,12 @@ async function studyRoute(request, env, url, viewer) {
     if (!d.manual) throw new HttpError(400, "Only collab posts added by link can be refreshed.");
     const r = await startCollabLookup(env, [d], me.id);
     return json({ entry: await studyGet(env, key), lookup: r });
+  }
+  if (path === "hide") { // our own posts can't be deleted from Instagram here, but can be hidden from this page
+    if (!/^[\w-]+:[\w.-]+$/.test(key) || key.startsWith("manual:")) throw new HttpError(400, "Unknown post");
+    const d = await studyGet(env, key);
+    d.hidden = body.hidden === false ? null : { by: me.id, at: new Date().toISOString() };
+    return json({ entry: await studyPut(env, d) });
   }
   if (path === "delete") {
     if (!key.startsWith("manual:")) throw new HttpError(400, "Only posts added by hand can be removed.");

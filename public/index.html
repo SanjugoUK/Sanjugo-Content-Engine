@@ -5679,6 +5679,7 @@ function PublishedContentPage(){
   const [period, setPeriod] = useState(90);
   const [platform, setPlatform] = useState("");
   const [collabOnly, setCollabOnly] = useState(false);
+  const [showHidden, setShowHidden] = useState(false);
   const [dim, setDim] = useState("collab");
   const [metric, setMetric] = useState("views");
   const [pick, setPick] = useState(null); // {dim, value} from tapping a bar
@@ -5715,7 +5716,9 @@ function PublishedContentPage(){
 
   // "Usual" = the median views / engagement of our own posts on that platform in the period.
   const cutoff = period ? Date.now() - period*86400e3 : 0;
-  const inPeriod = all.filter(p=> new Date(p.publishedAt).getTime() >= cutoff);
+  const hiddenCount = all.filter(p=>p.study && p.study.hidden).length;
+  useEffect(()=>{ if(showHidden && !hiddenCount) setShowHidden(false); }, [showHidden, hiddenCount]);
+  const inPeriod = all.filter(p=> new Date(p.publishedAt).getTime() >= cutoff && (showHidden ? (p.study && p.study.hidden) : !(p.study && p.study.hidden)));
   const usual = useMemo(()=>{
     const out = {};
     for(const pl of Object.keys(PLATFORM_META)){
@@ -5778,6 +5781,7 @@ function PublishedContentPage(){
         <span style={{width:6}}/>
         <Select value={platform} onChange={setPlatform} options={[{value:"", label:"All platforms"}, ...Object.entries(PLATFORM_META).map(([k,m])=>({value:k, label:m.label}))]} style={{minWidth:150}}/>
         {chip(collabOnly, "Collabs only", ()=>setCollabOnly(v=>!v))}
+        {(hiddenCount>0 || showHidden) && chip(showHidden, showHidden ? "← Back to all posts" : "Hidden ("+hiddenCount+")", ()=>setShowHidden(v=>!v))}
         <span style={{flex:1}}/>
         <div className="cf-search" style={{position:"relative", width:"min(100%, 240px)"}}>
           <Icon name="search" size={15} style={{position:"absolute", left:10, top:9, color:"var(--ink-mute)"}}/>
@@ -5855,6 +5859,7 @@ function PublishedContentPage(){
               <div style={{height:120, position:"relative"}}>
                 <PostThumb post={p} radius={0} iconSize={24}/>
                 {x!=null && (x>=1.5 || x<=0.6) && <span style={{position:"absolute", top:8, right:8, fontSize:11, fontWeight:700, padding:"2px 8px", borderRadius:99, background: x>=1.5? "var(--green)":"var(--red)", color:"#fff"}}>{x>=1.5? x.toFixed(1).replace(/\.0$/,"")+"× usual" : "below usual"}</span>}
+                <StudyRemove post={p} reload={reload}/>
                 {p.manual && <span style={{position:"absolute", top:8, left:8, right:8, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", width:"fit-content", maxWidth:"calc(100% - 16px)", fontSize:11, fontWeight:700, padding:"2px 8px", borderRadius:99, background:"rgba(0,0,0,.6)", color:"#fff"}}>{p.account}</span>}
               </div>
               <div style={{padding:12}}>
@@ -5884,6 +5889,7 @@ function StudyDrawer({post, usual, onClose, reload, onEdit, campaigns, known}){
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
   const [timeline, setTimeline] = useState(false);
+  const [watch, setWatch] = useState(false);
   const c = studyCaption(post.caption);
   const st = post.study || {};
   const x = usual.views ? post.views/usual.views : null;
@@ -5943,8 +5949,13 @@ function StudyDrawer({post, usual, onClose, reload, onEdit, campaigns, known}){
           {!post.manual && post.snapshots && post.snapshots.length>1 && <Button size="sm" icon="trend" onClick={()=>setTimeline(true)}>Growth over time</Button>}
           {post.manual && post.platform==="instagram" && <Button size="sm" icon="refresh" onClick={refetch} disabled={busy}>{busy? "Fetching…" : "Refresh numbers"}</Button>}
           {post.manual && <Button size="sm" icon="edit" onClick={onEdit}>Edit</Button>}
-          {post.manual && <ConfirmButton confirmLabel="Remove this post?" onConfirm={async()=>{ try{ await send("delete", {key:post.key}); onClose(); reload(); }catch(e){ toast(e.message, "danger"); } }}>Remove</ConfirmButton>}
+          {post.manual && <ConfirmButton confirmLabel="Delete this collab?" onConfirm={async()=>{ try{ await send("delete", {key:post.key}); onClose(); reload(); }catch(e){ toast(e.message, "danger"); } }}>Delete</ConfirmButton>}
+          {!post.manual && <ConfirmButton confirmLabel={st.hidden ? "Show it again?" : "Hide from this page?"} onConfirm={async()=>{ try{ await send("hide", {key:post.key, hidden:!st.hidden}); onClose(); reload(); }catch(e){ toast(e.message, "danger"); } }}>{st.hidden ? "Show again" : "Hide"}</ConfirmButton>}
         </div>
+        {post.manual && wsEmbed(post.permalink).src && <div style={{marginBottom:18}}>
+          {watch ? <div style={{height:560, maxWidth:360, borderRadius:12, overflow:"hidden", background:"#fff", border:"1px solid var(--border)"}}><iframe src={wsEmbed(post.permalink).src} title="Collab post" loading="lazy" allow="autoplay; encrypted-media; picture-in-picture" allowFullScreen style={{width:"100%", height:"100%", border:0}}/></div>
+            : <Button size="sm" icon="play" onClick={()=>setWatch(true)}>Watch it here</Button>}
+        </div>}
 
         <SectionTitle>Caption</SectionTitle>
         <div style={{fontSize:13, lineHeight:1.55, whiteSpace:"pre-wrap", background:"var(--surface-2)", borderRadius:10, padding:12, marginBottom:8, maxHeight:180, overflowY:"auto"}}>{post.caption || <span style={{color:"var(--ink-mute)"}}>No caption</span>}</div>
@@ -5982,6 +5993,32 @@ function StudyDrawer({post, usual, onClose, reload, onEdit, campaigns, known}){
       </div>
       {timeline && <PostAnalyticsDrawer post={post} onClose={()=>setTimeline(false)}/>}
     </Drawer>
+  );
+}
+
+// Small ✕ on each Published Content card: a collab added by hand is deleted; our own posts are only hidden from
+// this page (they're still live on Instagram) and come back from "Hidden (n)".
+function StudyRemove({post, reload}){
+  const {dispatch} = useApp();
+  const send = useStudyPost();
+  const [armed, setArmed] = useState(false);
+  useEffect(()=>{ if(!armed) return; const t = setTimeout(()=>setArmed(false), 4000); return ()=>clearTimeout(t); }, [armed]);
+  const hidden = post.study && post.study.hidden;
+  const label = post.manual ? "Delete" : hidden ? "Show again" : "Hide";
+  async function go(){
+    try{
+      if(post.manual) await send("delete", {key:post.key});
+      else await send("hide", {key:post.key, hidden: !hidden});
+      dispatch({type:"ADD_TOAST", message: post.manual ? "Collab removed" : hidden ? "Back on the page" : "Hidden from this page — find it under Hidden"});
+      reload();
+    }catch(e){ dispatch({type:"ADD_TOAST", message:e.message, variant:"danger"}); }
+  }
+  return (
+    <button onClick={e=>{ e.stopPropagation(); if(armed || hidden) go(); else setArmed(true); }} title={post.manual ? "Delete this collab" : hidden ? "Show on the page again" : "Hide from this page (stays on Instagram)"}
+      style={{position:"absolute", bottom:8, right:8, zIndex:3, height:28, minWidth:28, padding: armed? "0 10px" : 0, borderRadius:99, border:"none", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", gap:5,
+        background: armed ? "var(--red)" : "rgba(0,0,0,.55)", color:"#fff", fontSize:12, fontWeight:700}}>
+      {armed ? <>{label}?</> : hidden ? <Icon name="undo" size={13}/> : <Icon name={post.manual ? "trash" : "x"} size={13}/>}
+    </button>
   );
 }
 
@@ -6044,6 +6081,8 @@ function AddInfluencerPost({post, onClose, onSaved}){
   async function save(fetchNow){
     setBusy(true);
     try{
+      // An Instagram link with an account always asks Instagram, unless numbers were typed in by hand.
+      if(!fetchNow && canFetch && !(Number(f.views)||Number(f.likes))) fetchNow = true;
       const r = await send("manual", {key: savedKey, manual:{...f, fetch: !!fetchNow, publishedAt: f.publishedAt && (byHand || post) ? new Date(f.publishedAt).toISOString() : ""}});
       if(!fetchNow){ dispatch({type:"ADD_TOAST", message: post? "Saved" : "Collab post added"}); onSaved(); return; }
       const fe = r.entry && r.entry.manual && r.entry.manual.fetch;
@@ -6072,9 +6111,10 @@ function AddInfluencerPost({post, onClose, onSaved}){
         <div style={{fontSize:12.5, color:"var(--ink-mute)", marginBottom:14, lineHeight:1.45}}>For collabs that live on the other account (Instagram only gives us posts our own account owns). Paste the link and who posted it — we fetch the views, likes and comments and refresh them every night.</div>
         <div style={{marginBottom:10}}>{lbl("Link to the post")}<input value={f.url} onChange={e=>onUrl(e.target.value)} placeholder="https://www.instagram.com/reel/…" style={input}/></div>
         <div style={{display:"grid", gridTemplateColumns:"1.4fr 1fr", gap:10, marginBottom:10}}>
-          <div>{lbl("Who posted it", "(two? @one @two)")}<input value={f.account} onChange={e=>set({account:e.target.value})} placeholder="@invited.app @daniafgx" style={input} autoCapitalize="off" autoCorrect="off"/></div>
+          <div>{lbl("Who posted it", "(the first name on the post)")}<input value={f.account} onChange={e=>set({account:e.target.value})} placeholder="@invited.app @daniafgx" style={input} autoCapitalize="off" autoCorrect="off"/></div>
           <div>{lbl("Cost £", "(optional)")}<input inputMode="decimal" value={f.cost} onChange={e=>set({cost:e.target.value.replace(/[^\d.]/g,"")})} placeholder="fee + free food" style={input}/></div>
         </div>
+        {wsEmbed(f.url).src && <a href={f.url} target="_blank" rel="noopener noreferrer" style={{display:"inline-flex", alignItems:"center", gap:5, fontSize:12.5, fontWeight:600, color:"var(--accent)", textDecoration:"none", marginBottom:10}}><Icon name="external" size={13}/>Open the post to check who posted it</a>}
         {status && <div style={{fontSize:12.5, lineHeight:1.45, padding:"9px 11px", borderRadius:9, marginBottom:10, background: status.state==="fail"? "var(--amber-soft)" : "var(--blue-soft)", color: status.state==="fail"? "var(--amber)" : "var(--blue)", fontWeight:600}}>{status.state==="fetching" && "⏳ "}{status.text}</div>}
         {!byHand && <button onClick={()=>setByHand(true)} style={{border:"none", background:"none", padding:0, marginBottom:12, color:"var(--accent)", fontWeight:600, fontSize:12.5, cursor:"pointer"}}>{isIg? "Or type the numbers in yourself" : "Add the numbers"} ›</button>}
         {(byHand || !isIg) && <>
@@ -6090,7 +6130,7 @@ function AddInfluencerPost({post, onClose, onSaved}){
         <div style={{display:"flex", justifyContent:"flex-end", gap:8, flexWrap:"wrap"}}>
           <Button onClick={onClose}>{status && status.state==="fail" ? "Close" : "Cancel"}</Button>
           {(byHand || !isIg) && <Button variant={isIg && !status ? undefined : "primary"} onClick={()=>save(false)} disabled={busy || !f.url.trim()}>{busy && !status? "Saving…" : "Save"}</Button>}
-          {isIg && !(status && status.state==="fail") && <Button variant="primary" icon="refresh" onClick={()=>save(true)} disabled={busy || !canFetch}>{busy? "Fetching…" : "Add & fetch numbers"}</Button>}
+          {isIg && <Button variant="primary" icon="refresh" onClick={()=>{ setStatus(null); save(true); }} disabled={busy || !canFetch}>{busy? "Fetching…" : status && status.state==="fail" ? "Try again" : savedKey ? "Fetch numbers" : "Add & fetch numbers"}</Button>}
         </div>
         {isIg && !canFetch && f.url && <div style={{fontSize:11.5, color:"var(--ink-mute)", marginTop:8, textAlign:"right"}}>{handles.length? "That doesn't look like an Instagram post link." : "Add who posted it so we know where to look."}</div>}
       </div>

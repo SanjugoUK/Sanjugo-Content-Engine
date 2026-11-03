@@ -70,7 +70,7 @@ export default {
       }
       // Admin-only actions (only enforced once sign-in is on — before that everyone is effectively an admin).
       // (Refreshing the Drive library list is allowed for everyone — creators need new files to show up.)
-      const adminOnly = (url.pathname === "/api/storage/cleanup") || (url.pathname === "/api/google/disconnect") ||
+      const adminOnly = (url.pathname === "/api/storage/cleanup") || (url.pathname === "/api/storage/rename-archive") || (url.pathname === "/api/google/disconnect") ||
         (url.pathname === "/api/google/connect");
       if (adminOnly) {
         try { requireAdmin(viewer); } catch (e) { return json({ error: e.message }, e.status || 403); }
@@ -86,10 +86,11 @@ export default {
       }
     }
 
-    if (url.pathname === "/api/storage" || url.pathname === "/api/storage/cleanup") {
+    if (url.pathname === "/api/storage" || url.pathname === "/api/storage/cleanup" || url.pathname === "/api/storage/rename-archive") {
       try {
         if (url.pathname === "/api/storage" && request.method === "GET") return json(await storageReport(env));
         if (url.pathname === "/api/storage/cleanup" && request.method === "POST") return json(await runCleanup(env, { trigger: "manual" }));
+        if (url.pathname === "/api/storage/rename-archive" && request.method === "POST") return json(await renameArchive(env, { limit: 40 }));
       } catch (e) {
         return json({ error: e.message || "Storage error" }, e.status || 500);
       }
@@ -573,6 +574,9 @@ async function refreshLibrary(env) {
   // to folders it made), so that folder is walked as a second library root — its branch subfolders sit beside the library's.
   const wsRoot = await kvGet(env, "ws_drive_folder");
   if (wsRoot && wsRoot.id && wsRoot.id !== root) folders.set(wsRoot.id, { name: null, parent: null });
+  // Published post uploads moved to Drive ("Creator Studio Archive") are part of the library too.
+  const archiveRoot = await kvGet(env, "archive_folder_id");
+  if (archiveRoot && archiveRoot !== root && !folders.has(archiveRoot)) folders.set(archiveRoot, { name: null, parent: null, archive: true });
   const roots = [...folders.keys()];
   const items = [];
   let frontier = roots, calls = 0;
@@ -618,7 +622,8 @@ async function refreshLibrary(env) {
   };
   const files = items.map((it) => {
     const path = pathOf(it.parent);
-    const f = { id: it.id, name: it.name, mime: it.mimeType, size: it.size ? Number(it.size) : null, branch: path[0] || "Unsorted", path: path.slice(1), modified: it.modifiedTime };
+    const inArchive = it.parent === archiveRoot;
+    const f = { id: it.id, name: it.name, mime: it.mimeType, size: it.size ? Number(it.size) : null, branch: inArchive ? "All-Branches" : path[0] || "Unsorted", path: inArchive ? ["Creator Studio Archive"] : path.slice(1), modified: it.modifiedTime };
     if (it.description) f.note = it.description;
     return f;
   });
@@ -852,6 +857,7 @@ let storageTablesReady = false;
 async function ensureStorageTables(env) {
   if (storageTablesReady) return;
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS media_archive (key TEXT PRIMARY KEY, drive_id TEXT NOT NULL, size INTEGER, title TEXT, archived_at TEXT NOT NULL)`).run();
+  try { await env.DB.prepare("ALTER TABLE media_archive ADD COLUMN name TEXT").run(); } catch (e) { /* already there */ }
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS app_kv (k TEXT PRIMARY KEY, v TEXT)`).run();
   storageTablesReady = true;
 }
@@ -929,7 +935,7 @@ async function planCleanup(env, now = Date.now()) {
     const done = us.map(finishedAt);
     if (done.some((t) => t === null)) continue; // still being worked on, scheduled or rejected
     const dueAt = Math.max(...done) + PUBLISHED_GRACE_DAYS * 86400e3;
-    const a = { ...base, action: cat === "library" ? "delete" : "archive", titles: us.map((u) => u.title), reason: "Published", dueAt: new Date(dueAt).toISOString() };
+    const a = { ...base, action: cat === "library" ? "delete" : "archive", titles: us.map((u) => u.title), item: us[0], publishedAt: Math.max(...done), reason: "Published", dueAt: new Date(dueAt).toISOString() };
     actions.push({ ...a, ready: now >= dueAt });
   }
   return { objects, actions };
@@ -943,13 +949,13 @@ async function storageReport(env) {
   const ready = actions.filter((a) => a.ready !== false);
   const upcoming = actions.filter((a) => a.ready === false);
   await ensureStorageTables(env);
-  const archived = await env.DB.prepare("SELECT COUNT(*) AS n, COALESCE(SUM(size),0) AS bytes FROM media_archive").first();
+  const archived = await env.DB.prepare("SELECT COUNT(*) AS n, COALESCE(SUM(size),0) AS bytes, SUM(CASE WHEN name IS NULL THEN 1 ELSE 0 END) AS unnamed FROM media_archive").first();
   const auth = serviceAccount(env) ? null : await getGoogleAuth(env);
   return {
     totalBytes: total, limitBytes: STORAGE_LIMIT_BYTES, objectCount: objects.length, byCategory,
     readyNow: { count: ready.length, bytes: ready.reduce((s, a) => s + a.size, 0), items: ready.slice(0, 50) },
     upcoming: { count: upcoming.length, bytes: upcoming.reduce((s, a) => s + a.size, 0), items: upcoming.sort((a, b) => a.dueAt.localeCompare(b.dueAt)).slice(0, 50) },
-    archivedToDrive: { count: archived.n, bytes: archived.bytes },
+    archivedToDrive: { count: archived.n, bytes: archived.bytes, unnamed: archived.unnamed || 0 },
     canArchive: !!(auth && (auth.scopes || "").includes("drive.file")),
     lastCleanup: await kvGet(env, "last_cleanup"),
     policy: { publishedGraceDays: PUBLISHED_GRACE_DAYS, orphanGraceHours: ORPHAN_GRACE_HOURS },
@@ -974,17 +980,14 @@ async function archiveFolderId(env, token) {
   return d.id;
 }
 
-async function archiveToDrive(env, token, folderId, action) {
+async function archiveToDrive(env, token, folderId, action, name, description) {
   const obj = await env.MEDIA.get(action.key);
   if (!obj) return null;
   const type = (obj.httpMetadata && obj.httpMetadata.contentType) || "application/octet-stream";
-  const ext = action.key.includes(".") ? "." + action.key.split(".").pop() : "";
-  const date = new Date().toISOString().slice(0, 10);
-  const title = ((action.titles && action.titles[0]) || "Creator Studio media").replace(/[\\/:*?"<>|]+/g, " ").slice(0, 80);
   const init = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id", {
     method: "POST",
     headers: { Authorization: "Bearer " + token, "Content-Type": "application/json; charset=UTF-8", "X-Upload-Content-Type": type, "X-Upload-Content-Length": String(obj.size) },
-    body: JSON.stringify({ name: `${date} ${title}${ext}`, parents: [folderId], description: "Archived by Creator Studio from /api/media/" + action.key }),
+    body: JSON.stringify({ name, parents: [folderId], description }),
   });
   const session = init.headers.get("location");
   if (!init.ok || !session) { obj.body.cancel(); throw new Error("Drive upload couldn't start (" + init.status + ")"); }
@@ -1001,7 +1004,7 @@ async function runCleanup(env, { trigger }) {
   const { actions } = await planCleanup(env);
   const due = actions.filter((a) => a.ready !== false);
   const result = { at: new Date().toISOString(), trigger, deleted: 0, archived: 0, freedBytes: 0, skipped: 0, errors: [] };
-  let token = null, folderId = null, archivesLeft = MAX_ARCHIVES_PER_RUN;
+  let token = null, folderId = null, archivesLeft = MAX_ARCHIVES_PER_RUN, used = null;
   for (const a of due) {
     try {
       if (a.action === "archive") {
@@ -1013,10 +1016,14 @@ async function runCleanup(env, { trigger }) {
           folderId = await archiveFolderId(env, token);
         }
         archivesLeft--;
-        const driveId = await archiveToDrive(env, token, folderId, a);
+        if (!used) used = await wsUsedBarcodes(env, null);
+        const n = archiveName(a.item, a.key, used, a.publishedAt);
+        used.add(n.barcode);
+        const driveId = await archiveToDrive(env, token, folderId, a, n.name, n.description);
         if (!driveId) continue;
-        await env.DB.prepare("INSERT OR REPLACE INTO media_archive (key, drive_id, size, title, archived_at) VALUES (?1, ?2, ?3, ?4, ?5)")
-          .bind(a.key, driveId, a.size, (a.titles || [])[0] || null, new Date().toISOString()).run();
+        await env.DB.prepare("INSERT OR REPLACE INTO media_archive (key, drive_id, size, title, archived_at, name) VALUES (?1, ?2, ?3, ?4, ?5, ?6)")
+          .bind(a.key, driveId, a.size, (a.titles || [])[0] || null, new Date().toISOString(), n.name).run();
+        await wsAddToLibraryIndex(env, null, { id: driveId, name: n.name, mime: a.mime || null, size: a.size, branch: n.branch, path: ["Creator Studio Archive"], modified: new Date().toISOString(), note: n.description }).catch(() => {});
         result.archived++;
       } else {
         result.deleted++;
@@ -1027,8 +1034,61 @@ async function runCleanup(env, { trigger }) {
       result.errors.push({ key: a.key, error: e.message });
     }
   }
+  // Older archive files (named before the filing system was used here) get their proper name a few at a time.
+  try { result.renamed = (await renameArchive(env, { limit: 15 })).renamed; } catch (e) { result.errors.push({ key: "rename", error: e.message }); }
   await kvSet(env, "last_cleanup", result);
   return result;
+}
+
+// SANJUGO filing-system name for a post's own upload once it's published:
+// DATE_SOCIAL_CATEGORY_[DISH]_USD_v#_BARCODE.ext — USD = "Used" (it's been posted), date = when it went live.
+const ARCHIVE_PILLAR_CAT = { Product: "FC", "Behind the Scenes": "AV", Education: "CH", UGC: "CM", Promotion: "PO", Seasonal: "PO" };
+function archiveName(item, key, used, publishedAt) {
+  const it = item || {};
+  const platforms = Array.isArray(it.platforms) ? it.platforms : Object.keys(it.variants || {});
+  const social = it.format === "story" ? "IS" : platforms.length === 1 && platforms[0] === "instagram" ? "IV"
+    : platforms.length === 1 && platforms[0] === "tiktok" ? "TK" : platforms.length === 1 && platforms[0] === "youtube" ? "YT" : "AL";
+  const ref = it.libraryRef || {};
+  const category = WS_CATEGORIES[ref.category] ? ref.category : ARCHIVE_PILLAR_CAT[it.pillar] || "FC";
+  const dish = ref.dish && WS_DISHES[ref.dish] ? ref.dish : null;
+  const text = [it.title, ...Object.values(it.variants || {}).map((v) => (v && v.caption) || "")].join(" ").toLowerCase();
+  const hits = ["shoreditch", "angel", "victoria"].filter((b) => text.includes(b));
+  const branchKey = hits.length === 1 ? hits[0] : "all";
+  const branch = WS_BRANCHES[branchKey];
+  const barcode = wsNextBarcode(branch.letter, used);
+  const ext = ((/\.([a-z0-9]{2,5})$/i.exec(key || "") || [])[1] || "mp4").toLowerCase();
+  const name = [londonDate(new Date(publishedAt || Date.now())), social, category, ...(dish ? [dish] : []), "USD", "v" + (it.currentVersion || 1), barcode].join("_") + "." + ext;
+  const description = `Published by Creator Studio: "${String(it.title || "post").slice(0, 120)}" on ${platforms.join(", ") || "social"}${publishedAt ? ", " + new Date(publishedAt).toISOString().slice(0, 10) : ""}. Original upload kept here after publishing.`;
+  return { name, barcode, branch: branch.folder, description };
+}
+
+// Give archive files from before this change their proper name (Drive lets the app rename files it made).
+async function renameArchive(env, { limit = 50 } = {}) {
+  await ensureStorageTables(env);
+  const { results } = await env.DB.prepare("SELECT * FROM media_archive WHERE name IS NULL ORDER BY archived_at ASC LIMIT ?1").bind(limit).all();
+  const rows = results || [];
+  if (!rows.length) return { renamed: 0, left: 0 };
+  const auth = await getGoogleAuth(env);
+  if (!auth || !(auth.scopes || "").includes("drive.file")) return { renamed: 0, left: rows.length, needsReconnect: true };
+  const token = await getGoogleToken(env);
+  const stateRow = await env.DB.prepare("SELECT data FROM app_state WHERE id = 1").first();
+  const items = stateRow ? (JSON.parse(stateRow.data).contentItems || []) : [];
+  const used = await wsUsedBarcodes(env, null);
+  let renamed = 0;
+  for (const r of rows) {
+    const item = items.find((i) => JSON.stringify(i).includes("/api/media/" + r.key)) || { title: r.title };
+    const n = archiveName(item, r.key, used, item.variants ? finishedAt(item) : Date.parse(r.archived_at));
+    const res = await fetch(`https://www.googleapis.com/drive/v3/files/${r.drive_id}?fields=id,name`, {
+      method: "PATCH", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" }, body: JSON.stringify({ name: n.name, description: n.description }),
+    });
+    if (!res.ok) { if (res.status === 404) await env.DB.prepare("UPDATE media_archive SET name = ?2 WHERE key = ?1").bind(r.key, "(missing in Drive)").run(); continue; }
+    used.add(n.barcode);
+    await env.DB.prepare("UPDATE media_archive SET name = ?2 WHERE key = ?1").bind(r.key, n.name).run();
+    await wsAddToLibraryIndex(env, null, { id: r.drive_id, name: n.name, mime: null, size: r.size, branch: n.branch, path: ["Creator Studio Archive"], modified: r.archived_at, note: n.description }).catch(() => {});
+    renamed++;
+  }
+  const left = (await env.DB.prepare("SELECT COUNT(*) AS n FROM media_archive WHERE name IS NULL").first()).n;
+  return { renamed, left };
 }
 
 // ---------------------------------------------------------------------------
@@ -2580,13 +2640,18 @@ async function wsUsedBarcodes(env, request) {
   const obj = await env.MEDIA.get(LIBRARY_INDEX_KEY);
   if (obj) files = (await obj.json().catch(() => ({}))).files || [];
   else {
-    const r = await env.ASSETS.fetch(new Request(new URL("/library.json", request.url)));
+    const r = await env.ASSETS.fetch(new Request(new URL("/library.json", request ? request.url : env.PUBLIC_URL)));
     if (r.ok) files = (await r.json().catch(() => ({}))).files || [];
   }
   const used = new Set();
   for (const f of files) { const m = /_([A-Z]\d{3})(?:\.[^.]+)?$/.exec(f.name || ""); if (m) used.add(m[1]); }
   const { results } = await env.DB.prepare("SELECT data FROM ws_projects").all();
   for (const r of results || []) { const p = JSON.parse(r.data); if (p.filed && p.filed.barcode) used.add(p.filed.barcode); }
+  try {
+    await ensureStorageTables(env);
+    const { results: arch } = await env.DB.prepare("SELECT name FROM media_archive WHERE name IS NOT NULL").all();
+    for (const a of arch || []) { const m = /_([A-Z]\d{3})\.[^.]+$/.exec(a.name || ""); if (m) used.add(m[1]); }
+  } catch (e) { /* archive table not there yet */ }
   return used;
 }
 function wsNextBarcode(letter, used) {
@@ -2724,7 +2789,7 @@ async function wsAddToLibraryIndex(env, request, file) {
   const obj = await env.MEDIA.get(LIBRARY_INDEX_KEY);
   if (obj) data = await obj.json().catch(() => null);
   if (!data) {
-    const r = await env.ASSETS.fetch(new Request(new URL("/library.json", request.url)));
+    const r = await env.ASSETS.fetch(new Request(new URL("/library.json", request ? request.url : env.PUBLIC_URL)));
     data = r.ok ? await r.json().catch(() => null) : null;
   }
   if (!data || !Array.isArray(data.files)) data = { source: "live", files: [] };

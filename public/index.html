@@ -4692,6 +4692,20 @@ function StorageSettings(){
     }catch(e){ dispatch({type:"ADD_TOAST", message:e.message, variant:"danger"}); }
     setBusy(false);
   }
+  // Older files in "Creator Studio Archive" get their SANJUGO filing-system name (the nightly run does 15 at a time).
+  async function nameArchive(){
+    setBusy(true);
+    try{
+      const r = await fetch("/api/storage/rename-archive", {method:"POST"});
+      const d = await r.json().catch(()=>({}));
+      if(!r.ok) throw new Error(d.error || "Couldn't rename the archive files");
+      if(d.needsReconnect) throw new Error("Reconnect Google Drive first (Content library → Reconnect)");
+      LIBRARY_CACHE = null;
+      dispatch({type:"ADD_TOAST", message: d.renamed ? "Named "+d.renamed+" archive file"+(d.renamed>1?"s":"")+(d.left? " · "+d.left+" left — tap again" : " · all done") : "Nothing to rename"});
+      load();
+    }catch(e){ dispatch({type:"ADD_TOAST", message:e.message, variant:"danger"}); }
+    setBusy(false);
+  }
   if(!rep) return <Skeleton h={90}/>;
   if(rep.error) return <div style={{fontSize:12.5, color:"var(--ink-mute)"}}>{rep.error} — storage details are available on the live site.</div>;
   const pct = Math.min(100, rep.totalBytes/rep.limitBytes*100);
@@ -4721,6 +4735,7 @@ function StorageSettings(){
         <span><strong className="num">{rep.readyNow.count}</strong> file{rep.readyNow.count===1?"":"s"} ready to clear now ({fmtBytes(rep.readyNow.bytes)})</span>
         <span style={{color:"var(--ink-mute)"}}>· {rep.upcoming.count} waiting out the {rep.policy.publishedGraceDays}-day window ({fmtBytes(rep.upcoming.bytes)})</span>
         <span style={{color:"var(--ink-mute)"}}>· {rep.archivedToDrive.count} archived to Drive so far</span>
+        {rep.archivedToDrive.unnamed>0 && <Button size="sm" icon="file" disabled={busy} onClick={nameArchive}>Name {rep.archivedToDrive.unnamed} archive file{rep.archivedToDrive.unnamed>1?"s":""} properly</Button>}
       </div>
       {!rep.canArchive && rep.readyNow.items.concat(rep.upcoming.items).some(a=>a.action==="archive") && <div style={{fontSize:12, color:"var(--amber)", fontWeight:600, marginBottom:8}}>Reconnect Google Drive (above) so uploads can be moved to the Drive archive.</div>}
       <div style={{display:"flex", gap:8, flexWrap:"wrap", alignItems:"center"}}>

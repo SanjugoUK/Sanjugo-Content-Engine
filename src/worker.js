@@ -2952,9 +2952,11 @@ async function collabCallback(env, job, body) {
     await studyPut(env, d);
     found++;
   }
-  await env.DB.prepare("UPDATE make_jobs SET status = ?2, error = ?3, updated_at = ?4 WHERE id = ?1")
-    .bind(job.id, found ? "done" : "failed", found ? null : "post not found for @" + handle, now).run();
-  return { ok: true, found };
+  // Keep what Instagram returned (post code + date) so a "not found" can be checked later.
+  detail.seen = posts.slice(0, 80).map((x) => [igShortcode(x && x.permalink), String((x && x.at) || "").slice(0, 10)]);
+  await env.DB.prepare("UPDATE make_jobs SET status = ?2, error = ?3, updated_at = ?4, detail = ?5 WHERE id = ?1")
+    .bind(job.id, found ? "done" : "failed", found ? null : "post not found for @" + handle, now, JSON.stringify(detail)).run();
+  return { ok: true, found, seen: posts.length };
 }
 
 // Nightly: refresh every Instagram collab added by link (one Make run per account).

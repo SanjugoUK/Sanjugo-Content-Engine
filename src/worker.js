@@ -2119,7 +2119,7 @@ What Creator Studio can do (use this to explain how things work):
 - Stats: Make pulls the latest posts with likes, comments, shares, saves, reach and views every night (about 4am UK time), or any time with "Get latest" (Settings → Stats). TikTok stats come from the public @sanjugouk profile via HasData. Each platform has its own Make scenario ("Pull · Instagram", "Publish · Facebook", …) so one can be fixed without touching the others; "Clear stats" removes a platform's stats (e.g. after switching accounts).
 - Analytics: Real data (from Make) or Sample data; ranges 7/30/90 days, 12 months, All time, custom; filters by platform, campaign, content pillar, post; per-platform and per-post views, reach, likes, comments, shares, saves, engagement rate; best time to post; top posts; a growth forecaster.
 - Published Content: a study page for every live post (and influencer posts added with "Add influencer post" — their link and numbers typed in from their insights). Filter by period, platform, Collabs only, search; "Compare by" Influencer / Promotion / Content type / Branch / Dish / Platform / Day / Time of day with average views or engagement; a day × time heatmap; each post shows how it did against the usual. Open a post for the caption breakdown (hook, words, emojis, hashtags, call to action), editable tags (guessed from the caption, marked "auto"), "Explain" (AI says why it worked), team notes, and "Make another like it".
-- Workspace (tile in the menu): one project per video. Create project (name, branch, category, dish, creator — or "not assigned yet", due date). Tabs: Ideas (paste reel links or write ideas; everyone except the project's creator votes Yes/No and comments on each with 💬; best first, three No's removes an idea; cards you haven't voted on say "Your vote?"), Plan (the idea text and a shot list the creator ticks off while filming), Draft review (upload cuts; notes at a second or on the whole cut, ticked Fixed; "Chat about all cuts" where "cut 1 at 0:12" becomes a link; "Send for approval"). Then the cut plays in a phone preview; anyone except the uploader taps "Approve content" or "Request changes". The uploader confirms the file name (SANJUGO filing system, e.g. 20261031_AL_FC_SP_FIN_v1_S465.mp4) and it is saved to Google Drive (Creator Studio Projects folder) and the Content Library. "Create post from this" then starts a normal post for the Approval Queue. This is content approval only — publishing still goes through the Approval Queue.
+- Workspace (tile in the menu): one project per video. Create project (name, branch, category, dish, creator — or "not assigned yet", due date). Tabs: Ideas (paste reel links or write ideas; everyone except the project's creator votes Yes/No and comments on each with 💬; best first, three No's removes an idea; cards you haven't voted on say "Your vote?"), Plan (the idea text and a shot list the creator ticks off while filming), Draft review (upload Draft 1, Draft 2…; player with −2s/+2s, 0.5× slow motion, loop and download; one "Review chat" for all drafts where a message is pinned to a second of a draft, about a whole draft — both are to-dos ticked "Fixed" — or General; "draft 1 at 0:12" in a message becomes a link; "Send draft N for approval"). Then the draft plays in a phone preview; anyone except the uploader taps "Approve content" or "Needs changes". Only big moments (new project, sent for approval, approved, changes requested, undone, saved to the Library, deleted) post in Team Chat — Workspace comments and votes don't. The uploader confirms the file name (SANJUGO filing system, e.g. 20261031_AL_FC_SP_FIN_v1_S465.mp4) and it is saved to Google Drive (Creator Studio Projects folder) and the Content Library. "Create post from this" then starts a normal post for the Approval Queue. This is content approval only — publishing still goes through the Approval Queue.
 - Settings: Stats (Get latest), Notifications, and for admins Team workload, Recent activity, Content library (Google Drive), Storage, Campaigns, Smart insights, Weekly posting slots, Platforms, Make.com connections (webhooks, auto-publish) and Team & access (roles, passwords). Your name and password are under your name at the top right of Settings. There is no separate Team page any more.
 - Roles: Creator — create, edit, submit. Approver — approve and schedule. Admin — everything including team and settings.`;
 
@@ -2445,6 +2445,7 @@ async function workspaceRoute(request, env, url, viewer, ctx) {
     if (p.filed) throw new HttpError(409, "This project's video is already in the Content Library, so the project is kept.");
     p.deleted = { by: me.id, at: now };
     await wsSaveProject(env, p);
+    await wsNotify(env, ctx, { actor: me, members, project: p, text: `🗑️ ${me.name} deleted the Workspace project "${p.title}"`, push: { title: "Project deleted", body: `${me.name} deleted "${p.title}"` } });
     return json({ ok: true });
   }
 
@@ -2471,7 +2472,7 @@ async function workspaceRoute(request, env, url, viewer, ctx) {
         it.parentId = parent.id;
       }
     } else if (kind === "draft") {
-      if (p.submitted || p.approval) throw new HttpError(409, "A cut is waiting for approval — wait for the decision before uploading another.");
+      if (p.submitted || p.approval) throw new HttpError(409, "A draft is waiting for approval — wait for the decision before uploading another.");
       const m = body.media || {};
       if (!/^\/api\/media\/workspace\/[\w.-]+$/.test(m.fileUrl || "")) throw new HttpError(400, "Upload the video first.");
       if (!/^video\//.test(m.mime || "")) throw new HttpError(400, "Drafts must be videos.");
@@ -2480,19 +2481,15 @@ async function workspaceRoute(request, env, url, viewer, ctx) {
       it.media = { fileUrl: m.fileUrl, mime: wsText(m.mime, 60), name: wsText(m.name, 200), size: Number(m.size) || null, duration: Number(m.duration) || null, w: Number(m.w) || null, h: Number(m.h) || null };
     } else if (kind === "note") {
       const d = await wsItem(env, body.draftId);
-      if (d.projectId !== p.id || d.kind !== "draft") throw new HttpError(400, "That cut isn't part of this project.");
+      if (d.projectId !== p.id || d.kind !== "draft") throw new HttpError(400, "That draft isn't part of this project.");
       if (!it.text) throw new HttpError(400, "Write the note first.");
       it.draftId = d.id;
       // null = a note on the whole cut rather than one moment
       it.t = body.t === null ? null : Math.max(0, Math.round((Number(body.t) || 0) * 10) / 10);
     }
     await wsSaveItem(env, it);
-    if (kind === "draft") {
-      await wsNotify(env, ctx, { actor: me, members, project: p, text: `🎬 ${me.name} uploaded cut ${it.cut} of "${p.title}" in the Workspace — have a look and leave notes.`, push: { title: `New cut: ${p.title}`, body: `${me.name} uploaded cut ${it.cut}` } });
-    } else if (kind !== "shot" && (kind !== "link" || it.text)) {
-      const label = { link: "added a reference", idea: "added an idea", comment: "commented", note: "left a note" }[kind];
-      await wsNotify(env, ctx, { actor: me, members, project: p, chat: false, push: { title: p.title, body: `${me.name} ${label}: ${it.text || it.url}` } });
-    }
+    // Ideas, comments, review notes and new drafts stay inside the project — no Team Chat line or phone alert.
+    // The team is told about the big moments only (new project, sent for approval, decisions, filed, deleted).
     return json({ item: it });
   }
 
@@ -2512,7 +2509,7 @@ async function workspaceRoute(request, env, url, viewer, ctx) {
       else throw new HttpError(400, "Only notes and shots can be ticked off.");
     } else {
       if (it.author !== me.id && me.role !== "admin") throw new HttpError(403, "You can only delete what you added.");
-      if (it.kind === "draft" && ((p.submitted && p.submitted.draftId === it.id) || p.approval || p.filed)) throw new HttpError(409, "This cut is in approval or already approved, so it's kept.");
+      if (it.kind === "draft" && ((p.submitted && p.submitted.draftId === it.id) || p.approval || p.filed)) throw new HttpError(409, "This draft is in approval or already approved, so it's kept.");
       it.deleted = { by: me.id, at: now };
     }
     await wsSaveItem(env, it);
@@ -2523,10 +2520,10 @@ async function workspaceRoute(request, env, url, viewer, ctx) {
     const p = await wsProject(env, body.projectId);
     if (p.filed || p.approval) throw new HttpError(409, "This project is already approved.");
     const d = await wsItem(env, body.draftId);
-    if (d.projectId !== p.id || d.kind !== "draft" || d.deleted) throw new HttpError(400, "Pick a cut from this project.");
+    if (d.projectId !== p.id || d.kind !== "draft" || d.deleted) throw new HttpError(400, "Pick a draft from this project.");
     p.submitted = { draftId: d.id, cut: d.cut, by: me.id, at: now };
     await wsSaveProject(env, p);
-    await wsNotify(env, ctx, { actor: me, members, project: p, text: `🙋 ${me.name} sent cut ${d.cut} of "${p.title}" for content approval — open it in the Workspace to approve or ask for changes.`, push: { title: `Ready for approval: ${p.title}`, body: `${me.name} sent cut ${d.cut} for content approval` }, eventId: "ws_submit_" + d.id });
+    await wsNotify(env, ctx, { actor: me, members, project: p, text: `🙋 ${me.name} sent draft ${d.cut} of "${p.title}" for content approval — open it in the Workspace to approve or ask for changes.`, push: { title: `Ready for approval: ${p.title}`, body: `${me.name} sent draft ${d.cut} for content approval` }, eventId: "ws_submit_" + d.id });
     return json({ project: wsSummary(p, await wsItems(env, p.id), members) });
   }
 
@@ -2534,8 +2531,10 @@ async function workspaceRoute(request, env, url, viewer, ctx) {
     const p = await wsProject(env, body.projectId);
     if (!p.submitted || p.approval) throw new HttpError(409, "Nothing is waiting for approval.");
     if (p.submitted.by !== me.id && me.role !== "admin") throw new HttpError(403, "Only the person who sent it can take it back.");
+    const cut = p.submitted.cut;
     delete p.submitted;
     await wsSaveProject(env, p);
+    await wsNotify(env, ctx, { actor: me, members, project: p, text: `↩️ ${me.name} took draft ${cut} of "${p.title}" back from approval`, push: { title: p.title, body: `${me.name} took draft ${cut} back from approval` } });
     return json({ project: wsSummary(p, await wsItems(env, p.id), members) });
   }
 
@@ -2543,18 +2542,18 @@ async function workspaceRoute(request, env, url, viewer, ctx) {
     const p = await wsProject(env, body.projectId);
     if (!p.submitted || p.approval) throw new HttpError(409, "Nothing is waiting for approval.");
     const d = await wsItem(env, p.submitted.draftId);
-    if (d.author === me.id) throw new HttpError(403, "Someone other than the person who uploaded this cut has to approve it.");
+    if (d.author === me.id) throw new HttpError(403, "Someone other than the person who uploaded this draft has to approve it.");
     const note = wsText(body.note, 2000);
     if (body.decision === "approve") {
       p.approval = { draftId: d.id, cut: d.cut, by: me.id, at: now, note };
       await wsSaveProject(env, p);
-      await wsNotify(env, ctx, { actor: me, members, project: p, text: `✅ ${me.name} approved cut ${d.cut} of "${p.title}". Next: confirm the file name so it can go to Google Drive.`, push: { title: `Approved: ${p.title}`, body: `${me.name} approved cut ${d.cut} — confirm the file name next` }, eventId: "ws_approve_" + d.id });
+      await wsNotify(env, ctx, { actor: me, members, project: p, text: `✅ ${me.name} approved draft ${d.cut} of "${p.title}". Next: confirm the file name so it can go to Google Drive.`, push: { title: `Approved: ${p.title}`, body: `${me.name} approved draft ${d.cut} — confirm the file name next` }, eventId: "ws_approve_" + d.id });
     } else if (body.decision === "changes") {
       if (!note) throw new HttpError(400, "Say what needs to change.");
       delete p.submitted;
       await wsSaveProject(env, p);
-      await wsSaveItem(env, { id: wsId("wi"), projectId: p.id, kind: "comment", author: me.id, createdAt: now, text: `Changes needed on cut ${d.cut}: ${note}`, decision: "changes", draftId: d.id });
-      await wsNotify(env, ctx, { actor: me, members, project: p, text: `✏️ ${me.name} asked for changes on cut ${d.cut} of "${p.title}": ${note}`, push: { title: `Changes needed: ${p.title}`, body: `${me.name}: ${note}` }, eventId: "ws_changes_" + d.id + "_" + Date.now() });
+      await wsSaveItem(env, { id: wsId("wi"), projectId: p.id, kind: "comment", author: me.id, createdAt: now, text: `Changes needed on draft ${d.cut}: ${note}`, decision: "changes", draftId: d.id });
+      await wsNotify(env, ctx, { actor: me, members, project: p, text: `✏️ ${me.name} asked for changes on draft ${d.cut} of "${p.title}": ${note}`, push: { title: `Changes needed: ${p.title}`, body: `${me.name}: ${note}` }, eventId: "ws_changes_" + d.id + "_" + Date.now() });
     } else throw new HttpError(400, "Choose approve or changes.");
     return json({ project: wsSummary(p, await wsItems(env, p.id), members) });
   }
@@ -2563,8 +2562,10 @@ async function workspaceRoute(request, env, url, viewer, ctx) {
     const p = await wsProject(env, body.projectId);
     if (!p.approval || p.filed) throw new HttpError(409, "There's no approval to undo.");
     if (p.approval.by !== me.id && me.role !== "admin") throw new HttpError(403, "Only the person who approved it can undo that.");
+    const cut = p.approval.cut;
     delete p.approval;
     await wsSaveProject(env, p);
+    await wsNotify(env, ctx, { actor: me, members, project: p, text: `↩️ ${me.name} undid the approval of draft ${cut} of "${p.title}" — it's waiting for approval again`, push: { title: p.title, body: `${me.name} undid the approval of draft ${cut}` } });
     return json({ project: wsSummary(p, await wsItems(env, p.id), members) });
   }
 
@@ -2682,7 +2683,7 @@ async function wsFile(env, request, ctx, body, me, members) {
     const { rootId, folderId, branch } = await wsDriveFolder(env, token, p.branch);
     const approver = (members.find((m) => m.id === p.approval.by) || {}).name || "the team";
     const creator = (members.find((m) => m.id === d.author) || {}).name || "the creator";
-    const description = `Workspace project: ${p.title}. Filmed by ${creator}, cut ${d.cut}, approved by ${approver} on ${p.approval.at.slice(0, 10)}.` + (p.brief ? " Brief: " + p.brief.slice(0, 400) : "");
+    const description = `Workspace project: ${p.title}. Filmed by ${creator}, draft ${d.cut}, approved by ${approver} on ${p.approval.at.slice(0, 10)}.` + (p.brief ? " Brief: " + p.brief.slice(0, 400) : "");
     const driveId = await driveUploadFromR2(env, token, key, name, folderId, description);
     p.filed = { driveId, name, barcode: check.barcode, by: me.id, at: new Date().toISOString(), folderId, rootId, draftId: d.id };
     delete p.filing;

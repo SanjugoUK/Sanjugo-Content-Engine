@@ -3477,7 +3477,7 @@ function DashboardPage(){
     todo.push({key:"f"+it.id, urgent:true, rank:0, tag:["Failed", "var(--red)", "var(--red-soft)"], text:it.title, sub: where? where+" didn't post" : "didn't post", btn:"Fix", on:()=>openDetails(it)});
   });
   projects.forEach(p=>{
-    if(p.status==="waiting" && p.submitted && p.submitted.by!==me.id) todo.push({key:"w"+p.id, rank:2, tag:["Approve cut", "var(--blue)", "var(--blue-soft)"], text:p.title, sub:"cut "+p.submitted.cut+" · waiting "+wsDays(p.submitted.at), btn:"Watch", on:()=>openProject(p.id)});
+    if(p.status==="waiting" && p.submitted && p.submitted.by!==me.id) todo.push({key:"w"+p.id, rank:2, tag:["Approve draft", "var(--blue)", "var(--blue-soft)"], text:p.title, sub:"draft "+p.submitted.cut+" · waiting "+wsDays(p.submitted.at), btn:"Watch", on:()=>openProject(p.id)});
     if(p.status==="approved" && p.submitted && p.submitted.by===me.id) todo.push({key:"n"+p.id, rank:2, tag:["Name file", "var(--violet)", "var(--violet-soft)"], text:p.title, sub:"approved — confirm the file name", btn:"Name", on:()=>openProject(p.id)});
     if(p.counts && p.counts.toVote>0) todo.push({key:"v"+p.id, rank:3, tag:["Vote", "var(--amber)", "var(--amber-soft)"], text:p.title, sub:p.counts.toVote+" idea"+(p.counts.toVote>1?"s":"")+" to vote on", btn:"Vote", on:()=>openProject(p.id)});
   });
@@ -6740,7 +6740,7 @@ function WsCover({p, height=150}){
   return (
     <div className={height===150? "cf-ws-cover" : undefined} style={{height, borderRadius: tiny? 7 : 10, overflow:"hidden", background:"var(--surface-2)", position:"relative", display:"flex", alignItems:"center", justifyContent:"center", color:"var(--ink-mute)"}}>
       {c && c.fileUrl ? <video src={c.fileUrl+"#t=0.5"} muted playsInline preload="metadata" style={{width:"100%", height:"100%", objectFit:"cover"}}/> : <Icon name={p.counts && p.counts.ideas? "bulb" : "folder"} size={tiny? 16 : 28}/>}
-      {c && c.cut && !tiny && <span style={{position:"absolute", left:8, bottom:8, fontSize:11, fontWeight:700, padding:"2px 7px", borderRadius:6, background:"rgba(0,0,0,.6)", color:"#fff"}}>Cut {c.cut}</span>}
+      {c && c.cut && !tiny && <span style={{position:"absolute", left:8, bottom:8, fontSize:11, fontWeight:700, padding:"2px 7px", borderRadius:6, background:"rgba(0,0,0,.6)", color:"#fff"}}>Draft {c.cut}</span>}
     </div>
   );
 }
@@ -6776,7 +6776,7 @@ function WsProjectForm({open, onClose, onSaved, project}){
   const {state, dispatch} = useApp();
   const post = useWsPost();
   const meUser = USERS.find(u=>u.id===state.currentUserId) || {};
-  const blank = {title:"", branch:"shoreditch", category:"FC", dish:"", creatorId: meUser.role==="creator" ? meUser.id : "", due:"", brief:""};
+  const blank = {title:"", branch:"shoreditch", category:"FC", dish:"", creatorId:"", due:"", brief:""};
   const [f, setF] = useState(blank);
   const [busy, setBusy] = useState(false);
   useEffect(()=>{ if(open) setF(project ? {title:project.title, branch:project.branch, category:project.category, dish:(project.dishes||[])[0]||"", creatorId:project.creatorId||"", due:project.due||"", brief:project.brief||""} : blank); }, [open]);
@@ -6855,7 +6855,7 @@ function WsProject({id, onBack}){
   const tabs = [
     ["ideas", "bulb", "Ideas", ideas.length, toVote ? toVote+" to vote" : null],
     ["plan", "list", "Plan", shots.length ? shots.filter(s=>s.done).length+"/"+shots.length : null, null],
-    ["draft", "film", "Draft review", drafts.length ? "cut "+drafts.length : null, openNotes ? openNotes+" open" : null],
+    ["draft", "film", "Draft review", drafts.length ? "draft "+drafts.length : null, openNotes ? openNotes+" to-do"+(openNotes>1?"s":"") : null],
   ];
   const branch = (WS_BRANCH_OPTS.find(b=>b.value===p.branch)||{}).label;
   const canDelete = !p.filed && (me.role==="admin" || p.createdBy===me.id);
@@ -6933,17 +6933,19 @@ function WsVoteDots({it, voters}){
       background: yes? "var(--green-soft)" : no? "var(--red-soft)" : "var(--surface-2)", color: yes? "var(--green)" : no? "var(--red)" : "var(--ink-mute)", border:"1px solid "+(yes? "var(--green)" : no? "var(--red)" : "var(--border)")}}>{u.name[0]}</span>;
   })}</span>;
 }
-function WsYesNo({it, act, size="sm"}){
+function WsYesNo({it, act, size="sm", readOnly, voters}){
   const {state} = useApp();
   const mine = (it.yes||[]).includes(state.currentUserId) ? "yes" : (it.no||[]).includes(state.currentUserId) ? "no" : null;
-  const btn = (v, label, icon, color, soft)=>(
-    <button onClick={()=>act("/item/vote", {id:it.id, vote: mine===v ? null : v})} title={mine===v ? "Take back your vote" : label}
-      style={{display:"inline-flex", alignItems:"center", gap:5, padding: size==="lg"? "10px 22px" : "5px 11px", borderRadius:99, cursor:"pointer", fontSize: size==="lg"? 14.5:12.5, fontWeight:700,
-        border:"1px solid "+color, background: mine===v ? color : soft, color: mine===v ? "#fff" : color}}>
-      <Icon name={icon} size={size==="lg"? 17:13} strokeWidth={2.6}/>{label}
+  const count = k=>(it[k]||[]).filter(v=>!voters || voters.includes(v)).length;
+  const btn = (v, label, emoji, color, soft)=>(
+    <button onClick={()=>!readOnly && act("/item/vote", {id:it.id, vote: mine===v ? null : v})} disabled={readOnly}
+      title={readOnly ? (it[v]||[]).map(id=>wsUser(id).name).join(", ") || "No votes yet" : mine===v ? "Take back your vote" : label}
+      style={{display:"inline-flex", alignItems:"center", gap:6, padding: size==="lg"? "10px 22px" : "6px 12px", borderRadius:99, cursor: readOnly? "default":"pointer", fontSize: size==="lg"? 14.5:13, fontWeight:700,
+        border:"1px solid "+color, background: mine===v ? color : soft, color: mine===v ? "#fff" : color, opacity: readOnly? .85 : 1}}>
+      <span>{emoji}</span>{label}<span style={{fontWeight:800}}>{count(v)}</span>
     </button>
   );
-  return <span style={{display:"inline-flex", gap:8}}>{btn("no", "No", "x", "var(--red)", "var(--red-soft)")}{btn("yes", "Yes", "check", "var(--green)", "var(--green-soft)")}</span>;
+  return <span style={{display:"inline-flex", gap:8, flexWrap:"wrap"}}>{btn("yes", "Yes", "👍", "var(--green)", "var(--green-soft)")}{btn("no", "No", "👎", "var(--red)", "var(--red-soft)")}</span>;
 }
 
 function WsIdeaMedia({it, height}){
@@ -7023,11 +7025,11 @@ function WsIdeas({p, items, act}){
         <Button variant="primary" icon="plus" onClick={add} disabled={busy || !text.trim()}>Add</Button>
       </div>}
       <div style={{display:"flex", alignItems:"center", gap:6, flexWrap:"wrap", marginBottom:14}}>
-        <span style={{fontSize:11.5, color:"var(--ink-mute)", marginLeft:4}}>{!p.filed && !voters.includes(me) ? "You're this project's creator, so "+voters.map(v=>wsUser(v).name).join(" and ")+" vote — you can still add ideas and comment" : voters.map(v=>wsUser(v).name).join(", ")+" vote · 3 No's and an idea is removed"}</span>
+        <span style={{fontSize:11.5, color:"var(--ink-mute)", marginLeft:4}}>{!p.filed && !voters.includes(me) ? "You're set as this project's creator, so only "+voters.map(v=>wsUser(v).name).join(" and ")+" vote. Not the creator? Edit → Creator → Not assigned yet." : "Vote 👍 or 👎 on each idea — "+voters.map(v=>wsUser(v).name).join(", ")+" vote · 3 👎 and an idea is removed"}</span>
       </div>
 
       {!visible.length ? <div style={{fontSize:13, color:"var(--ink-mute)"}}>No ideas yet. Ideas are optional — paste reels you like or write an idea if you want the team's input, or go straight to the plan and the draft.</div> : (
-        <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(190px, 1fr))", gap:12, alignItems:"start"}}>
+        <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(min(330px, 100%), 1fr))", gap:12, alignItems:"start"}}>
           {visible.map((it, i)=>{
             const n = noCount(it);
             const tag = n===0 ? (voters.length && (it.yes||[]).filter(v=>voters.includes(v)).length===voters.length ? ["Everyone said yes", "var(--green)"] : null) : n===1 ? ["1 No", "var(--amber)"] : ["2 No's", "var(--red)"];
@@ -7041,7 +7043,8 @@ function WsIdeas({p, items, act}){
                 <div style={{padding:10, display:"flex", flexDirection:"column", gap:8}}>
                   {it.kind==="link" && it.text && <div style={{fontSize:13, lineHeight:1.45, whiteSpace:"pre-wrap"}}>{it.text}</div>}
                   <div style={{display:"flex", alignItems:"center", gap:8, flexWrap:"wrap"}}><WsVoteDots it={it} voters={voters}/>{tag && <span style={{fontSize:11, fontWeight:700, color:tag[1]}}>{tag[0]}</span>}</div>
-                  {canVote && <WsYesNo it={it} act={act}/>}
+                  <WsYesNo it={it} act={act} voters={voters} readOnly={!canVote}/>
+                  {it.kind==="link" && <a href={it.url} target="_blank" rel="noopener noreferrer" style={{fontSize:12, fontWeight:600, color:"var(--accent)", textDecoration:"none"}}>Doesn't play here? Open on {(wsEmbed(it.url).platform && PLATFORM_META[wsEmbed(it.url).platform]) ? PLATFORM_META[wsEmbed(it.url).platform].label : "the app"} ↗</a>}
                   <WsIdeaThread it={it} items={items} act={act}/>
                   <WsMeta it={it} act={act}/>
                 </div>
@@ -7100,29 +7103,6 @@ function WsPlan({p, items, act}){
   );
 }
 
-function WsCommentList({list, act}){
-  return list.map(it=>(
-    <div key={it.id} style={{display:"flex", gap:10, alignItems:"flex-start"}}>
-      <Avatar user={wsUser(it.author)} size={28}/>
-      <div style={{flex:1, minWidth:0}}>
-        <div style={{display:"flex", alignItems:"center", gap:8}}><b style={{fontSize:13}}>{wsUser(it.author).name}</b><span style={{fontSize:11.5, color:"var(--ink-mute)"}}>{wsAgo(it.createdAt)}</span><WsDelete it={it} act={act}/></div>
-        <div style={{fontSize:13.5, lineHeight:1.5, whiteSpace:"pre-wrap", marginTop:2, color: it.decision==="changes"? "var(--amber)" : "var(--ink)"}}>{it.text}</div>
-      </div>
-    </div>
-  ));
-}
-function WsComposer({placeholder, onSend, label="Send"}){
-  const [text, setText] = useState("");
-  const [busy, setBusy] = useState(false);
-  async function send(){ const t = text.trim(); if(!t) return; setBusy(true); if(await onSend(t)) setText(""); setBusy(false); }
-  return (
-    <div style={{display:"flex", gap:8, alignItems:"flex-end"}}>
-      <textarea value={text} onChange={e=>setText(e.target.value)} rows={1} placeholder={placeholder} onKeyDown={e=>{ if(e.key==="Enter" && !e.shiftKey){ e.preventDefault(); send(); } }}
-        style={{flex:1, minWidth:0, borderRadius:10, border:"1px solid var(--border)", padding:"9px 11px", fontSize:13, fontFamily:"inherit", resize:"vertical", background:"var(--surface)", color:"var(--ink)"}}/>
-      <Button variant="primary" icon="send" onClick={send} disabled={busy || !text.trim()}>{label}</Button>
-    </div>
-  );
-}
 
 
 function WsDrafts({p, items, act}){
@@ -7130,8 +7110,9 @@ function WsDrafts({p, items, act}){
   const drafts = items.filter(i=>i.kind==="draft");
   const [sel, setSel] = useState(null);
   const [seekTo, setSeekTo] = useState(null);
-  const pos = useRef({cut:null, t:0});
-  const jump = (cut, t)=>{ const d = drafts.find(x=>x.cut===cut); if(!d){ dispatch({type:"ADD_TOAST", message:"There's no cut "+cut+" yet", variant:"warn"}); return; } setSel(d.id); setSeekTo({draftId:d.id, t:t||0, n:Date.now()}); };
+  const pos = useRef({cut:null, t:0, draftId:null});
+  const vapi = useRef(null);
+  const jump = (cut, t)=>{ const d = drafts.find(x=>x.cut===cut); if(!d){ dispatch({type:"ADD_TOAST", message:"There's no draft "+cut+" yet", variant:"warn"}); return; } setSel(d.id); setSeekTo({draftId:d.id, t:t||0, n:Date.now()}); };
   const [upload, setUpload] = useState(null); // {pct, name}
   const fileRef = useRef(null);
   const draft = drafts.find(d=>d.id===sel) || drafts[drafts.length-1] || null;
@@ -7145,158 +7126,185 @@ function WsDrafts({p, items, act}){
     try{
       const info = await readMediaInfo(file, true);
       const up = await wsUpload(file, pct=>setUpload({pct, name:file.name}));
-      const d = await act("/item", {kind:"draft", media:{fileUrl:up.url, mime:file.type, name:file.name, size:file.size, duration: info && info.duration, w: info && info.w, h: info && info.h}}, "Cut uploaded — the team has been told");
+      const d = await act("/item", {kind:"draft", media:{fileUrl:up.url, mime:file.type, name:file.name, size:file.size, duration: info && info.duration, w: info && info.w, h: info && info.h}}, "Draft uploaded");
       if(d && d.item) setSel(d.item.id);
     }catch(err){ dispatch({type:"ADD_TOAST", message:err.message, variant:"danger"}); }
     setUpload(null);
   }
-  const openNotes = draft ? items.filter(i=>i.kind==="note" && !i.resolved && (i.draftId===draft.id || drafts.findIndex(d=>d.id===i.draftId) < drafts.findIndex(d=>d.id===draft.id))).length : 0;
+  const openNotes = items.filter(i=>i.kind==="note" && !i.resolved).length;
   async function submit(){
-    if(openNotes && !confirm(openNotes+" note"+(openNotes>1?"s aren't":" isn't")+" marked fixed yet. Send cut "+draft.cut+" for approval anyway?")) return;
+    if(openNotes && !confirm(openNotes+" to-do"+(openNotes>1?"s aren't":" isn't")+" ticked as fixed yet. Send draft "+draft.cut+" for approval anyway?")) return;
     await act("/submit", {draftId:draft.id}, "Sent for content approval");
   }
-  const uploadBtn = !locked && <Button size="sm" icon="upload" onClick={()=>fileRef.current && fileRef.current.click()} disabled={!!upload}>{drafts.length? "Upload new cut" : "Upload cut 1"}</Button>;
+  const uploadBtn = !locked && <Button size="sm" icon="upload" onClick={()=>fileRef.current && fileRef.current.click()} disabled={!!upload}>{drafts.length? "Upload new draft" : "Upload draft 1"}</Button>;
   return (
     <Card style={{padding:16}}>
-      {drafts.length>0 && !locked && <div style={{display:"flex", justifyContent:"flex-end", marginBottom:12}}>{uploadBtn}</div>}
       <input ref={fileRef} type="file" accept="video/*" onChange={pick} style={{display:"none"}}/>
+      {drafts.length>0 && <div style={{display:"flex", alignItems:"center", gap:6, marginBottom:12, flexWrap:"wrap"}}>
+        <div className="cf-noscrollbar" style={{display:"flex", gap:6, overflowX:"auto", flex:1, minWidth:0}}>
+          {drafts.map(d=><button key={d.id} onClick={()=>setSel(d.id)} style={{flexShrink:0, padding:"5px 12px", borderRadius:99, fontSize:12.5, fontWeight:600, cursor:"pointer", border:"1px solid "+(d.id===draft.id? "var(--accent)":"var(--border)"), background: d.id===draft.id? "var(--accent-soft)":"var(--surface)", color: d.id===draft.id? "var(--accent-dark)":"var(--ink-soft)"}}>Draft {d.cut}{d.id===drafts[drafts.length-1].id && drafts.length>1 ? " · latest" : ""}</button>)}
+        </div>
+        {uploadBtn}
+      </div>}
       {upload && <div style={{marginBottom:14}}>
         <div style={{fontSize:12.5, marginBottom:6, color:"var(--ink-soft)"}}>Uploading {upload.name}… {upload.pct}%</div>
         <div style={{height:6, borderRadius:99, background:"var(--surface-2)"}}><div style={{height:6, width:upload.pct+"%", borderRadius:99, background:"var(--accent)", transition:"width .2s"}}/></div>
       </div>}
       {!draft ? (!upload && <div style={{textAlign:"center", padding:"26px 10px", color:"var(--ink-mute)", fontSize:13}}>
-          <Icon name="film" size={26} style={{margin:"0 auto 10px"}}/>When the video is filmed and edited, upload the cut here.<br/>Everyone can watch it and leave notes at the exact second.
-          {!locked && <div style={{marginTop:14}}><Button variant="primary" icon="upload" onClick={()=>fileRef.current && fileRef.current.click()}>Upload cut 1</Button></div>}
+          <Icon name="film" size={26} style={{margin:"0 auto 10px"}}/>When the video is filmed and edited, upload the first draft here.<br/>Everyone watches it and writes in the review chat — pinned to a second if needed.
+          {!locked && <div style={{marginTop:14}}><Button variant="primary" icon="upload" onClick={()=>fileRef.current && fileRef.current.click()}>Upload draft 1</Button></div>}
         </div>)
-      : <>
-        {drafts.length>1 && <div className="cf-noscrollbar" style={{display:"flex", gap:6, overflowX:"auto", marginBottom:12}}>
-          {drafts.map(d=><button key={d.id} onClick={()=>setSel(d.id)} style={{flexShrink:0, padding:"5px 12px", borderRadius:99, fontSize:12.5, fontWeight:600, cursor:"pointer", border:"1px solid "+(d.id===draft.id? "var(--accent)":"var(--border)"), background: d.id===draft.id? "var(--accent-soft)":"var(--surface)", color: d.id===draft.id? "var(--accent-dark)":"var(--ink-soft)"}}>Cut {d.cut}</button>)}
-        </div>}
-        <WsReview key={draft.id} p={p} draft={draft} drafts={drafts} items={items} act={act} big={false} readOnly={!!p.filed} seekTo={seekTo} onTime={(cut, t)=>{ pos.current = {cut, t}; }}/>
-        {!locked && draft.id===drafts[drafts.length-1].id && (
-          <div style={{borderTop:"1px solid var(--border)", marginTop:14, paddingTop:14, display:"flex", alignItems:"center", gap:10, flexWrap:"wrap"}}>
-            <div style={{fontSize:12.5, color: openNotes? "var(--amber)":"var(--green)", flex:"1 1 200px"}}>{openNotes? openNotes+" note"+(openNotes>1?"s":"")+" still open" : "All notes fixed"} · anyone except the uploader can approve</div>
-            <Button variant="primary" icon="send" onClick={submit}>Send for approval</Button>
-          </div>
-        )}
-        {locked && !p.filed && <div style={{marginTop:12, fontSize:12.5, color:"var(--ink-mute)"}}>Cut {(p.approval||p.submitted).cut} is {p.approval? "approved" : "waiting for approval"} — new cuts can be uploaded again if changes are requested.</div>}
-      </>}
-      <WsCutsChat items={items} act={act} drafts={drafts} onJump={jump} pos={pos} readOnly={!!p.filed}/>
+      : <div className="cf-ws-review">
+        <WsPlayer key={draft.id} draft={draft} items={items} seekTo={seekTo} apiRef={vapi} onTime={t=>{ pos.current = {cut:draft.cut, t, draftId:draft.id}; }}/>
+        <WsReviewChat items={items} act={act} drafts={drafts} draft={draft} onJump={jump} vapi={vapi} readOnly={!!p.filed}/>
+      </div>}
+      {draft && !locked && draft.id===drafts[drafts.length-1].id && (
+        <div style={{borderTop:"1px solid var(--border)", marginTop:14, paddingTop:14, display:"flex", alignItems:"center", gap:10, flexWrap:"wrap"}}>
+          <div style={{fontSize:12.5, color: openNotes? "var(--amber)":"var(--green)", flex:"1 1 200px"}}>{openNotes? openNotes+" to-do"+(openNotes>1?"s":"")+" not fixed yet" : "All to-dos fixed"} · anyone except the uploader can approve</div>
+          <Button variant="primary" icon="send" onClick={submit}>Send draft {draft.cut} for approval</Button>
+        </div>
+      )}
+      {draft && locked && !p.filed && <div style={{marginTop:12, fontSize:12.5, color:"var(--ink-mute)"}}>Draft {(p.approval||p.submitted).cut} is {p.approval? "approved" : "waiting for approval"} — a new draft can be uploaded if changes are requested.</div>}
     </Card>
   );
 }
 
-// One chat for every cut of this video ("take the ending from cut 1 into cut 2"). Writing "cut 1 at 0:12" makes a
-// link that opens that cut at that second; the 📍 button drops in the moment you're watching.
-const WS_CUT_REF = /\bcut\s?(\d{1,2})(?:\s*(?:at|@)\s*(\d{1,2}:\d{2}))?/gi;
+// "draft 1 at 0:12" (or "cut 1 at 0:12") in a message becomes a link that opens that draft at that second.
+const WS_CUT_REF = /\b(?:draft|cut)\s?(\d{1,2})(?:\s*(?:at|@)\s*(\d{1,2}:\d{2}))?/gi;
 function WsCutText({text, onJump}){
   const out = []; let last = 0, m;
   WS_CUT_REF.lastIndex = 0;
   while((m = WS_CUT_REF.exec(text))){
     out.push(text.slice(last, m.index));
     const cut = Number(m[1]), t = m[2] ? Number(m[2].split(":")[0])*60 + Number(m[2].split(":")[1]) : 0;
-    out.push(<button key={m.index} onClick={()=>onJump(cut, t)} style={{border:"none", background:"var(--blue-soft)", color:"var(--blue)", borderRadius:5, padding:"0 5px", fontSize:"inherit", fontWeight:700, cursor:"pointer"}}>{m[0]}</button>);
+    out.push(<button key={m.index} onClick={()=>onJump(cut, t)} style={{display:"inline", border:"none", background:"var(--blue-soft)", color:"var(--blue)", borderRadius:4, padding:"0 4px", margin:0, fontSize:"inherit", lineHeight:"inherit", fontFamily:"inherit", fontWeight:700, cursor:"pointer", verticalAlign:"baseline"}}>{m[0]}</button>);
     last = m.index + m[0].length;
   }
   out.push(text.slice(last));
   return out;
 }
-function WsCutsChat({items, act, drafts, onJump, pos, readOnly}){
-  const list = items.filter(i=>i.kind==="comment" && !i.parentId);
-  const [text, setText] = useState("");
-  const [busy, setBusy] = useState(false);
-  const ref = useRef(null);
-  async function send(){ const t = text.trim(); if(!t) return; setBusy(true); if(await act("/item", {kind:"comment", text:t})) setText(""); setBusy(false); }
-  function here(){
-    const c = pos.current; if(!c.cut) return;
-    setText(x=>(x && !/\s$/.test(x) ? x+" " : x)+"cut "+c.cut+" at "+wsFmtT(c.t)+" ");
-    setTimeout(()=>ref.current && ref.current.focus(), 0);
-  }
+const wsParseT = s=>{ const m = /^(\d{1,2}):(\d{1,2})$/.exec(String(s||"").trim()); return m ? Number(m[1])*60+Number(m[2]) : null; };
+
+// The player: the draft, its to-dos as marks on the timeline, and review controls (back/forward 2s, slow motion, loop,
+// download). iPhone HEVC .MOV files don't play in some browsers — then it says so instead of showing a black box.
+function WsPlayer({draft, items, seekTo, apiRef, onTime}){
+  const vref = useRef(null);
+  const [t, setT] = useState(0);
+  const [dur, setDur] = useState(draft.media.duration || 0);
+  const [rate, setRate] = useState(1);
+  const [loop, setLoop] = useState(false);
+  const [broken, setBroken] = useState(false);
+  const marks = items.filter(i=>i.kind==="note" && i.draftId===draft.id && i.t!=null);
+  const seek = s=>{ const v = vref.current; if(!v) return; v.currentTime = Math.max(0, Math.min(s, v.duration||s)); v.play().catch(()=>{}); };
+  apiRef.current = {time:()=> vref.current ? vref.current.currentTime : t, pause:()=> vref.current && vref.current.pause(), seek, cut:draft.cut, draftId:draft.id};
+  useEffect(()=>{ if(seekTo && seekTo.draftId===draft.id && vref.current){ const v = vref.current; const go = ()=>{ v.currentTime = seekTo.t||0; v.play().catch(()=>{}); }; if(v.readyState>=1) go(); else v.addEventListener("loadedmetadata", go, {once:true}); v.scrollIntoView({block:"center", behavior:"smooth"}); } }, [seekTo && seekTo.n]);
+  useEffect(()=>{ if(vref.current) vref.current.playbackRate = rate; }, [rate]);
+  const portrait = !draft.media.w || draft.media.h >= draft.media.w;
+  const ctl = (label, onClick, on, title)=> <button onClick={onClick} title={title||label} style={{padding:"4px 9px", borderRadius:7, fontSize:12, fontWeight:700, cursor:"pointer", border:"1px solid "+(on? "var(--accent)":"var(--border)"), background: on? "var(--accent-soft)":"var(--surface)", color: on? "var(--accent-dark)":"var(--ink-soft)"}}>{label}</button>;
   return (
-    <div style={{borderTop:"1px solid var(--border)", marginTop:16, paddingTop:14}}>
-      <div style={{fontSize:13.5, fontWeight:700, marginBottom:2}}>Chat about all cuts</div>
-      <div style={{fontSize:11.5, color:"var(--ink-mute)", marginBottom:10}}>For anything across versions — write "cut 1 at 0:12" and it becomes a link to that moment.</div>
-      <div style={{display:"flex", flexDirection:"column", gap:10, marginBottom:10}}>
-        {list.map(c=>(
-          <div key={c.id} style={{display:"flex", gap:9, alignItems:"flex-start"}}>
-            <Avatar user={wsUser(c.author)} size={26}/>
-            <div style={{flex:1, minWidth:0}}>
-              <div style={{display:"flex", alignItems:"center", gap:8}}><b style={{fontSize:13}}>{wsUser(c.author).name}</b><span style={{fontSize:11.5, color:"var(--ink-mute)"}}>{wsAgo(c.createdAt)}</span><WsDelete it={c} act={act}/></div>
-              <div style={{fontSize:13.5, lineHeight:1.5, whiteSpace:"pre-wrap", wordBreak:"break-word", color: c.decision==="changes"? "var(--amber)" : "var(--ink)"}}><WsCutText text={c.text} onJump={onJump}/></div>
-            </div>
-          </div>
-        ))}
-        {!list.length && <div style={{fontSize:12.5, color:"var(--ink-mute)"}}>Nothing yet.</div>}
+    <div style={{minWidth:0}}>
+      <div style={{position:"relative", background:"#000", borderRadius:12, overflow:"hidden", display:"flex", justifyContent:"center", minHeight:200}}>
+        <video ref={vref} src={draft.media.fileUrl} controls playsInline preload="metadata" loop={loop}
+          onTimeUpdate={e=>{ setT(e.currentTarget.currentTime); onTime && onTime(e.currentTarget.currentTime); }}
+          onLoadedMetadata={e=>{ setDur(e.currentTarget.duration||0); setTimeout(()=>{ const v = vref.current; if(v && v.readyState>=2 && !v.videoWidth) setBroken(true); }, 1500); }}
+          onError={()=>setBroken(true)}
+          style={{display:"block", width: portrait? "auto":"100%", maxWidth:"100%", height: portrait? "min(60vh, 560px)" : "auto", maxHeight:"60vh"}}/>
+        {broken && <div style={{position:"absolute", inset:0, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:8, padding:20, textAlign:"center", color:"#fff", background:"rgba(0,0,0,.78)", fontSize:13, lineHeight:1.5}}>
+          <b>This browser can't play this video format</b>
+          <span style={{color:"#ccc"}}>iPhone videos (.MOV, HEVC) play in Safari and on iPhone. For everyone else, export it as MP4 (H.264) and upload it as a new draft.</span>
+          <a href={draft.media.fileUrl} download={draft.media.name || "draft.mov"} style={{color:"#FDBA74", fontWeight:700}}>Download the file</a>
+        </div>}
       </div>
-      {!readOnly && <div style={{display:"flex", gap:8, alignItems:"flex-end"}}>
-        {drafts.length>0 && <button onClick={here} title="Add the cut and second you're watching" style={{height:38, padding:"0 10px", borderRadius:10, border:"1px solid var(--border)", background:"var(--surface)", cursor:"pointer", fontSize:13, flexShrink:0, color:"var(--ink)"}}>📍</button>}
-        <textarea ref={ref} value={text} onChange={e=>setText(e.target.value)} rows={1} placeholder={drafts.length>1 ? "e.g. take the ending of cut 1 and use it in cut 2" : "Write to the team about this video…"} onKeyDown={e=>{ if(e.key==="Enter" && !e.shiftKey){ e.preventDefault(); send(); } }}
-          style={{flex:1, minWidth:0, borderRadius:10, border:"1px solid var(--border)", padding:"9px 11px", fontSize:13, fontFamily:"inherit", resize:"vertical", background:"var(--surface)", color:"var(--ink)"}}/>
-        <Button variant="primary" icon="send" onClick={send} disabled={busy || !text.trim()}>Send</Button>
+      {dur>0 && <div style={{position:"relative", height:14, margin:"8px 2px 0"}} title="To-dos on this draft">
+        <div style={{position:"absolute", left:0, right:0, top:6, height:2, background:"var(--border)", borderRadius:2}}/>
+        <div style={{position:"absolute", left:0, top:6, height:2, width:Math.min(100, t/dur*100)+"%", background:"var(--accent)", borderRadius:2}}/>
+        {marks.map(it=><button key={it.id} onClick={()=>seek(it.t)} title={wsFmtT(it.t)+" · "+it.text}
+          style={{position:"absolute", left:"calc("+Math.min(100, it.t/dur*100)+"% - 4px)", top:1, width:8, height:12, borderRadius:3, border:"none", padding:0, cursor:"pointer", background: it.resolved? "var(--green)":"var(--red)"}}/>)}
       </div>}
+      <div style={{display:"flex", alignItems:"center", gap:5, flexWrap:"wrap", marginTop:8}}>
+        {ctl("−2s", ()=>seek((vref.current? vref.current.currentTime : t)-2), false, "Back 2 seconds")}
+        {ctl("+2s", ()=>seek((vref.current? vref.current.currentTime : t)+2), false, "Forward 2 seconds")}
+        {ctl("0.5×", ()=>setRate(r=>r===0.5? 1 : 0.5), rate===0.5, "Slow motion")}
+        {ctl("Loop", ()=>setLoop(l=>!l), loop, "Play on repeat")}
+        <a href={draft.media.fileUrl} download={draft.media.name || "draft"} style={{textDecoration:"none"}}>{ctl("Download", ()=>{}, false, "Download this draft")}</a>
+        <span style={{flex:1}}/>
+        <span className="num" style={{fontSize:12, color:"var(--ink-mute)", fontFamily:'ui-monospace, "SF Mono", Menlo, monospace'}}>{wsFmtT(t)}{dur? " / "+wsFmtT(dur) : ""}</span>
+      </div>
+      <div style={{fontSize:11.5, color:"var(--ink-mute)", marginTop:6}}>Draft {draft.cut} · {wsUser(draft.author).name} · {wsAgo(draft.createdAt)}</div>
     </div>
   );
 }
 
-// The player plus its notes. Notes from earlier cuts that aren't fixed yet carry over to the latest one.
-function WsReview({p, draft, drafts, items, act, big, readOnly, seekTo, onTime}){
-  const vref = useRef(null);
-  const [t, setT] = useState(0);
-  const [whole, setWhole] = useState(false);
-  // "cut 1 at 0:12" links in the cuts chat jump here.
-  useEffect(()=>{ if(seekTo && seekTo.draftId===draft.id && vref.current){ const v = vref.current; const go = ()=>{ v.currentTime = seekTo.t||0; v.play().catch(()=>{}); }; if(v.readyState>=1) go(); else v.addEventListener("loadedmetadata", go, {once:true}); v.scrollIntoView({block:"center", behavior:"smooth"}); } }, [seekTo && seekTo.n]);
-  const [dur, setDur] = useState(draft.media.duration || 0);
-  const idx = drafts.findIndex(d=>d.id===draft.id);
-  const isLatest = idx===drafts.length-1;
-  const byT = (a,b)=>(a.t==null? -1 : a.t)-(b.t==null? -1 : b.t);
-  const own = items.filter(i=>i.kind==="note" && i.draftId===draft.id).sort(byT);
-  const carried = isLatest ? items.filter(i=>i.kind==="note" && !i.resolved && drafts.findIndex(d=>d.id===i.draftId) < idx && drafts.findIndex(d=>d.id===i.draftId) >= 0).sort(byT) : [];
-  const seek = s=>{ const v = vref.current; if(!v) return; v.currentTime = s; v.play().catch(()=>{}); };
-  const portrait = !draft.media.w || draft.media.h >= draft.media.w;
-  const note = it => (
-    <div key={it.id} style={{display:"flex", gap:9, alignItems:"flex-start", padding:"8px 0", borderTop:"1px solid var(--border)", opacity: it.resolved? .6:1}}>
-      {it.t==null ? <span title="A note on the whole cut" style={{flexShrink:0, fontSize:11, fontWeight:700, padding:"4px 7px", borderRadius:6, background:"var(--surface-2)", color:"var(--ink-soft)", whiteSpace:"nowrap"}}>Whole cut</span> :
-      <button onClick={()=>seek(it.t)} title="Jump to this moment" style={{flexShrink:0, fontFamily:'ui-monospace, "SF Mono", Menlo, monospace', fontSize:12, fontWeight:700, padding:"3px 7px", borderRadius:6, border:"none", cursor:"pointer", background:"var(--blue-soft)", color:"var(--blue)"}}>{wsFmtT(it.t)}</button>}
-      <div style={{flex:1, minWidth:0}}>
-        <div style={{fontSize:13.5, lineHeight:1.45, whiteSpace:"pre-wrap", textDecoration: it.resolved? "line-through":"none"}}>{it.text}</div>
-        <div style={{marginTop:4}}><WsMeta it={it} act={act}/></div>
-      </div>
-      {!readOnly && <label title={it.resolved? "Fixed by "+wsUser(it.resolved.by).name : "Mark as fixed"} style={{display:"flex", alignItems:"center", gap:5, fontSize:11.5, fontWeight:600, color: it.resolved? "var(--green)":"var(--ink-mute)", cursor:"pointer", flexShrink:0}}>
-        <input type="checkbox" checked={!!it.resolved} onChange={e=>act("/item/resolve", {id:it.id, resolved:e.target.checked})}/>Fixed
-      </label>}
-    </div>
-  );
+// One review chat for every draft of this video. A message can be pinned to a second of a draft (a to-do the creator
+// ticks off as Fixed), be about a whole draft (also a to-do), or be general chat. Tap a time to jump to it.
+function WsReviewChat({items, act, drafts, draft, onJump, vapi, readOnly, compact}){
+  const [filter, setFilter] = useState("all");
+  const [mode, setMode] = useState(vapi ? "moment" : "general");
+  const [tText, setTText] = useState("");
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [, tick] = useState(0);
+  useEffect(()=>{ if(compact) return; const id = setInterval(()=>tick(x=>x+1), 500); return ()=>clearInterval(id); }, [compact]);
+  const cutOf = id=>(drafts.find(d=>d.id===id)||{}).cut;
+  const list = items.filter(i=>(i.kind==="note") || (i.kind==="comment" && !i.parentId))
+    .filter(i=> filter==="todo" ? i.kind==="note" && !i.resolved : filter==="this" ? i.kind==="note" && i.draftId===(draft&&draft.id) : true)
+    .sort((a,b)=>a.createdAt.localeCompare(b.createdAt));
+  const todoCount = items.filter(i=>i.kind==="note" && !i.resolved).length;
+  const now = vapi && vapi.current ? vapi.current.time() : 0;
+  const atT = mode==="moment" ? (tText ? wsParseT(tText) : now) : null;
+  async function send(){
+    const t = text.trim(); if(!t || !draft) return;
+    if(mode==="moment" && tText && atT==null){ alert("Write the time like 0:05"); return; }
+    setBusy(true);
+    if(vapi && vapi.current && mode==="moment") vapi.current.pause();
+    const ok = mode==="general" ? await act("/item", {kind:"comment", text:t}) : await act("/item", {kind:"note", draftId:draft.id, t: mode==="moment" ? atT : null, text:t});
+    if(ok){ setText(""); setTText(""); }
+    setBusy(false);
+  }
+  const chip = (k, l)=> <button key={k} onClick={()=>setFilter(k)} style={{padding:"3px 10px", borderRadius:99, fontSize:11.5, fontWeight:600, cursor:"pointer", border:"1px solid "+(filter===k? "var(--accent)":"var(--border)"), background: filter===k? "var(--accent-soft)":"var(--surface)", color: filter===k? "var(--accent-dark)":"var(--ink-soft)"}}>{l}</button>;
   return (
-    <div className={big? "cf-ws-review cf-ws-review-big" : "cf-ws-review"}>
-      <div>
-        <div style={{position:"relative", background:"#000", borderRadius:12, overflow:"hidden", display:"flex", justifyContent:"center"}}>
-          <video ref={vref} src={draft.media.fileUrl} controls playsInline preload="metadata"
-            onTimeUpdate={e=>{ setT(e.currentTarget.currentTime); onTime && onTime(draft.cut, e.currentTarget.currentTime); }} onLoadedMetadata={e=>setDur(e.currentTarget.duration||0)}
-            style={{display:"block", width: portrait? "auto":"100%", maxWidth:"100%", height: portrait? (big? "min(72vh, 760px)" : "min(56vh, 520px)") : "auto", maxHeight: big? "72vh":"56vh"}}/>
+    <div style={{minWidth:0, display:"flex", flexDirection:"column"}}>
+      <div style={{display:"flex", alignItems:"center", gap:6, flexWrap:"wrap", marginBottom:8}}>
+        <span style={{fontSize:13.5, fontWeight:700, marginRight:4}}>Review chat</span>
+        {chip("all", "All")}{chip("todo", "To-dos"+(todoCount? " · "+todoCount : ""))}{!compact && draft && chip("this", "Draft "+draft.cut)}
+      </div>
+      <div style={{display:"flex", flexDirection:"column", gap:2, maxHeight: compact? 260 : "min(52vh, 480px)", overflowY:"auto", marginBottom:10}}>
+        {!list.length && <div style={{fontSize:12.5, color:"var(--ink-mute)", padding:"6px 0"}}>{filter==="todo" ? "No open to-dos." : "Pause the video and write what you think — it's pinned to that second. Use “General” for anything else."}</div>}
+        {list.map(it=>{
+          const note = it.kind==="note", c = note ? cutOf(it.draftId) : null;
+          return (
+            <div key={it.id} style={{display:"flex", gap:9, alignItems:"flex-start", padding:"8px 0", borderTop:"1px solid var(--border)", opacity: it.resolved? .6:1}}>
+              <Avatar user={wsUser(it.author)} size={24}/>
+              <div style={{flex:1, minWidth:0}}>
+                <div style={{display:"flex", alignItems:"center", gap:6, flexWrap:"wrap"}}>
+                  <b style={{fontSize:12.5}}>{wsUser(it.author).name}</b><span style={{fontSize:11, color:"var(--ink-mute)"}}>{wsAgo(it.createdAt)}</span>
+                  {note && <button onClick={()=>onJump(c, it.t||0)} title={it.t!=null? "Jump to this moment" : "Open this draft"} style={{border:"none", borderRadius:6, padding:"1px 7px", fontSize:11, fontWeight:700, cursor:"pointer", background:"var(--blue-soft)", color:"var(--blue)", fontFamily: it.t!=null? 'ui-monospace, "SF Mono", Menlo, monospace' : "inherit"}}>Draft {c}{it.t!=null? " · "+wsFmtT(it.t) : " · whole"}</button>}
+                  {it.decision==="changes" && <span style={{fontSize:10.5, fontWeight:700, color:"var(--amber)"}}>Changes requested</span>}
+                </div>
+                <div style={{fontSize:13.5, lineHeight:1.45, whiteSpace:"pre-wrap", wordBreak:"break-word", textDecoration: it.resolved? "line-through":"none", color: it.decision==="changes"? "var(--amber)" : "var(--ink)"}}><WsCutText text={it.text} onJump={onJump}/></div>
+                {it.resolved && <div style={{fontSize:11, color:"var(--green)"}}>Fixed · {wsUser(it.resolved.by).name}</div>}
+              </div>
+              {note && !readOnly && <label title={it.resolved? "Mark as not fixed" : "Mark as fixed"} style={{display:"flex", alignItems:"center", gap:4, fontSize:11.5, fontWeight:600, color: it.resolved? "var(--green)":"var(--ink-mute)", cursor:"pointer", flexShrink:0}}>
+                <input type="checkbox" checked={!!it.resolved} onChange={e=>act("/item/resolve", {id:it.id, resolved:e.target.checked})}/>Fixed</label>}
+              <WsDelete it={it} act={act}/>
+            </div>
+          );
+        })}
+      </div>
+      {!readOnly && draft && <div>
+        <div style={{display:"flex", gap:4, alignItems:"center", flexWrap:"wrap", marginBottom:6}}>
+          {[...(vapi? [["moment", "📍 Draft "+draft.cut+" at"]] : []), ["whole", "Whole draft "+draft.cut], ["general", "General"]].map(([k, l])=>(
+            <button key={k} onClick={()=>setMode(k)} style={{padding:"3px 10px", borderRadius:99, fontSize:11.5, fontWeight:600, cursor:"pointer", border:"1px solid "+(mode===k? "var(--accent)":"var(--border)"), background: mode===k? "var(--accent-soft)":"var(--surface)", color: mode===k? "var(--accent-dark)":"var(--ink-soft)"}}>{l}</button>
+          ))}
+          {mode==="moment" && <input value={tText} onChange={e=>setTText(e.target.value)} placeholder={wsFmtT(now)} title="Change the time, e.g. 0:05" style={{width:56, borderRadius:7, border:"1px solid var(--border)", padding:"3px 6px", fontSize:12, fontFamily:'ui-monospace, "SF Mono", Menlo, monospace', background:"var(--surface)", color:"var(--ink)"}}/>}
         </div>
-        {dur>0 && <div style={{position:"relative", height:14, margin:"8px 2px 0"}} title="Notes on this cut">
-          <div style={{position:"absolute", left:0, right:0, top:6, height:2, background:"var(--border)", borderRadius:2}}/>
-          <div style={{position:"absolute", left:0, top:6, height:2, width:Math.min(100, t/dur*100)+"%", background:"var(--accent)", borderRadius:2}}/>
-          {[...own, ...carried].filter(it=>it.t!=null).map(it=><button key={it.id} onClick={()=>seek(it.t)} title={wsFmtT(it.t)+" · "+it.text}
-            style={{position:"absolute", left:"calc("+Math.min(100, it.t/dur*100)+"% - 4px)", top:1, width:8, height:12, borderRadius:3, border:"none", padding:0, cursor:"pointer", background: it.resolved? "var(--green)":"var(--red)"}}/>)}
-        </div>}
-        <div style={{fontSize:11.5, color:"var(--ink-mute)", marginTop:6}}>Cut {draft.cut} · {wsUser(draft.author).name} · {wsAgo(draft.createdAt)}{draft.media.name? " · "+draft.media.name : ""}</div>
-      </div>
-      <div style={{minWidth:0}}>
-        <div style={{fontSize:13, fontWeight:700, marginBottom:4}}>Notes on cut {draft.cut}</div>
-        {!own.length && <div style={{fontSize:12.5, color:"var(--ink-mute)", padding:"6px 0 10px"}}>Pause the video where something should change and write a note — it's saved at that second.</div>}
-        {own.map(note)}
-        {carried.length>0 && <>
-          <div style={{fontSize:12, fontWeight:700, color:"var(--amber)", margin:"12px 0 2px"}}>Still open from earlier cuts</div>
-          {carried.map(it=><div key={it.id}>{note(it)}<div style={{fontSize:11, color:"var(--ink-mute)", margin:"-4px 0 4px 52px"}}>From cut {(drafts.find(d=>d.id===it.draftId)||{}).cut}</div></div>)}
-        </>}
-        {!readOnly && <div style={{marginTop:10}}>
-          <div style={{display:"flex", gap:4, marginBottom:6}}>
-            {[[false, "At "+wsFmtT(t)], [true, "Whole cut"]].map(([w, l])=><button key={l} onClick={()=>setWhole(w)} style={{padding:"3px 10px", borderRadius:99, fontSize:11.5, fontWeight:600, cursor:"pointer", border:"1px solid "+(whole===w? "var(--accent)":"var(--border)"), background: whole===w? "var(--accent-soft)":"var(--surface)", color: whole===w? "var(--accent-dark)":"var(--ink-soft)"}}>{l}</button>)}
-          </div>
-          <WsComposer label="Note" placeholder={whole? "A note about cut "+draft.cut+" as a whole" : "What should change at "+wsFmtT(t)+"?"} onSend={text=>{ const at = whole ? null : (vref.current ? vref.current.currentTime : t); if(vref.current && !whole) vref.current.pause(); return act("/item", {kind:"note", draftId:draft.id, t:at, text}); }}/>
-        </div>}
-      </div>
+        <div style={{display:"flex", gap:8, alignItems:"flex-end"}}>
+          <textarea value={text} onChange={e=>setText(e.target.value)} rows={1} placeholder={mode==="general" ? "Write to the team about this video…" : mode==="whole" ? "What should change in draft "+draft.cut+"?" : "What should change at "+wsFmtT(atT==null? now : atT)+"?"}
+            onKeyDown={e=>{ if(e.key==="Enter" && !e.shiftKey){ e.preventDefault(); send(); } }}
+            style={{flex:1, minWidth:0, borderRadius:10, border:"1px solid var(--border)", padding:"9px 11px", fontSize:13, fontFamily:"inherit", resize:"vertical", background:"var(--surface)", color:"var(--ink)"}}/>
+          <Button variant="primary" icon="send" onClick={send} disabled={busy || !text.trim()}>Send</Button>
+        </div>
+      </div>}
     </div>
   );
 }
@@ -7314,8 +7322,6 @@ function WsApprovalStage({p, draft, items, act, onName}){
   const item = useMemo(()=>({id:"ws_"+p.id, brand:"sanjugo", format:"post", title:p.title, platforms:WS_PREVIEW_PLATFORMS,
     media:{type:"video", fileUrl:draft.media.fileUrl, previewUrl:null, aspectRatio: nearestAspect(draft.media.w, draft.media.h) || "9:16", duration: draft.media.duration || null},
     variants:Object.fromEntries(WS_PREVIEW_PLATFORMS.map(pl=>[pl, makeVariant(pl, {caption})]))}), [p.id, draft.id, caption]);
-  const notes = items.filter(i=>i.kind==="note" && i.draftId===draft.id).sort((a,b)=>a.t-b.t);
-  const comments = items.filter(i=>i.kind==="comment" && !i.parentId).slice(-5);
   const approved = p.status==="approved";
   return (
     <Card style={{padding:16}}>
@@ -7333,7 +7339,7 @@ function WsApprovalStage({p, draft, items, act, onName}){
         </div>
         <div style={{minWidth:0, display:"flex", flexDirection:"column", gap:14}}>
           <div>
-            <div style={{fontSize:16, fontWeight:600}}>Cut {draft.cut} · {approved? "approved" : "waiting for approval"}</div>
+            <div style={{fontSize:16, fontWeight:600}}>Draft {draft.cut} · {approved? "approved" : "waiting for approval"}</div>
             <div style={{fontSize:12.5, color:"var(--ink-mute)", marginTop:3}}>Uploaded by {wsUser(draft.author).name}{p.submitted? ", sent "+wsAgo(p.submitted.at) : ""}. This is content approval for the library — publishing is a separate post in the Approval Queue.</div>
           </div>
           {approved ? <>
@@ -7356,18 +7362,7 @@ function WsApprovalStage({p, draft, items, act, onName}){
             <Button icon="edit" onClick={()=>setAsking(true)} style={{color:"var(--amber)", borderColor:"var(--amber)", whiteSpace:"nowrap"}}>Needs changes</Button>
             <Button variant="success" icon="check" onClick={()=>act("/review", {decision:"approve"}, "Approved — "+wsUser(draft.author).name+" will confirm the file name")} style={{whiteSpace:"nowrap"}}>Approve content</Button>
           </div>}
-          {notes.length>0 && <div>
-            <div style={{fontSize:13, fontWeight:700, marginBottom:4}}>Notes on this cut</div>
-            {notes.map(it=><div key={it.id} style={{display:"flex", gap:8, fontSize:12.5, padding:"5px 0", borderTop:"1px solid var(--border)"}}>
-              <span style={{fontFamily:'ui-monospace, "SF Mono", Menlo, monospace', fontWeight:700, color:"var(--blue)", whiteSpace:"nowrap"}}>{it.t==null? "Whole" : wsFmtT(it.t)}</span>
-              <span style={{flex:1, textDecoration: it.resolved? "line-through":"none", color: it.resolved? "var(--ink-mute)":"var(--ink)"}}>{it.text}</span>
-            </div>)}
-          </div>}
-          <div>
-            <div style={{fontSize:13, fontWeight:700, marginBottom:8}}>Chat about all cuts</div>
-            <div style={{display:"flex", flexDirection:"column", gap:10, marginBottom:10}}>{comments.length? <WsCommentList list={comments} act={act}/> : <div style={{fontSize:12.5, color:"var(--ink-mute)"}}>No comments yet.</div>}</div>
-            <WsComposer placeholder="Add a comment…" onSend={t=>act("/item", {kind:"comment", text:t})}/>
-          </div>
+          <WsReviewChat compact items={items} act={act} drafts={items.filter(i=>i.kind==="draft")} draft={draft} onJump={()=>{}} vapi={null} readOnly={!!p.filed}/>
         </div>
       </div>
     </Card>
@@ -7417,7 +7412,7 @@ function WsNameModal({p, onClose, onFiled}){
     <Modal open onClose={busy? ()=>{} : onClose} width={600}>
       <div style={{padding:20}}>
         <h3 style={{margin:"0 0 4px", fontSize:17}}>Is this file name right?</h3>
-        <div style={{fontSize:12.5, color:"var(--ink-mute)", marginBottom:14}}>{p.title} · cut {p.approval.cut} approved by {wsUser(p.approval.by).name}. Change any part if it's not right.</div>
+        <div style={{fontSize:12.5, color:"var(--ink-mute)", marginBottom:14}}>{p.title} · draft {p.approval.cut} approved by {wsUser(p.approval.by).name}. Change any part if it's not right.</div>
         <div className="num" style={{fontFamily:'ui-monospace, "SF Mono", Menlo, monospace', fontSize:14.5, fontWeight:600, padding:"12px 14px", borderRadius:10, background:"var(--surface-2)", wordBreak:"break-all", marginBottom:14}}>{name}</div>
         <div style={{display:"grid", gridTemplateColumns:"repeat(3, minmax(0,1fr))", gap:10, marginBottom:14}} className="cf-ws-namegrid">
           {field("Date", <input value={x.date} onChange={e=>set({date:e.target.value.replace(/\D/g,"").slice(0,8)})} style={inp}/>)}
@@ -7454,7 +7449,7 @@ function WsFiled({p}){
     <Card style={{padding:16}}>
       <div style={{display:"flex", alignItems:"center", gap:8, marginBottom:8, flexWrap:"wrap"}}><Icon name="check" size={18} strokeWidth={2.6} style={{color:"var(--green)"}}/><span style={{fontWeight:600, fontSize:15}}>In the Content Library</span><BarcodeChip code={f.barcode} big/></div>
       <div className="num" style={{fontFamily:'ui-monospace, "SF Mono", Menlo, monospace', fontSize:13, padding:"9px 11px", borderRadius:8, background:"var(--surface-2)", wordBreak:"break-all", marginBottom:8}}>{f.name}</div>
-      <div style={{fontSize:12.5, color:"var(--ink-mute)", marginBottom:12}}>Cut {p.approval.cut} approved by {wsUser(p.approval.by).name} · saved by {wsUser(f.by).name} on {wsDay(f.at)}</div>
+      <div style={{fontSize:12.5, color:"var(--ink-mute)", marginBottom:12}}>Draft {p.approval.cut} approved by {wsUser(p.approval.by).name} · saved by {wsUser(f.by).name} on {wsDay(f.at)}</div>
       <div style={{display:"flex", gap:8, flexWrap:"wrap"}}>
         {PERMS[me.role].create && <Button variant="primary" icon="create" onClick={()=>wsCreatePost(dispatch, p)}>Create post from this</Button>}
         <Button icon="grid" onClick={()=>dispatch({type:"SET_ROUTE", route:"library", libraryQuery:f.barcode})}>Open in Content Library</Button>
@@ -7737,7 +7732,7 @@ function ChatProjectCard({p, id}){
   const me = state.currentUserId;
   const open = ()=>dispatch({type:"SET_ROUTE", route:"workspace", workspaceProject:id});
   if(!p) return <button onClick={e=>{ e.stopPropagation(); open(); }} style={{marginTop:6, display:"inline-flex", alignItems:"center", gap:6, padding:"6px 10px", borderRadius:10, border:"1px solid var(--border)", background:"var(--surface)", fontSize:12.5, cursor:"pointer", color:"var(--ink)"}}><Icon name="workspace" size={14}/>Open project</button>;
-  const act = p.status==="waiting" && p.submitted && p.submitted.by!==me ? "Approve cut" : p.status==="approved" && p.submitted && p.submitted.by===me ? "Name file" : p.counts && p.counts.toVote ? "Vote ("+p.counts.toVote+")" : null;
+  const act = p.status==="waiting" && p.submitted && p.submitted.by!==me ? "Approve draft" : p.status==="approved" && p.submitted && p.submitted.by===me ? "Name file" : p.counts && p.counts.toVote ? "Vote ("+p.counts.toVote+")" : null;
   return (
     <div role="button" onClick={e=>{ e.stopPropagation(); open(); }} style={{display:"flex", alignItems:"center", gap:9, marginTop:6, padding:6, paddingRight:8, borderRadius:10, border:"1px solid var(--border)", background:"var(--surface)", maxWidth:420, cursor:"pointer"}}>
       <span style={{width:38, height:38, borderRadius:7, overflow:"hidden", flexShrink:0}}><WsCover p={p} height={38}/></span>

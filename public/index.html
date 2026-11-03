@@ -2713,8 +2713,8 @@ function ImmersiveViewer({entry, platform, onPlatform, onDecision, onClose, busy
           <span className="num" style={{fontSize:13, fontWeight:700, color:"#bbb", minWidth:54, textAlign:"center"}}>{browse.index+1} of {browse.total}</span>
           <Button variant="ghost" size="lg" onClick={browse.onNext} disabled={browse.index>=browse.total-1} style={{borderRadius:99, background:"#1c1c1e", color:"#fff", borderColor:"#333"}}>Next ›</Button>
         </div> : <div style={{display:"flex", alignItems:"center", justifyContent:"center", gap:14}}>
-          <Button variant="ghost" size="lg" icon="edit" onClick={()=>onDecision("edits")} style={{borderRadius:99, minWidth:140, justifyContent:"center", background:"#1c1c1e", color:"#FBBF24", borderColor:"#FBBF24"}}>Needs changes</Button>
-          <Button variant="success" size="lg" icon="check" onClick={()=>onDecision("approve")} style={{borderRadius:99, minWidth:160, justifyContent:"center"}}>Approve</Button>
+          <Button variant="ghost" size="lg" icon="edit" onClick={()=>onDecision("edits")} style={{borderRadius:99, flex:"1 1 0", maxWidth:220, justifyContent:"center", whiteSpace:"nowrap", background:"#1c1c1e", color:"#FBBF24", borderColor:"#FBBF24"}}>Needs changes</Button>
+          <Button variant="success" size="lg" icon="check" onClick={()=>onDecision("approve")} style={{borderRadius:99, flex:"1.3 1 0", maxWidth:260, justifyContent:"center", whiteSpace:"nowrap"}}>Approve</Button>
         </div>}
       </div>
     </div>,
@@ -2866,9 +2866,10 @@ function QueueTabs({tab, setTab, canReview}){
   const tabs = [...(canReview? [["review","To review","submitted"]] : [["waiting","Waiting for approval","submitted"]]), ["changes","Needs changes","changes_requested"], ["rejected","Rejected","rejected"]];
   return (
     <div className="cf-noscrollbar" style={{display:"flex", gap:4, borderBottom:"1px solid var(--border)", marginBottom:16, overflowX:"auto"}}>
+      <style>{`@media (max-width:600px){ .cf-qtab{ padding:9px 8px !important; font-size:12.5px !important; gap:5px !important; } }`}</style>
       {tabs.map(([k,l,st])=>{
         const n = count(st, k), active = tab===k;
-        return <button key={k} onClick={()=>setTab(k)} style={{padding:"9px 14px", border:"none", borderBottom:"2px solid "+(active? "var(--accent)":"transparent"), marginBottom:-1, background:"transparent", color: active? "var(--ink)":"var(--ink-soft)", fontWeight: active? 600:500, fontSize:13.5, cursor:"pointer", display:"flex", alignItems:"center", gap:7, whiteSpace:"nowrap"}}>
+        return <button key={k} onClick={()=>setTab(k)} className="cf-qtab" style={{padding:"9px 14px", border:"none", borderBottom:"2px solid "+(active? "var(--accent)":"transparent"), marginBottom:-1, background:"transparent", color: active? "var(--ink)":"var(--ink-soft)", fontWeight: active? 600:500, fontSize:13.5, cursor:"pointer", display:"flex", alignItems:"center", gap:7, whiteSpace:"nowrap"}}>
           {l}<span className="num" style={{fontSize:11, fontWeight:600, padding:"1px 7px", borderRadius:99, background: n? (k==="review"||k==="waiting"? "var(--blue-soft)" : k==="changes"? "var(--amber-soft)" : "var(--red-soft)") : "var(--surface-2)", color: n? (k==="review"? "var(--blue)" : k==="changes"? "var(--amber)" : "var(--red)") : "var(--ink-mute)"}}>{n}</span>
         </button>;
       })}
@@ -3220,8 +3221,8 @@ function ApprovalQueuePage(){
             })}
           </div>
           <div style={{display:"flex", justifyContent:"center", gap:14, marginTop: narrow? 16:22}}>
-            <Button variant="ghost" size="lg" icon="edit" onClick={()=>requestDecision("edits")} style={{borderRadius:99, minWidth:150, justifyContent:"center", color:"var(--amber)", borderColor:"var(--amber)"}}>Needs changes</Button>
-            <Button variant="success" size="lg" icon="check" onClick={()=>requestDecision("approve")} style={{borderRadius:99, minWidth:180, justifyContent:"center"}}>Approve</Button>
+            <Button variant="ghost" size="lg" icon="edit" onClick={()=>requestDecision("edits")} style={{borderRadius:99, flex:"1 1 0", maxWidth:220, justifyContent:"center", whiteSpace:"nowrap", color:"var(--amber)", borderColor:"var(--amber)"}}>Needs changes</Button>
+            <Button variant="success" size="lg" icon="check" onClick={()=>requestDecision("approve")} style={{borderRadius:99, flex:"1.3 1 0", maxWidth:260, justifyContent:"center", whiteSpace:"nowrap"}}>Approve</Button>
           </div>
         </div>
       )}
@@ -3487,7 +3488,7 @@ function DashboardPage(){
     const planned = items.filter(i=>Object.values(i.variants||{}).some(v=>v.scheduledAt && ymd(new Date(v.scheduledAt))===o.date)).length;
     todo.push({key:"o"+o.id, rank:2.5, tag:["Coming up", "var(--violet)", "var(--violet-soft)"], text:o.emoji+" "+o.name+" — "+(n===0? "today" : n===1? "tomorrow" : "in "+n+" days"),
       sub: planned ? planned+" post"+(planned>1?"s":"")+" already planned that day" : "Nothing planned yet — any ideas?", btn:"Plan", on:()=>go("create", {createPrefill:{scheduledAt: localDateTime(new Date(o.date+"T12:00:00"), "12:00")}}),
-      extra:[["Done", ()=>occ.setStatus(o.id, "done", me.id)], ["Not for us", ()=>occ.setStatus(o.id, "skip", me.id)]]});
+      extra:[["Done", ()=>occ.setStatus(o.id, "done", me.id)], ["Skip", ()=>occ.setStatus(o.id, "skip", me.id)]]});
   });
   todo.sort((a,b)=> (b.urgent?1:0)-(a.urgent?1:0) || a.rank-b.rank);
 
@@ -3563,14 +3564,16 @@ function DashboardPage(){
         {ws===null ? <Skeleton h={60}/> : !todo.length ? <div style={{fontSize:13, color:"var(--ink-mute)", padding:"4px 0"}}>✓ Nothing waiting on you — approvals, votes and fixes show up here.</div> : (
           <div className="cf-dash-todo">
             {todo.map(t=>(
-              <div key={t.key} style={{display:"flex", alignItems:"center", gap:10, padding:"9px 12px", borderRadius:10, border:"1px solid "+(t.urgent? "var(--red)" : "var(--border)"), background: t.urgent? "var(--red-soft)" : "var(--surface)"}}>
+              <div key={t.key} className="cf-todo-row" style={{display:"flex", alignItems:"center", gap:10, padding:"9px 12px", borderRadius:10, border:"1px solid "+(t.urgent? "var(--red)" : "var(--border)"), background: t.urgent? "var(--red-soft)" : "var(--surface)", minWidth:0}}>
                 <span style={{fontSize:11, fontWeight:700, padding:"2px 8px", borderRadius:99, background:t.tag[2], color:t.tag[1], whiteSpace:"nowrap", flexShrink:0}}>{t.urgent? "Urgent · " : ""}{t.tag[0]}</span>
                 <div style={{flex:1, minWidth:0}}>
                   <div style={{fontSize:13, fontWeight:600, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>{t.text}</div>
                   <div style={{fontSize:11.5, color:"var(--ink-mute)"}}>{t.sub}</div>
                 </div>
+                <span className="cf-todo-btns" style={{display:"flex", alignItems:"center", gap:8, flexShrink:0}}>
                 {(t.extra||[]).map(([l, f])=><button key={l} onClick={f} style={{border:"none", background:"none", padding:"4px 2px", fontSize:12, fontWeight:600, color: l==="Done"? "var(--green)" : "var(--ink-mute)", cursor:"pointer", whiteSpace:"nowrap"}}>{l==="Done"? "✓ Done" : l}</button>)}
                 <Button size="sm" variant={t.urgent? "primary" : "ghost"} onClick={t.on}>{t.btn}</Button>
+                </span>
               </div>
             ))}
           </div>
@@ -3606,10 +3609,10 @@ function DashboardPage(){
               <button key={d.toISOString()} onClick={()=> empty && !past ? go("create", {createPrefill:{scheduledAt: localDateTime(d, "12:00")}}) : go("calendar", {calendarPreset:{view:"week"}})}
                 style={{minWidth:0, padding:"10px 6px", borderRadius:10, cursor:"pointer", textAlign:"center", display:"flex", flexDirection:"column", alignItems:"center", gap:6,
                   border:"1px solid "+(isToday? "var(--accent)" : empty && !past ? "var(--amber)" : "var(--border)"), background: empty && !past ? "var(--amber-soft)" : "var(--surface-2)", opacity: past && empty ? .55 : 1}}>
-                <span style={{fontSize:11.5, fontWeight:700, color: isToday? "var(--accent)" : "var(--ink-soft)"}}>{d.toLocaleDateString("en-GB", {weekday:"short"})} {d.getDate()}</span>
-                {empty ? <span style={{fontSize:12, fontWeight:600, color: past? "var(--ink-mute)" : "var(--amber)"}}>{past? "—" : "+ add"}</span>
+                <span style={{fontSize:11.5, fontWeight:700, color: isToday? "var(--accent)" : "var(--ink-soft)", lineHeight:1.2}}>{d.toLocaleDateString("en-GB", {weekday:"short"})}<br className="cf-wk-br"/> {d.getDate()}</span>
+                {empty ? <span style={{fontSize:12, fontWeight:600, color: past? "var(--ink-mute)" : "var(--amber)"}}>{past? "—" : <>+<span className="cf-wk-n"> add</span></>}</span>
                   : <span style={{display:"flex", gap:3, flexWrap:"wrap", justifyContent:"center"}}>{plats.map(p=><PlatformIcon key={p} platform={p} size={12}/>)}</span>}
-                {!empty && <span style={{fontSize:11, color:"var(--ink-mute)"}}>{list.length} post{list.length>1?"s":""}</span>}
+                {!empty && <span style={{fontSize:11, color:"var(--ink-mute)"}}>{list.length}<span className="cf-wk-n"> post{list.length>1?"s":""}</span></span>}
               </button>
             );
           })}
@@ -3645,14 +3648,23 @@ function DashboardPage(){
       </div>
       <style>{`
         .cf-dash-top{display:grid; grid-template-columns:minmax(0,1.15fr) minmax(0,1fr); gap:14px;}
-        .cf-dash-week{display:grid; grid-template-columns:repeat(7, minmax(0,1fr)); gap:6px;}
-        .cf-dash-todo{display:grid; grid-template-columns:repeat(auto-fill, minmax(320px, 1fr)); gap:8px; max-height:300px; overflow-y:auto;}
+        .cf-dash-week{display:grid; grid-template-columns:repeat(7, minmax(0,1fr)); gap:6px; align-items:stretch;}
+        .cf-wk-br{display:none;} @media (max-width:600px){ .cf-wk-br{display:inline;} }
+        .cf-dash-todo{display:grid; grid-template-columns:repeat(auto-fill, minmax(min(320px, 100%), 1fr)); gap:8px; max-height:340px; overflow-y:auto;}
         .cf-dash-slim{display:flex; gap:10px; flex-wrap:wrap; margin-top:14px;}
         .cf-dash-chip{flex:1 1 220px; min-width:0; display:flex; align-items:center; gap:10px; padding:9px 12px; border-radius:10px; border:1px solid var(--border); background:var(--surface); cursor:pointer; color:var(--ink);}
         .cf-dash-chip:hover{border-color:var(--accent);}
         @media (max-width:900px){ .cf-dash-top{grid-template-columns:1fr;} }
-        @media (max-width:600px){ .cf-dash-todo{grid-template-columns:1fr;} }
-        @media (max-width:600px){ .cf-dash-week{grid-template-columns:repeat(4, minmax(0,1fr));} }
+        @media (max-width:600px){
+          .cf-dash-todo{grid-template-columns:1fr; max-height:none;}
+          .cf-todo-row{display:grid !important; grid-template-columns:minmax(0,1fr) auto; row-gap:4px; column-gap:10px !important; padding:9px 10px !important;}
+          .cf-todo-row > span:first-child{grid-column:1 / -1; justify-self:start;}
+          .cf-todo-btns{gap:6px !important;}
+          .cf-dash-week{gap:4px !important;}
+          .cf-dash-week > button{padding:8px 2px !important; gap:4px !important;}
+          .cf-dash-week .cf-wk-n{display:none;}
+        }
+
       `}</style>
     </div>
   );
@@ -3928,6 +3940,7 @@ function ContentCalendarPage(){
   const narrow = useIsNarrow(700);
   const [selectedDay, setSelectedDay] = useState(null);
   const occ = useOccasions();
+  const [showFilters, setShowFilters] = useState(false);
   const [view, setView] = useState((state.calendarPreset && state.calendarPreset.view) || "month");
   const [cursor, setCursor] = useState(new Date(TODAY));
   const [filters, setFilters] = useState({brand:"", platform:"", campaign:"", creator:"", status:(state.calendarPreset && state.calendarPreset.status) || ""});
@@ -3962,12 +3975,15 @@ function ContentCalendarPage(){
             <button key={v} onClick={()=>setView(v)} style={{padding:"6px 13px", borderRadius:7, border:"none", fontWeight:700, fontSize:12.5, cursor:"pointer", textTransform:"capitalize", background:view===v?"var(--surface)":"transparent", boxShadow:view===v?"var(--shadow-sm)":"none"}}>{v}</button>
           ))}
         </div>
-        <div style={{width:1, height:24, background:"var(--border)"}}/>
-        <Select value={filters.brand} onChange={v=>setFilters(f=>({...f,brand:v}))} placeholder="All brands" options={BRANDS.map(b=>({value:b.id,label:b.name}))} style={{width:150}}/>
+        {narrow && <button onClick={()=>setShowFilters(v=>!v)} style={{marginLeft:"auto", display:"flex", alignItems:"center", gap:6, padding:"7px 12px", borderRadius:9, border:"1px solid var(--border)", background:"var(--surface)", color:"var(--ink)", fontSize:12.5, fontWeight:600, cursor:"pointer"}}>
+          <Icon name="filter" size={14}/>Filters{Object.values(filters).filter(Boolean).length ? " · "+Object.values(filters).filter(Boolean).length : ""}</button>}
+        {(!narrow || showFilters) && <>
+        {!narrow && <div style={{width:1, height:24, background:"var(--border)"}}/>}
         <Select value={filters.platform} onChange={v=>setFilters(f=>({...f,platform:v}))} placeholder="All platforms" options={Object.entries(PLATFORM_META).map(([k,v])=>({value:k,label:v.label}))} style={{width:150}}/>
         <Select value={filters.campaign} onChange={v=>setFilters(f=>({...f,campaign:v}))} placeholder="All campaigns" options={campaignFilterOptions(state.campaigns)} style={{width:160}}/>
         <Select value={filters.creator} onChange={v=>setFilters(f=>({...f,creator:v}))} placeholder="All creators" options={creators.map(c=>({value:c.id,label:c.name}))} style={{width:150}}/>
         <Select value={filters.status} onChange={v=>setFilters(f=>({...f,status:v}))} placeholder="All statuses" options={Object.entries(STATUS_META).map(([k,v])=>({value:k,label:v.label}))} style={{width:150}}/>
+        </>}
       </Card>
 
       <div className="cf-cal-grid" style={{display:"grid", gridTemplateColumns:"1fr 260px", gap:16, alignItems:"start"}}>
@@ -4288,6 +4304,7 @@ function LibraryPage(){
   useEffect(()=>{ setLimit(60); }, [q, JSON.stringify(f)]);
   const usedBy = useMemo(()=>libraryUsageMap(state.contentItems), [state.contentItems]);
   const marks = useUsedMarks();
+  const [showFilters, setShowFilters] = useState(false);
 
   if(error) return <div><PageHeader title="Content Library"/><Card><EmptyState icon="image" title="Couldn't load the library" subtitle={error} action={<Button variant="primary" onClick={reload}>Try again</Button>}/></Card></div>;
   if(!lib) return <div><PageHeader title="Content Library" subtitle="Loading your Google Drive library…"/><div style={{display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(160px,1fr))", gap:12}}>{Array.from({length:12}).map((_,i)=><Skeleton key={i} h={210} r={10}/>)}</div></div>;
@@ -4339,10 +4356,13 @@ function LibraryPage(){
       <Card style={{padding:12, marginBottom:14}}>
         <div style={{position:"relative", marginBottom:10}}>
           <Icon name="search" size={16} style={{position:"absolute", left:12, top:11, color:"var(--ink-mute)"}}/>
-          <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Type a barcode like G219, or search dish, category, branch…" autoFocus={!("ontouchstart" in window)}
+          <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Barcode (G219), dish or branch…" autoFocus={!("ontouchstart" in window)}
             style={{width:"100%", padding:"10px 12px 10px 36px", borderRadius:8, border:"1px solid var(--border)", fontSize:14, background:"var(--surface)", color:"var(--ink)"}}/>
         </div>
-        <div className="cf-lib-filters" style={{display:"flex", flexWrap:"wrap", gap:8, alignItems:"center"}}>
+        <button className="cf-lib-ftoggle" onClick={()=>setShowFilters(v=>!v)} style={{display:"none", alignItems:"center", gap:6, padding:"7px 12px", borderRadius:9, border:"1px solid var(--border)", background:"var(--surface)", color:"var(--ink)", fontSize:12.5, fontWeight:600, cursor:"pointer"}}>
+          <Icon name="filter" size={14}/>{showFilters? "Hide filters" : "Filters"}{activeFilters? " · "+activeFilters : ""}</button>
+        <style>{`@media (max-width:600px){ .cf-lib-ftoggle{display:flex !important;} .cf-lib-filters[data-open="0"]{display:none !important;} .cf-lib-filters{margin-top:10px;} }`}</style>
+        <div className="cf-lib-filters" data-open={showFilters? "1":"0"} style={{display:"flex", flexWrap:"wrap", gap:8, alignItems:"center"}}>
           <Select value={f.branch} onChange={v=>setF(s=>({...s, branch:v}))} placeholder="All branches" options={branches.map(b=>({value:b, label:b}))} style={{width:150}}/>
           <Select value={f.kind} onChange={v=>setF(s=>({...s, kind:v}))} placeholder="Photos & videos" options={[{value:"video",label:"Videos"},{value:"photo",label:"Photos (JPG/PNG)"},{value:"raw",label:"RAW photos"},{value:"doc",label:"Documents"}]} style={{width:160}}/>
           <Select value={f.category} onChange={v=>setF(s=>({...s, category:v}))} placeholder="All categories" options={Object.entries(LIB_CATEGORY).map(([k,v])=>({value:k,label:v}))} style={{width:170}}/>
@@ -5155,7 +5175,15 @@ function CreateContentPage(){
   return (
     <div>
       <PageHeader title="Create Content" subtitle="Build one creative concept and tailor it per platform."/>
-      <div style={{display:"flex", gap:0, marginBottom:22, overflowX:"auto"}}>
+      {/* Phones get a one-line "Step 2 of 5 · Master Media" with a progress bar instead of five labels. */}
+      <div className="cf-wiz-mini" style={{display:"none", marginBottom:16}}>
+        <div style={{display:"flex", alignItems:"center", gap:8, fontSize:13, fontWeight:700, marginBottom:8}}>
+          <span style={{color:"var(--accent)"}}>Step {step+1} of {WIZARD_STEPS.length}</span><span style={{color:"var(--ink-soft)"}}>· {WIZARD_STEPS[step]}</span>
+        </div>
+        <div style={{display:"flex", gap:4}}>{WIZARD_STEPS.map((x,i)=><span key={x} onClick={()=>i<=step && setStep(i)} style={{flex:1, height:4, borderRadius:99, background: i<step? "var(--green)" : i===step? "var(--accent)" : "var(--surface-2)", cursor: i<=step? "pointer":"default"}}/>)}</div>
+      </div>
+      <style>{`@media (max-width:600px){ .cf-wiz-mini{display:block !important;} .cf-wiz-steps{display:none !important;} }`}</style>
+      <div className="cf-wiz-steps" style={{display:"flex", gap:0, marginBottom:22, overflowX:"auto"}}>
         {WIZARD_STEPS.map((s,i)=>(
           <div key={s} style={{display:"flex", alignItems:"center", flex:1, minWidth:120}}>
             <div onClick={()=>i<=step && setStep(i)} style={{display:"flex", alignItems:"center", gap:8, cursor:i<=step?"pointer":"default"}}>
@@ -5185,10 +5213,10 @@ function CreateContentPage(){
               </div>
               <TextField label="Content title" value={form.title} onChange={v=>set({title:v})} placeholder="e.g. Autumn Roast — Hero Reel"/>
               <div className="cf-field-grid" style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:14}}>
-                <div>
+                {BRANDS.length>1 && <div>
                   <label style={{fontSize:12.5, fontWeight:700, display:"block", marginBottom:6}}>Brand</label>
                   <Select value={form.brand} onChange={v=>set({brand:v})} options={BRANDS.map(b=>({value:b.id,label:b.name}))}/>
-                </div>
+                </div>}
                 <div>
                   <label style={{fontSize:12.5, fontWeight:700, display:"block", marginBottom:6}}>Campaign <span style={{fontWeight:500, color:"var(--ink-mute)"}}>(optional)</span></label>
                   <CampaignPicker value={form.campaign} brand={form.brand} onChange={v=>set({campaign:v})}/>
@@ -5678,7 +5706,7 @@ function PublishedContentPage(){
         {chip(collabOnly, "Collabs only", ()=>setCollabOnly(v=>!v))}
         {pick && chip(true, "✕ "+pick.value, ()=>setPick(null))}
         <span style={{flex:1}}/>
-        <div style={{position:"relative", width:"min(100%, 240px)"}}>
+        <div className="cf-search" style={{position:"relative", width:"min(100%, 240px)"}}>
           <Icon name="search" size={15} style={{position:"absolute", left:10, top:9, color:"var(--ink-mute)"}}/>
           <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search captions, tags…" style={{width:"100%", padding:"8px 10px 8px 32px", borderRadius:9, border:"1px solid var(--border)", fontSize:13, background:"var(--surface)", color:"var(--ink)"}}/>
         </div>
@@ -6643,6 +6671,7 @@ function WorkspacePage(){
   return <>
     {openId ? <WsProject id={openId} onBack={()=>setOpenId(null)}/> : <WsHome onOpen={setOpenId}/>}
     <style>{`
+      @media (max-width:600px){ .cf-ws-cover{height:104px !important;} }
       .cf-ws-review{display:grid; grid-template-columns:minmax(0, 1.15fr) minmax(0, 1fr); gap:18px; align-items:start;}
       .cf-ws-stage{display:grid; grid-template-columns:minmax(260px, 1fr) minmax(0, 1fr); gap:22px; align-items:start;}
       .cf-ws-plan{display:grid; grid-template-columns:minmax(0, 1.2fr) minmax(0, 1fr); gap:14px; align-items:start;}
@@ -6674,7 +6703,7 @@ function WsHome({onOpen}){
           ))}
         </div>
         <div style={{flex:1}}/>
-        <div style={{position:"relative", width:"min(100%, 280px)"}}>
+        <div className="cf-search" style={{position:"relative", width:"min(100%, 280px)"}}>
           <Icon name="search" size={15} style={{position:"absolute", left:10, top:10, color:"var(--ink-mute)"}}/>
           <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search projects, dishes, barcodes" style={{width:"100%", borderRadius:10, border:"1px solid var(--border)", padding:"8px 10px 8px 32px", fontSize:13, background:"var(--surface)", color:"var(--ink)"}}/>
         </div>
@@ -6707,10 +6736,11 @@ function wsRank(list, voters){
 
 function WsCover({p, height=150}){
   const c = p.cover;
+  const tiny = height < 80;
   return (
-    <div style={{height, borderRadius:10, overflow:"hidden", background:"var(--surface-2)", position:"relative", display:"flex", alignItems:"center", justifyContent:"center", color:"var(--ink-mute)"}}>
-      {c && c.fileUrl ? <video src={c.fileUrl+"#t=0.5"} muted playsInline preload="metadata" style={{width:"100%", height:"100%", objectFit:"cover"}}/> : <Icon name={p.counts && p.counts.ideas? "bulb" : "folder"} size={28}/>}
-      {c && c.cut && <span style={{position:"absolute", left:8, bottom:8, fontSize:11, fontWeight:700, padding:"2px 7px", borderRadius:6, background:"rgba(0,0,0,.6)", color:"#fff"}}>Cut {c.cut}</span>}
+    <div className={height===150? "cf-ws-cover" : undefined} style={{height, borderRadius: tiny? 7 : 10, overflow:"hidden", background:"var(--surface-2)", position:"relative", display:"flex", alignItems:"center", justifyContent:"center", color:"var(--ink-mute)"}}>
+      {c && c.fileUrl ? <video src={c.fileUrl+"#t=0.5"} muted playsInline preload="metadata" style={{width:"100%", height:"100%", objectFit:"cover"}}/> : <Icon name={p.counts && p.counts.ideas? "bulb" : "folder"} size={tiny? 16 : 28}/>}
+      {c && c.cut && !tiny && <span style={{position:"absolute", left:8, bottom:8, fontSize:11, fontWeight:700, padding:"2px 7px", borderRadius:6, background:"rgba(0,0,0,.6)", color:"#fff"}}>Cut {c.cut}</span>}
     </div>
   );
 }
@@ -7323,8 +7353,8 @@ function WsApprovalStage({p, draft, items, act, onName}){
               <Button variant="amber" icon="edit" disabled={!changes.trim()} onClick={async()=>{ if(await act("/review", {decision:"changes", note:changes}, "Sent back with your changes")){ setAsking(false); setChanges(""); } }}>Send back for changes</Button>
             </div>
           </div> : <div style={{display:"flex", gap:8, flexWrap:"wrap"}}>
-            <Button variant="success" icon="check" onClick={()=>act("/review", {decision:"approve"}, "Approved — "+wsUser(draft.author).name+" will confirm the file name")}>Approve content</Button>
-            <Button variant="amber" icon="edit" onClick={()=>setAsking(true)}>Request changes</Button>
+            <Button icon="edit" onClick={()=>setAsking(true)} style={{color:"var(--amber)", borderColor:"var(--amber)", whiteSpace:"nowrap"}}>Needs changes</Button>
+            <Button variant="success" icon="check" onClick={()=>act("/review", {decision:"approve"}, "Approved — "+wsUser(draft.author).name+" will confirm the file name")} style={{whiteSpace:"nowrap"}}>Approve content</Button>
           </div>}
           {notes.length>0 && <div>
             <div style={{fontSize:13, fontWeight:700, marginBottom:4}}>Notes on this cut</div>
@@ -7550,12 +7580,18 @@ function ChatPage(){
       <Card style={{padding:0, display:"flex", flexDirection:"column", height: narrow? "calc(100dvh - 190px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px))" : "calc(100dvh - 170px)", minHeight:380, overflow:"hidden"}}>
         <div className="cf-noscrollbar" style={{display:"flex", alignItems:"center", gap:6, padding:"10px 14px", borderBottom:"1px solid var(--border)", overflowX:"auto"}}>
           {tabBtn("All", "all")}{tabBtn(narrow? "@ me" : "Mentions of me", "mentions")}{tabBtn("Updates", "updates")}{tabBtn("📌 Pinned", "pinned", pinned.length)}
-          <span style={{flex:1, minWidth:8}}/>
+          {!narrow && <><span style={{flex:1, minWidth:8}}/>
           <div style={{position:"relative", flex:"0 1 200px", minWidth:120}}>
             <Icon name="search" size={14} style={{position:"absolute", left:9, top:8, color:"var(--ink-mute)"}}/>
             <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search" style={{width:"100%", padding:"6px 8px 6px 28px", borderRadius:8, border:"1px solid var(--border)", fontSize:12.5, background:"var(--surface)", color:"var(--ink)"}}/>
-          </div>
+          </div></>}
         </div>
+        {narrow && <div style={{padding:"10px 14px", borderBottom:"1px solid var(--border)"}}>
+          <div style={{position:"relative"}}>
+            <Icon name="search" size={14} style={{position:"absolute", left:9, top:9, color:"var(--ink-mute)"}}/>
+            <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search messages" style={{width:"100%", padding:"7px 8px 7px 28px", borderRadius:8, border:"1px solid var(--border)", fontSize:13, background:"var(--surface)", color:"var(--ink)"}}/>
+          </div>
+        </div>}
         {pinned.length>0 && view!=="pinned" && (
           <button onClick={()=>jumpTo(pinned[0].id)} style={{display:"flex", alignItems:"center", gap:8, padding:"8px 14px", border:"none", borderBottom:"1px solid var(--border)", background:"var(--amber-soft)", cursor:"pointer", textAlign:"left", color:"var(--ink)"}}>
             <span>📌</span><span style={{flex:1, minWidth:0, fontSize:12.5, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}><b>{(USERS.find(u=>u.id===pinned[0].author)||{name: pinned[0].author==="system"? "Creator Studio" : "Someone"}).name}:</b> {pinned[0].text}</span>
@@ -7684,14 +7720,14 @@ function ChatPostCard({item}){
   const mine = stillToApprove(item).some(u=>u.id===state.currentUserId);
   const next = Object.values(item.variants||{}).map(v=>v.scheduledAt).filter(Boolean).sort()[0];
   return (
-    <div style={{display:"flex", alignItems:"center", gap:9, marginTop:6, padding:6, paddingRight:8, borderRadius:10, border:"1px solid var(--border)", background:"var(--surface)", maxWidth:420}}>
+    <div role="button" onClick={e=>{ e.stopPropagation(); openDetails(item); }} style={{display:"flex", alignItems:"center", gap:9, marginTop:6, padding:6, paddingRight:8, borderRadius:10, border:"1px solid var(--border)", background:"var(--surface)", maxWidth:420, cursor:"pointer"}}>
       <span style={{width:38, height:38, borderRadius:7, overflow:"hidden", flexShrink:0}}><Thumb item={item} radius={7} iconSize={12}/></span>
       <span style={{flex:1, minWidth:0}}>
         <span style={{display:"block", fontSize:12.5, fontWeight:600, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>{item.title}</span>
         <span style={{display:"block", fontSize:11, color:"var(--ink-mute)"}}>{STATUS_META[item.status].label}{next? " · "+fmtDateTime(next) : ""}</span>
       </span>
-      {mine && <Button size="sm" variant="primary" onClick={e=>{ e.stopPropagation(); dispatch({type:"SET_ROUTE", route:"queue", queueTab:"review"}); }}>Review</Button>}
-      <Button size="sm" onClick={e=>{ e.stopPropagation(); openDetails(item); }}>Open</Button>
+      {mine ? <Button size="sm" variant="primary" onClick={e=>{ e.stopPropagation(); dispatch({type:"SET_ROUTE", route:"queue", queueTab:"review"}); }}>Review</Button>
+        : <Icon name="chevronRight" size={16} style={{color:"var(--ink-mute)", flexShrink:0}}/>}
     </div>
   );
 }
@@ -7703,14 +7739,14 @@ function ChatProjectCard({p, id}){
   if(!p) return <button onClick={e=>{ e.stopPropagation(); open(); }} style={{marginTop:6, display:"inline-flex", alignItems:"center", gap:6, padding:"6px 10px", borderRadius:10, border:"1px solid var(--border)", background:"var(--surface)", fontSize:12.5, cursor:"pointer", color:"var(--ink)"}}><Icon name="workspace" size={14}/>Open project</button>;
   const act = p.status==="waiting" && p.submitted && p.submitted.by!==me ? "Approve cut" : p.status==="approved" && p.submitted && p.submitted.by===me ? "Name file" : p.counts && p.counts.toVote ? "Vote ("+p.counts.toVote+")" : null;
   return (
-    <div style={{display:"flex", alignItems:"center", gap:9, marginTop:6, padding:6, paddingRight:8, borderRadius:10, border:"1px solid var(--border)", background:"var(--surface)", maxWidth:420}}>
+    <div role="button" onClick={e=>{ e.stopPropagation(); open(); }} style={{display:"flex", alignItems:"center", gap:9, marginTop:6, padding:6, paddingRight:8, borderRadius:10, border:"1px solid var(--border)", background:"var(--surface)", maxWidth:420, cursor:"pointer"}}>
       <span style={{width:38, height:38, borderRadius:7, overflow:"hidden", flexShrink:0}}><WsCover p={p} height={38}/></span>
       <span style={{flex:1, minWidth:0}}>
         <span style={{display:"block", fontSize:12.5, fontWeight:600, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>{p.title}</span>
         <span style={{display:"block", fontSize:11, color:(WS_STATUS[p.status]||{}).color}}>{(WS_STATUS[p.status]||{}).label}{p.filed? " · "+p.filed.barcode : ""}</span>
       </span>
-      {act && <Button size="sm" variant="primary" onClick={e=>{ e.stopPropagation(); open(); }}>{act}</Button>}
-      <Button size="sm" onClick={e=>{ e.stopPropagation(); open(); }}>Open</Button>
+      {act ? <Button size="sm" variant="primary" onClick={e=>{ e.stopPropagation(); open(); }}>{act}</Button>
+        : <Icon name="chevronRight" size={16} style={{color:"var(--ink-mute)", flexShrink:0}}/>}
     </div>
   );
 }
@@ -7780,9 +7816,10 @@ function TeamWorkload(){
     <div>
       <SectionTitle>Team workload</SectionTitle>
       <Card style={{padding:0, marginBottom:26, overflow:"auto"}}>
-        <table style={{width:"100%", borderCollapse:"collapse", fontSize:13, minWidth:760}}>
+        <style>{`@media (max-width:600px){ .cf-team-table th, .cf-team-table td{ padding:9px 6px !important; } .cf-team-table th{ font-size:10.5px !important; } }`}</style>
+        <table className="cf-team-table" style={{width:"100%", borderCollapse:"collapse", fontSize:13}}>
           <thead><tr style={{textAlign:"left", borderBottom:"1px solid var(--border)"}}>
-            {["User","Role","Assigned brands","Content created","Pending tasks","Approval turnaround"].map(h=><th key={h} style={{padding:"10px 12px", fontSize:11.5, color:"var(--ink-mute)", fontWeight:700, textTransform:"uppercase"}}>{h}</th>)}
+            {["Person","Posts","Waiting","Speed"].map(h=><th key={h} style={{padding:"10px 12px", fontSize:11.5, color:"var(--ink-mute)", fontWeight:700, textTransform:"uppercase"}}>{h}</th>)}
           </tr></thead>
           <tbody>
             {activeUsers().map(u=>{
@@ -7792,8 +7829,6 @@ function TeamWorkload(){
               return (
                 <tr key={u.id} style={{borderBottom:"1px solid var(--border)"}}>
                   <td style={{padding:"10px 12px"}}><div style={{display:"flex", alignItems:"center", gap:9}}><Avatar user={u} size={30}/><div><div style={{fontWeight:700}}>{u.name}</div><div style={{fontSize:11, color:"var(--ink-mute)"}}>{u.title}</div></div></div></td>
-                  <td style={{padding:"10px 12px"}}><Badge label={ROLE_META[u.role].label} color="var(--accent)" soft="var(--accent-soft)"/></td>
-                  <td style={{padding:"10px 12px", color:"var(--ink-soft)"}}>{u.brands.map(b=>BRANDS.find(x=>x.id===b).name).join(", ")}</td>
                   <td className="num" style={{padding:"10px 12px", fontWeight:700}}>{created}</td>
                   <td className="num" style={{padding:"10px 12px"}}>{pending}</td>
                   <td className="num" style={{padding:"10px 12px"}}>{turnaround}</td>
@@ -8358,7 +8393,7 @@ function App(){
       {/* Always the live copy of the post, so changes made while it's open (dates, Make results, approvals) show straight away. */}
       <ContentDetailDrawer item={detailItem && (state.contentItems.find(i=>i.id===detailItem.id) || null)} onClose={()=>setDetailItem(null)}/>
       <ToastHost toasts={state.toasts} remove={id=>dispatch({type:"REMOVE_TOAST", id})}/>
-      <style>{`@media (max-width:600px){ .cf-main{ padding:18px 16px 50px !important; } }`}</style>
+      <style>{`@media (max-width:600px){ .cf-main{ padding:18px 16px 50px !important; } .cf-search{ width:100% !important; } }`}</style>
     </AppCtx.Provider>
   );
 }

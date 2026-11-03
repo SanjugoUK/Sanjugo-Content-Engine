@@ -1190,7 +1190,7 @@ function baseReducer(state, action){
       const nextVersion = resubmit ? item.currentVersion + 1 : item.currentVersion;
       const versions = resubmit ? [...(item.versions||[]), {version:nextVersion, editor, date:new Date().toISOString(), changes: note || "Revised after feedback", decision:"—", feedback:null}] : item.versions;
       let updated = {...item, ...(patch.title!=null? {title:patch.title} : {}), ...(patch.media? {media:{...item.media, ...patch.media}} : {}),
-        ...(patch.libraryRef!==undefined? {libraryRef:patch.libraryRef} : {}), ...(patch.approver? {approver:patch.approver} : {}), variants, versions, currentVersion:nextVersion,
+        ...(patch.libraryRef!==undefined? {libraryRef:patch.libraryRef} : {}), ...(patch.approver? {approver:patch.approver} : {}), ...(patch.notes!==undefined? {notes:patch.notes} : {}), variants, versions, currentVersion:nextVersion,
         ...(resubmit? {status:"submitted"} : {})};
       // New approver who has already approved (e.g. "both" → "Cyrus only" after Cyrus said yes): those platforms are done now.
       if(patch.approver && !resubmit && updated.status==="submitted"){
@@ -1933,7 +1933,7 @@ function ContentDetailDrawer({item, onClose}){
               <div style={{fontSize:11.5, fontWeight:700, color:"var(--ink-mute)", marginBottom:6, textTransform:"uppercase", letterSpacing:".4px"}}>Platforms</div>
               <div style={{display:"flex", gap:8, flexWrap:"wrap"}}>{item.platforms.map(p=><span key={p} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 10px 5px 6px",borderRadius:99,background:"var(--surface-2)",fontSize:12.5,fontWeight:600}}><PlatformIcon platform={p} size={13}/>{PLATFORM_META[p].label}</span>)}</div>
             </div>
-            {item.notes && <InfoField label="Internal notes" value={item.notes} block/>}
+            {item.notes && <InfoField label="Note for the approvers" value={item.notes} block/>}
             {item.lastFeedback && (
               <div style={{background:"var(--amber-soft)", border:"1px solid #F0D6A0", borderRadius:12, padding:14}}>
                 <div style={{fontSize:11.5, fontWeight:700, color:"var(--amber)", marginBottom:5}}>LATEST FEEDBACK — {USERS.find(u=>u.id===item.lastFeedback.by).name}</div>
@@ -2740,10 +2740,12 @@ function ImmersiveViewer({entry, platform, onPlatform, onDecision, onClose, busy
           <Button variant="ghost" size="lg" icon="chevronLeft" onClick={browse.onPrev} disabled={browse.index<=0} style={{borderRadius:99, background:"#1c1c1e", color:"#fff", borderColor:"#333"}}>Previous</Button>
           <span className="num" style={{fontSize:13, fontWeight:700, color:"#bbb", minWidth:54, textAlign:"center"}}>{browse.index+1} of {browse.total}</span>
           <Button variant="ghost" size="lg" onClick={browse.onNext} disabled={browse.index>=browse.total-1} style={{borderRadius:99, background:"#1c1c1e", color:"#fff", borderColor:"#333"}}>Next ›</Button>
-        </div> : <div style={{display:"flex", alignItems:"center", justifyContent:"center", gap:14}}>
+        </div> : <>
+        {entry.item && (entry.item.notes || entry.item.currentVersion>1) && <div style={{maxWidth:520, width:"100%", margin:"0 auto 10px"}}><ApproverNote item={entry.item} creator={USERS.find(u=>u.id===entry.item.creator) || {name:"the creator"}} compact stop={e=>e.stopPropagation()}/></div>}
+        <div style={{display:"flex", alignItems:"center", justifyContent:"center", gap:14}}>
           <Button variant="ghost" size="lg" icon="edit" onClick={()=>onDecision("edits")} style={{borderRadius:99, flex:"1 1 0", maxWidth:220, justifyContent:"center", whiteSpace:"nowrap", background:"#1c1c1e", color:"#FBBF24", borderColor:"#FBBF24"}}>Needs changes</Button>
           <Button variant="success" size="lg" icon="check" onClick={()=>onDecision("approve")} style={{borderRadius:99, flex:"1.3 1 0", maxWidth:260, justifyContent:"center", whiteSpace:"nowrap"}}>Approve</Button>
-        </div>}
+        </div></>}
       </div>
     </div>,
     document.body
@@ -2757,6 +2759,25 @@ function variantFields(platform, v){
   if(platform==="gbp" && isGbpPhoto(v)) return [["Listing", gbpListingLabel(v)], ["Gallery photo", gbpCategoryLabel(v)], ["Description", v.caption]];
   if(platform==="gbp") return [["Listing", gbpListingLabel(v)], ["Update text", v.caption], ["Button", v.cta || "Learn more"]];
   return [["Caption", v.caption], ["Hashtags", (v.hashtags||[]).join(" ")]];
+}
+
+// The creator's note (and what changed on a resubmit), shown on the approval card itself so approvers can't miss it.
+function ApproverNote({item, creator, compact, stop}){
+  const [open, setOpen] = useState(false);
+  const note = String(item.notes||"").trim();
+  const last = (item.versions||[]).slice(-1)[0];
+  const changed = item.currentVersion>1 && last && last.changes && last.changes!=="Revised after feedback" ? String(last.changes).trim() : "";
+  if(!note && !changed) return null;
+  const clamp = compact && !open ? {display:"-webkit-box", WebkitLineClamp:3, WebkitBoxOrient:"vertical", overflow:"hidden"} : {};
+  const long = (note.length + changed.length) > 140;
+  return (
+    <div onPointerDown={stop} onClick={e=>{ e.stopPropagation(); if(compact && long) setOpen(o=>!o); }}
+      style={{background:"#FFF8DB", border:"1px solid #F5D565", borderRadius:10, padding: compact? "7px 10px" : "10px 12px", color:"#5C4500", fontSize: compact? 12.5 : 13.5, lineHeight:1.45, cursor: compact && long ? "pointer" : "default", userSelect:"text"}}>
+      {note && <div style={clamp}><b>📝 Note from {creator.name}:</b> <span style={{whiteSpace:"pre-wrap"}}>{note}</span></div>}
+      {changed && <div style={{marginTop: note? 4 : 0, ...clamp}}><b>✏️ Changed in v{item.currentVersion}:</b> <span style={{whiteSpace:"pre-wrap"}}>{changed}</span></div>}
+      {compact && long && <div style={{fontSize:11, fontWeight:700, marginTop:2, opacity:.75}}>{open? "Show less" : "Tap to read all"}</div>}
+    </div>
+  );
 }
 
 function SwipeCard({entry, onDecision, onOpenDetails, isTop, narrow, paused, onImmersive}){
@@ -2832,6 +2853,7 @@ function SwipeCard({entry, onDecision, onOpenDetails, isTop, narrow, paused, onI
           </div>
           <Badge label={PRIORITY_META[item.priority].label} color={PRIORITY_META[item.priority].color} soft="var(--surface-2)"/>
         </div>
+        {(item.notes || item.currentVersion>1) && <div style={{padding:"0 12px 8px", flexShrink:0}}><ApproverNote item={item} creator={creator} compact stop={stop}/></div>}
         <div className="cf-noscrollbar" style={{display:"flex", alignItems:"center", gap:6, padding:"0 12px 8px", flexShrink:0, overflowX:"auto"}}>
           {tabs || singlePlatform}
         </div>
@@ -2859,6 +2881,7 @@ function SwipeCard({entry, onDecision, onOpenDetails, isTop, narrow, paused, onI
             <Badge label={PRIORITY_META[item.priority].label} color={PRIORITY_META[item.priority].color} soft="var(--surface-2)"/>
           </div>
         </div>
+        <ApproverNote item={item} creator={creator} stop={stop}/>
         <div>
           <div style={{fontSize:11, fontWeight:700, color:"var(--ink-mute)", textTransform:"uppercase", letterSpacing:".5px", marginBottom:8}}>Preview as it will appear on</div>
           <div style={{display:"flex", flexWrap:"wrap", gap:6, alignItems:"center"}}>{tabs || singlePlatform}{soundBtn}{fullBtn}</div>
@@ -2983,7 +3006,7 @@ function RevisionEditor({item, onClose}){
     if(!item){ setF(null); return; }
     const variants = {};
     Object.entries(item.variants||{}).forEach(([p,v])=>{ variants[p] = {caption:v.caption||"", hashtags:(v.hashtags||[]).join(" "), title:v.title||"", description:v.description||"", cta:v.cta||"", url:v.url||"", listing:gbpListing(v), gbpType: isGbpPhoto(v)? "photo" : "update", category:gbpCategory(v), storyNotes:v.storyNotes||"", scheduledAt: v.scheduledAt ? isoToLocalInput(v.scheduledAt) : ""}; });
-    setF({title:item.title, approver:item.approver||ANY_APPROVER, variants, media:null, libraryRef:undefined, note:"", mediaStatus:""});
+    setF({title:item.title, approver:item.approver||ANY_APPROVER, variants, media:null, libraryRef:undefined, note:"", notes:item.notes||"", mediaStatus:""});
     setTab(item.platforms[0]);
     setNotify(true);
     // Always start with one date for every platform — creators expect changing it to move the whole post.
@@ -3034,7 +3057,8 @@ function RevisionEditor({item, onClose}){
         scheduledAt: v.scheduledAt ? new Date(v.scheduledAt).toISOString() : null};
     });
     return {title:f.title.trim() || item.title, variants, ...(f.media? {media:f.media} : {}), ...(f.libraryRef!==undefined? {libraryRef:f.libraryRef} : {}),
-      ...(f.approver !== (item.approver||ANY_APPROVER) ? {approver:f.approver} : {})};
+      ...(f.approver !== (item.approver||ANY_APPROVER) ? {approver:f.approver} : {}),
+      ...((f.notes||"") !== (item.notes||"") ? {notes:f.notes} : {})};
   }
   async function save(resubmit){
     setBusy(true);
@@ -3134,7 +3158,9 @@ function RevisionEditor({item, onClose}){
             : <input value={v.hashtags} onChange={e=>setV(tab,{hashtags:e.target.value})} placeholder="#Sanjugo #sushi" style={input}/>}
         </>}
 
-        <label style={label}>Note to the approver <span style={{fontWeight:400, color:"var(--ink-mute)"}}>(what you changed)</span></label>
+        <label style={label}>Note for the approvers <span style={{fontWeight:400, color:"var(--ink-mute)"}}>(shown at the top of the approval card)</span></label>
+        <textarea value={f.notes||""} onChange={e=>setF(x=>({...x, notes:e.target.value}))} rows={2} placeholder="e.g. Please check the price on the menu board at 0:04." style={{...input, resize:"vertical"}}/>
+        <label style={label}>What you changed <span style={{fontWeight:400, color:"var(--ink-mute)"}}>(when resubmitting)</span></label>
         <textarea value={f.note} onChange={e=>setF(x=>({...x, note:e.target.value}))} rows={2} placeholder="e.g. Shortened the caption and swapped to the brighter shot (G731)." style={{...input, resize:"vertical"}}/>
         {toTell.length>0 && ["changes_requested","rejected","draft"].includes(item.status) && <label style={{display:"flex", alignItems:"center", gap:7, fontSize:12.5, marginTop:10, color:"var(--ink-soft)", cursor:"pointer"}}>
           <input type="checkbox" checked={notify} onChange={e=>setNotify(e.target.checked)}/> Tell {toTell.map(u=>u.name).join(" and ")} in Team Chat when I resubmit
@@ -5285,7 +5311,7 @@ function CreateContentPage(){
                   <Select value={form.approver} onChange={v=>set({approver:v})} options={approverOptions()}/>
                 </div>
               </div>
-              <TextField label="Internal notes" value={form.notes} onChange={v=>set({notes:v})} placeholder="Anything the approver should know…" textarea/>
+              <TextField label="Note for the approvers" value={form.notes} onChange={v=>set({notes:v})} placeholder="Anything the approver should know… (shown at the top of the approval card)" textarea/>
             </div>
           )}
           {step===1 && (

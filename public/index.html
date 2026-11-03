@@ -3942,7 +3942,10 @@ function ContentCalendarPage(){
   const occ = useOccasions();
   const [showFilters, setShowFilters] = useState(false);
   const [view, setView] = useState((state.calendarPreset && state.calendarPreset.view) || "month");
-  const [cursor, setCursor] = useState(new Date(TODAY));
+  const presetDay = state.calendarPreset && state.calendarPreset.date ? new Date(state.calendarPreset.date+"T12:00:00") : null;
+  const [cursor, setCursor] = useState(presetDay || new Date(TODAY));
+  // Opened from a shared day (Team Chat): jump to that month and open the day.
+  useEffect(()=>{ if(presetDay){ setCursor(presetDay); setSelectedDay(presetDay); } }, [state.calendarPreset && state.calendarPreset.date]);
   const [filters, setFilters] = useState({brand:"", platform:"", campaign:"", creator:"", status:(state.calendarPreset && state.calendarPreset.status) || ""});
   const entries = useMemo(()=>calendarEntries(state.contentItems, filters), [state.contentItems, filters]);
   const creators = [...new Set(state.contentItems.map(i=>i.creator))].map(id=>USERS.find(u=>u.id===id));
@@ -7502,6 +7505,7 @@ function ChatPage(){
   const narrow = useIsNarrow(900);
   const [text, setText] = useState("");
   const [attach, setAttach] = useState(null); // {kind:"post"|"project"|"day", id}
+  const [dayPick, setDayPick] = useState("");
   const [menu, setMenu] = useState(false);
   const [replyTo, setReplyTo] = useState(null);
   const [view, setView] = useState("all"); // all | mentions | updates | pinned
@@ -7690,7 +7694,8 @@ function ChatPage(){
               <Select value="" onChange={v=>{ if(v){ setAttach({kind:"project", id:v}); setMenu(false); } }} placeholder="📁 A Workspace project…" options={openProjects.map(p=>({value:p.id, label:p.title+" — "+(WS_STATUS[p.status]||{}).label}))}/>
               <Select value="" onChange={v=>{ if(v){ setAttach({kind:"post", id:v}); setMenu(false); } }} placeholder="📝 A post…" options={recentPosts.map(i=>({value:i.id, label:i.title+" — "+STATUS_META[i.status].label}))}/>
               <label style={{display:"flex", alignItems:"center", gap:8, fontSize:12.5}}>📅 A calendar day
-                <input type="date" onChange={e=>{ if(e.target.value){ setAttach({kind:"day", id:e.target.value}); setMenu(false); } }} style={{flex:1, borderRadius:8, border:"1px solid var(--border)", padding:"6px 8px", fontSize:12.5, background:"var(--surface)", color:"var(--ink)"}}/></label>
+                <input type="date" value={dayPick} onChange={e=>setDayPick(e.target.value)} style={{flex:1, minWidth:0, borderRadius:8, border:"1px solid var(--border)", padding:"6px 8px", fontSize:12.5, background:"var(--surface)", color:"var(--ink)"}}/>
+                <Button size="sm" disabled={!/^\d{4}-\d{2}-\d{2}$/.test(dayPick)} onClick={()=>{ setAttach({kind:"day", id:dayPick}); setMenu(false); setDayPick(""); }}>Add</Button></label>
             </div>
           )}
           {replyTo && <div style={{display:"flex", alignItems:"center", gap:8, marginBottom:8, padding:"6px 8px", borderRadius:8, background:"var(--surface-2)", borderLeft:"3px solid var(--accent)", fontSize:12.5}}>
@@ -7763,16 +7768,23 @@ function ChatProjectCard({p, id}){
 // A calendar day in chat: what's going out that day.
 function ChatDayCard({date}){
   const {state, dispatch} = useApp();
+  const occ = useOccasions();
   const d = new Date(date+"T12:00:00");
-  const list = state.contentItems.flatMap(i=>Object.values(i.variants||{}).filter(v=>v.scheduledAt && new Date(v.scheduledAt).toDateString()===d.toDateString()).map(v=>({i, v})));
+  if(isNaN(d)) return null;
+  const list = state.contentItems.flatMap(i=>Object.values(i.variants||{}).filter(v=>v.scheduledAt && new Date(v.scheduledAt).toDateString()===d.toDateString()).map(v=>({i, v}))).sort((a,b)=>new Date(a.v.scheduledAt)-new Date(b.v.scheduledAt));
+  const days = (occ.byDate && occ.byDate[ymd(d)]) || [];
+  const open = e=>{ if(e) e.stopPropagation(); dispatch({type:"SET_ROUTE", route:"calendar", calendarPreset:{view:"month", date}}); };
   return (
-    <div style={{marginTop:6, padding:"8px 10px", borderRadius:10, border:"1px solid var(--border)", background:"var(--surface)", maxWidth:420}}>
+    <div role="button" tabIndex={0} onClick={open} onKeyDown={e=>{ if(e.key==="Enter") open(e); }} title="Open this day in the calendar"
+      style={{marginTop:6, padding:"8px 10px", borderRadius:10, border:"1px solid var(--border)", background:"var(--surface)", maxWidth:420, cursor:"pointer"}}>
       <div style={{display:"flex", alignItems:"center", gap:8}}>
-        <Icon name="calendar" size={15} style={{color:"var(--accent)"}}/><span style={{flex:1, fontSize:12.5, fontWeight:700}}>{fmtDate(d.toISOString(), {weekday:"long", day:"numeric", month:"short"})}</span>
-        <Button size="sm" onClick={e=>{ e.stopPropagation(); dispatch({type:"SET_ROUTE", route:"calendar", calendarPreset:{view:"week"}}); }}>Calendar</Button>
+        <Icon name="calendar" size={15} style={{color:"var(--accent)"}}/><span style={{flex:1, fontSize:12.5, fontWeight:700}}>{fmtDate(date+"T12:00:00", {weekday:"long", day:"numeric", month:"short", year: d.getFullYear()!==new Date(TODAY).getFullYear() ? "numeric" : undefined})}</span>
+        <Icon name="chevronRight" size={14} style={{color:"var(--ink-mute)"}}/>
       </div>
-      {list.length ? list.slice(0,5).map(({i, v})=><div key={i.id+v.platform} style={{display:"flex", alignItems:"center", gap:6, fontSize:12, marginTop:5}}><PlatformIcon platform={v.platform} size={11}/><span style={{color:"var(--ink-mute)"}}>{new Date(v.scheduledAt).toLocaleTimeString("en-GB",{hour:"2-digit", minute:"2-digit"})}</span><span style={{flex:1, minWidth:0, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>{i.title}</span></div>)
+      {days.map(o=><div key={o.id} style={{fontSize:11.5, marginTop:4, color:"var(--ink-mute)"}}>{o.emoji||"🎉"} {o.name}</div>)}
+      {list.length ? list.slice(0,5).map(({i, v})=>{ const st = calendarStatus(i, v); return <div key={i.id+v.platform} style={{display:"flex", alignItems:"center", gap:6, fontSize:12, marginTop:5}}><PlatformIcon platform={v.platform} size={11}/><span style={{color:"var(--ink-mute)"}}>{new Date(v.scheduledAt).toLocaleTimeString("en-GB",{hour:"2-digit", minute:"2-digit"})}</span><span style={{flex:1, minWidth:0, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>{i.title}</span><span style={{fontSize:10.5, fontWeight:700, color:st[1], background:st[2], borderRadius:5, padding:"1px 5px", whiteSpace:"nowrap"}}>{st[0].split(" · ")[0]}</span></div>; })
         : <div style={{fontSize:12, color:"var(--amber)", marginTop:5, fontWeight:600}}>Nothing planned yet</div>}
+      {list.length>5 && <div style={{fontSize:11.5, color:"var(--ink-mute)", marginTop:4}}>+{list.length-5} more</div>}
     </div>
   );
 }

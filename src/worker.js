@@ -11,6 +11,7 @@ export default {
       ctx.waitUntil(runCleanup(env, { trigger: "nightly" }).catch((e) => console.error("cleanup failed", e)));
       // Nightly stats from Make (skipped quietly if the analytics webhook isn't set up yet).
       ctx.waitUntil(makeConfig(env).then((c) => pullPlatforms(c).length && triggerAnalyticsPull(env, { trigger: "nightly" })).catch((e) => console.error("analytics pull failed", e)));
+      ctx.waitUntil(refreshCollabs(env).catch((e) => console.error("collab refresh failed", e)));
     } else {
       ctx.waitUntil(autoPublishDue(env).catch((e) => console.error("auto-publish failed", e)));
       ctx.waitUntil(expireStuckJobs(env).catch((e) => console.error("expire jobs failed", e)));
@@ -350,7 +351,22 @@ async function uploadFile(request, env) {
 // Supports Range requests so video scrubbing/seeking works properly in the <video> player.
 // ---------------------------------------------------------------------------
 
+// ?download=<file name> makes the browser save the file (phones put it in Downloads / Files) instead of playing it.
+function downloadName(request) {
+  const n = new URL(request.url).searchParams.get("download");
+  if (n === null) return null;
+  return String(n).replace(/[^\w .()-]+/g, "_").replace(/^[ ._]+/, "").slice(0, 120) || "sanjugo-file";
+}
+function asDownload(res, name) {
+  if (!name || !res.ok) return res;
+  const h = new Headers(res.headers);
+  h.set("Content-Disposition", `attachment; filename="${name}"`);
+  h.set("Cache-Control", "private, no-store");
+  return new Response(res.body, { status: res.status, headers: h });
+}
+
 async function serveMedia(key, request, env) {
+  const dl = downloadName(request);
   const wantsDrive = new URL(request.url).searchParams.get("view") === "drive";
   if (wantsDrive) {
     const alt = await archivedLocation(key, env);
@@ -362,6 +378,7 @@ async function serveMedia(key, request, env) {
   if (!obj) {
     // Cleaned up after publishing — the same URL keeps working by pointing at the Google Drive copy.
     const alt = await archivedLocation(key, env);
+    if (alt && dl) return Response.redirect(new URL(alt.file + "?download=" + encodeURIComponent(dl), request.url).toString(), 302);
     if (alt) return Response.redirect(new URL(alt.play, request.url).toString(), 302);
     return new Response("Not found", { status: 404 });
   }
@@ -377,7 +394,7 @@ async function serveMedia(key, request, env) {
     headers.set("Content-Range", `bytes ${obj.range.offset}-${end}/${obj.size}`);
     return new Response(obj.body, { status: 206, headers });
   }
-
+  if (dl) { headers.set("Content-Disposition", `attachment; filename="${dl}"`); headers.set("Cache-Control", "private, no-store"); }
   return new Response(obj.body, { headers });
 }
 
@@ -725,7 +742,7 @@ async function libraryStream(id, request, env) {
   }
   out.set("Accept-Ranges", "bytes");
   out.set("Cache-Control", "private, max-age=3600");
-  return new Response(r.body, { status: r.status, headers: out });
+  return asDownload(new Response(r.body, { status: r.status, headers: out }), downloadName(request));
 }
 
 // ---------------------------------------------------------------------------
@@ -870,12 +887,12 @@ async function archivedLocation(key, env) {
   const lib = /^library\/([\w-]{10,})\.[a-z0-9]+$/i.exec(key);
   if (lib) {
     const id = lib[1];
-    return { play: IMAGE_EXT.test(key) ? `/api/library/thumb/${id}?s=1200` : `/api/library/stream/${id}`, view: `https://drive.google.com/file/d/${id}/view` };
+    return { play: IMAGE_EXT.test(key) ? `/api/library/thumb/${id}?s=1200` : `/api/library/stream/${id}`, file: `/api/library/stream/${id}`, view: `https://drive.google.com/file/d/${id}/view` };
   }
   await ensureStorageTables(env);
   const row = await env.DB.prepare("SELECT drive_id FROM media_archive WHERE key = ?1").bind(key).first();
   if (!row) return null;
-  return { play: `/api/library/stream/${row.drive_id}`, view: `https://drive.google.com/file/d/${row.drive_id}/view` };
+  return { play: `/api/library/stream/${row.drive_id}`, file: `/api/library/stream/${row.drive_id}`, view: `https://drive.google.com/file/d/${row.drive_id}/view` };
 }
 
 async function listAllObjects(env) {
@@ -1882,6 +1899,11 @@ async function handleMakeCallback(request, env, ctx) {
   if (!job) return json({ error: "Unknown or expired token" }, 403);
   const now = new Date().toISOString();
 
+  if (job.kind === "collab") {
+    if (job.status !== "sent" || Date.now() - Date.parse(job.created_at) > 60 * 60e3) return json({ error: "Expired" }, 403);
+    await ensureStudy(env);
+    return json(await collabCallback(env, job, body));
+  }
   if (job.kind === "analytics") {
     if (Date.now() - Date.parse(job.created_at) > 60 * 60e3) return json({ error: "Expired" }, 403);
     const platform = String(body.platform || "");
@@ -2178,7 +2200,7 @@ What Creator Studio can do (use this to explain how things work):
 - Publishing: on an approved post, "Publish…" → "Publish now with Make" posts to the platforms connected in Make (Instagram reel/photo, Facebook reel/photo, YouTube Short, Google Business update); the live link comes back to the post and Team Chat. Or switch on "Auto-publish at the scheduled time" (Settings → Make.com connections; checks every 5 minutes). TikTok can't be posted through Make — post it in the TikTok app, then use "Mark as published". Instagram reels need MP4/MOV, H.264/HEVC, max 1920 px wide, max 5 Mbps; Facebook reels 9:16, 3–90 s; best to export 1080p vertical.
 - Stats: Make pulls the latest posts with likes, comments, shares, saves, reach and views every night (about 4am UK time), or any time with "Get latest" (Settings → Stats). TikTok stats come from the public @sanjugouk profile via HasData. Each platform has its own Make scenario ("Pull · Instagram", "Publish · Facebook", …) so one can be fixed without touching the others; "Clear stats" removes a platform's stats (e.g. after switching accounts).
 - Analytics: Real data (from Make) or Sample data; ranges 7/30/90 days, 12 months, All time, custom; filters by platform, campaign, content pillar, post; per-platform and per-post views, reach, likes, comments, shares, saves, engagement rate; best time to post; top posts; a growth forecaster.
-- Published Content: a study page for every live post (and influencer posts added with "Add influencer post" — their link and numbers typed in from their insights). Filter by period, platform, Collabs only, search; "Compare by" Influencer / Promotion / Content type / Branch / Dish / Platform / Day / Time of day with average views or engagement; a day × time heatmap; each post shows how it did against the usual. Open a post for the caption breakdown (hook, words, emojis, hashtags, call to action), editable tags (guessed from the caption, marked "auto"), "Explain" (AI says why it worked), team notes, and "Make another like it".
+- Published Content: a study page for every live post (and collabs on other accounts added with "Add collab post": paste the link and who posted it, e.g. "@invited.app @daniafgx", and Instagram's views, likes and comments are fetched and refreshed nightly — Business/Creator accounts only, otherwise type the numbers in; optional cost in £). Filter by period, platform, Collabs only, search; "Compare by" Influencer / Promotion / Content type / Branch / Dish / Platform / Day / Time of day with average views or engagement (Influencer shows a scorecard: posts, avg views, × our usual, engagement, cost, £ per 1,000 views, last collab and Book again / Okay / Skip; tap a row to filter the posts); a day × time heatmap; each post shows how it did against the usual. Open a post for the caption breakdown (hook, words, emojis, hashtags, call to action), editable tags (guessed from the caption, marked "auto"; ✕ removes one; they save when you leave the box), "Explain" (AI says why it worked), team notes, and "Make another like it".
 - Workspace (tile in the menu): one project per video. Create project (name, branch, category, dish, creator — or "not assigned yet", due date). Tabs: Ideas (paste reel links or write ideas; everyone except the project's creator votes Yes/No and comments on each with 💬; best first, three No's removes an idea; cards you haven't voted on say "Your vote?"), Plan (the idea text and a shot list the creator ticks off while filming), Draft review (upload Draft 1, Draft 2…; player with −2s/+2s, 0.5× slow motion, loop and download; one "Review chat" for all drafts where a message is pinned to a second of a draft, about a whole draft — both are to-dos ticked "Fixed" — or General; "draft 1 at 0:12" in a message becomes a link; "Send draft N for approval"). Then the draft plays in a phone preview; anyone except the uploader taps "Approve content" or "Needs changes". Only big moments (new project, sent for approval, approved, changes requested, undone, saved to the Library, deleted) post in Team Chat — Workspace comments and votes don't. The uploader confirms the file name (SANJUGO filing system, e.g. 20261031_AL_FC_SP_FIN_v1_S465.mp4) and it is saved to Google Drive (Creator Studio Projects folder) and the Content Library. "Create post from this" then starts a normal post for the Approval Queue. This is content approval only — publishing still goes through the Approval Queue.
 - Settings: Stats (Get latest), Notifications, and for admins Team workload, Recent activity, Content library (Google Drive), Storage, Campaigns, Smart insights, Weekly posting slots, Platforms, Make.com connections (webhooks, auto-publish) and Team & access (roles, passwords). Your name and password are under your name at the top right of Settings. There is no separate Team page any more.
 - Roles: Creator — create, edit, submit. Approver — approve and schedule. Admin — everything including team and settings.`;
@@ -2832,7 +2854,7 @@ async function ensureStudy(env) {
   await env.DB.prepare("CREATE TABLE IF NOT EXISTS study_posts (key TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at TEXT NOT NULL)").run();
   studyReady = true;
 }
-const STUDY_TAGS = ["collab", "promo", "type", "branch", "dish"];
+const STUDY_TAGS = ["collab", "promo", "type", "branch", "dish", "cost"];
 async function studyGet(env, key) {
   const r = await env.DB.prepare("SELECT data FROM study_posts WHERE key = ?1").bind(key).first();
   return r ? JSON.parse(r.data) : { key };
@@ -2844,6 +2866,106 @@ async function studyPut(env, d) {
   return d;
 }
 const studyNum = (v) => Math.max(0, Math.min(1e10, Math.round(Number(v) || 0)));
+
+// ---------------------------------------------------------------------------
+// Collab numbers by link. Instagram's API only lists posts our own account owns, so a collab posted by an
+// influencer is read through "business discovery": Make's "Lookup · Instagram collab" scenario lists that
+// account's recent public posts (likes, comments, views) and posts them back here; we pick out the one whose
+// link matches. Works for Business and Creator accounts (most influencers); personal accounts stay manual.
+// The webhook address is saved in app_kv "collab_lookup_hook". Numbers refresh every night.
+// ---------------------------------------------------------------------------
+const COLLAB_HOOK_KEY = "collab_lookup_hook";
+const igShortcode = (u) => { const m = /instagram\.com\/(?:[\w.]+\/)?(?:p|reels?|tv)\/([\w-]{5,})/i.exec(String(u || "")); return m ? m[1] : null; };
+function collabHandles(text) {
+  const out = [];
+  for (const raw of String(text || "").split(/[\s,;]+|(?=@)/)) {
+    const h = raw.replace(/^@+/, "").replace(/\.+$/, "").toLowerCase();
+    if (/^[a-z0-9._]{2,30}$/.test(h) && !out.includes(h)) out.push(h);
+  }
+  return out.slice(0, 4);
+}
+
+async function startCollabLookup(env, entries, by) {
+  const hook = await kvGet(env, COLLAB_HOOK_KEY);
+  if (!hook || !MAKE_HOOK_RE.test(hook)) throw new HttpError(400, "The collab lookup isn't set up in Make yet — enter the numbers by hand for now.");
+  await ensureMakeTables(env);
+  // One Make run per account, carrying every post we want from that account.
+  const byHandle = new Map();
+  const now = new Date().toISOString();
+  for (const d of entries) {
+    const m = d.manual || {};
+    const code = igShortcode(m.url);
+    const handles = m.fetch && m.fetch.owner ? [m.fetch.owner] : collabHandles(m.account);
+    if (!code || !handles.length) {
+      m.fetch = { status: "error", at: now, error: !code ? "That doesn't look like an Instagram post link." : "Add the influencer's @handle so we know whose posts to look in." };
+      await studyPut(env, d);
+      continue;
+    }
+    m.fetch = { ...(m.fetch || {}), status: "pending", at: now, asked: handles, missed: [], error: null };
+    await studyPut(env, d);
+    for (const h of handles) { if (!byHandle.has(h)) byHandle.set(h, []); byHandle.get(h).push({ key: d.key, code }); }
+  }
+  let sent = 0;
+  for (const [handle, items] of byHandle) {
+    const id = "job_" + crypto.randomUUID().slice(0, 12), token = crypto.randomUUID().replace(/-/g, "");
+    await env.DB.prepare("INSERT INTO make_jobs (id, kind, platform, token, status, requested_by, trigger, detail, created_at, updated_at) VALUES (?1, 'collab', 'instagram', ?2, 'sent', ?3, ?4, ?5, ?6, ?6)")
+      .bind(id, token, by || null, by ? "manual" : "nightly", JSON.stringify({ handle, items }), now).run();
+    try { await callHook(hook, { token, username: handle }); sent++; }
+    catch (e) {
+      await env.DB.prepare("UPDATE make_jobs SET status = 'failed', error = ?2 WHERE id = ?1").bind(id, e.message).run();
+      for (const it of items) await collabMiss(env, it.key, handle, "Make didn't take the request — check the \"Lookup · Instagram collab\" scenario is switched on.");
+    }
+  }
+  return { sent, accounts: [...byHandle.keys()] };
+}
+
+async function collabMiss(env, key, handle, error) {
+  const d = await studyGet(env, key);
+  const f = d.manual && d.manual.fetch;
+  if (!f || f.status !== "pending") return;
+  f.missed = [...new Set([...(f.missed || []), handle])];
+  if (f.missed.length >= (f.asked || []).length) {
+    f.status = "notfound";
+    f.error = error || `Couldn't find this post in the latest posts of ${f.missed.map((h) => "@" + h).join(" or ")}. It may be on a personal account, too old, or the link/handle is wrong — enter the numbers by hand.`;
+  }
+  await studyPut(env, d);
+}
+
+async function collabCallback(env, job, body) {
+  let detail = {};
+  try { detail = JSON.parse(job.detail || "{}"); } catch (e) {}
+  const handle = detail.handle || "";
+  const posts = Array.isArray(body.posts) ? body.posts : [];
+  const now = new Date().toISOString();
+  let found = 0;
+  for (const it of detail.items || []) {
+    const p = posts.find((x) => x && igShortcode(x.permalink) === it.code);
+    if (!p) { await collabMiss(env, it.key, handle, posts.length ? null : `Instagram didn't return posts for @${handle} — it may be a personal account (only Business and Creator accounts can be read), or the handle is misspelt.`); continue; }
+    const d = await studyGet(env, it.key);
+    if (!d.manual) continue;
+    const m = d.manual;
+    m.views = studyNum(p.views) || m.views; m.likes = studyNum(p.likes); m.comments = studyNum(p.comments);
+    if (!m.caption) m.caption = dec(p.caption).slice(0, 3000);
+    const at = toIsoDate(p.at); if (at) m.publishedAt = at;
+    if (/^IMAGE|CAROUSEL/i.test(String(p.mediaType || "")) && p.thumb) m.thumb = dec(p.thumb).slice(0, 1000);
+    m.fetch = { status: "ok", at: now, owner: handle, asked: m.fetch && m.fetch.asked, missed: [] };
+    await studyPut(env, d);
+    found++;
+  }
+  await env.DB.prepare("UPDATE make_jobs SET status = ?2, error = ?3, updated_at = ?4 WHERE id = ?1")
+    .bind(job.id, found ? "done" : "failed", found ? null : "post not found for @" + handle, now).run();
+  return { ok: true, found };
+}
+
+// Nightly: refresh every Instagram collab added by link (one Make run per account).
+async function refreshCollabs(env) {
+  if (!(await kvGet(env, COLLAB_HOOK_KEY))) return;
+  await ensureStudy(env);
+  const { results } = await env.DB.prepare("SELECT data FROM study_posts").all();
+  const list = (results || []).map((r) => JSON.parse(r.data)).filter((d) => !d.deleted && d.manual && d.manual.platform === "instagram" && igShortcode(d.manual.url)
+    && collabHandles(d.manual.account).length && Date.now() - Date.parse(d.manual.publishedAt || 0) < 120 * 86400e3);
+  if (list.length) await startCollabLookup(env, list.slice(0, 40), null);
+}
 
 async function studyRoute(request, env, url, viewer) {
   await ensureStudy(env);
@@ -2890,9 +3012,25 @@ async function studyRoute(request, env, url, viewer) {
       caption: String(m.caption || "").slice(0, 3000), publishedAt: isNaN(when) ? new Date().toISOString() : new Date(when).toISOString(),
       views: studyNum(m.views), likes: studyNum(m.likes), comments: studyNum(m.comments), shares: studyNum(m.shares), saves: studyNum(m.saves),
       addedBy: (d.manual && d.manual.addedBy) || me.id,
+      thumb: (d.manual && d.manual.thumb) || "", fetch: (d.manual && d.manual.fetch) || null,
     };
-    d.tags = { ...(d.tags || {}), ...(d.manual.account.length > 1 ? { collab: d.manual.account } : {}) };
-    return json({ entry: await studyPut(env, d) });
+    // Several accounts can share one collab ("@invited.app @daniafgx"); keep them all, tidy.
+    const handles = collabHandles(m.account);
+    if (handles.length) d.manual.account = handles.map((h) => "@" + h).join(" ");
+    d.tags = { ...(d.tags || {}), ...(handles.length ? { collab: d.manual.account } : {}) };
+    if (m.cost !== undefined) { const c = String(m.cost || "").replace(/[^\d.]/g, "").slice(0, 10); d.tags.cost = c || "-"; }
+    let lookup = null;
+    if (m.fetch && d.manual.platform === "instagram") {
+      lookup = await startCollabLookup(env, [d], me.id).catch((e) => ({ error: e.message }));
+      if (lookup && lookup.error) d.manual.fetch = { status: "error", error: lookup.error, at: new Date().toISOString() };
+    }
+    return json({ entry: await studyPut(env, d), lookup });
+  }
+  if (path === "fetch") { // refresh an Instagram collab's numbers from Instagram
+    const d = await studyGet(env, key);
+    if (!d.manual) throw new HttpError(400, "Only collab posts added by link can be refreshed.");
+    const r = await startCollabLookup(env, [d], me.id);
+    return json({ entry: await studyGet(env, key), lookup: r });
   }
   if (path === "delete") {
     if (!key.startsWith("manual:")) throw new HttpError(400, "Only posts added by hand can be removed.");

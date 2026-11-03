@@ -469,6 +469,7 @@ function Icon({name, size=18, strokeWidth=1.8, style}){
     check: <path d="M20 6L9 17l-5-5" {...p}/>,
     x: <path d="M18 6L6 18M6 6l12 12" {...p}/>,
     edit: <><path d="M12 20h9" {...p}/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z" {...p}/></>,
+    download: <><path d="M12 4v12M7 11l5 5 5-5" {...p}/><path d="M4 16v3a2 2 0 002 2h12a2 2 0 002-2v-3" {...p}/></>,
     upload: <><path d="M12 16V4M7 9l5-5 5 5" {...p}/><path d="M4 16v3a2 2 0 002 2h12a2 2 0 002-2v-3" {...p}/></>,
     search: <><circle cx="11" cy="11" r="7" {...p}/><path d="M21 21l-4.3-4.3" {...p}/></>,
     filter: <path d="M4 5h16M7 12h10M10 19h4" {...p}/>,
@@ -827,6 +828,30 @@ function pushServerState(state){
 /* Multi-photo (carousel) posts. Instagram takes 2–10 JPEG photos between 4:5 portrait and 1.91:1 landscape, so every
    photo in a carousel is re-saved as a JPEG (max 1440 px wide) and trimmed into that range — like the Instagram app does. */
 const MAX_PHOTOS = 10, IG_MIN_RATIO = 4/5, IG_MAX_RATIO = 1.91;
+// Download links: the server sends the file as a download (phones save it to Downloads / Files), named after the post.
+function mediaFileName(item, url, i){
+  const ext = ((/\.([a-z0-9]{2,5})(?:[?#]|$)/i.exec(url||"")||[])[1] || (item.media && item.media.type==="video" ? "mp4" : "jpg")).toLowerCase();
+  const ref = item.libraryRef && item.libraryRef.name ? item.libraryRef.name.replace(/\.[^.]+$/, "") : "";
+  const base = ref || String(item.title||"sanjugo").replace(/[^\w]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "sanjugo";
+  return base + (i!=null ? "_"+(i+1) : "") + "." + ext;
+}
+function downloadHref(url, name){ return /^\/api\//.test(url||"") ? url + (url.includes("?") ? "&" : "?") + "download=" + encodeURIComponent(name) : url; }
+function mediaDownloads(item){
+  if(!item || !item.media || !item.media.fileUrl) return [];
+  const g = galleryOf(item);
+  return g ? g.map((ph, i)=>({url:ph.fileUrl, name:mediaFileName(item, ph.fileUrl, i)})) : [{url:item.media.fileUrl, name:mediaFileName(item, item.media.fileUrl)}];
+}
+function downloadAll(files){
+  files.forEach((f, i)=>setTimeout(()=>{ const a = document.createElement("a"); a.href = downloadHref(f.url, f.name); a.download = f.name; document.body.appendChild(a); a.click(); a.remove(); }, i*700));
+}
+function DownloadButton({item, size="sm", iconOnly}){
+  const files = mediaDownloads(item);
+  if(!files.length) return null;
+  const label = files.length>1 ? "Download "+files.length+" photos" : "Download";
+  if(iconOnly) return <button title={label} aria-label={label} onClick={e=>{ e.stopPropagation(); downloadAll(files); }}
+    style={{width:24, height:24, flexShrink:0, borderRadius:6, border:"1px solid var(--border)", background:"var(--surface)", color:"var(--ink-soft)", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center"}}><Icon name="download" size={12}/></button>;
+  return <Button size={size} icon="download" onClick={e=>{ e.stopPropagation(); downloadAll(files); }}>{label}</Button>;
+}
 const galleryOf = item => (item && item.media && Array.isArray(item.media.gallery) && item.media.gallery.length>1) ? item.media.gallery : null;
 async function carouselReadyPhoto(src, name){
   const url = typeof src==="string" ? src : URL.createObjectURL(src);
@@ -1876,9 +1901,12 @@ function ContentDetailDrawer({item, onClose}){
               </div>
             )}
             {item.media.fileUrl && (
-              <a href={item.media.fileUrl} target="_blank" rel="noopener noreferrer" style={{fontSize:12, fontWeight:700, color:"var(--accent)", textDecoration:"none", display:"flex", alignItems:"center", gap:5, marginTop:-8}}>
-                <Icon name="upload" size={13}/>Open original in a new tab
-              </a>
+              <div style={{display:"flex", alignItems:"center", gap:10, flexWrap:"wrap", marginTop:-6}}>
+                <DownloadButton item={item}/>
+                <a href={item.media.fileUrl} target="_blank" rel="noopener noreferrer" style={{fontSize:12, fontWeight:700, color:"var(--accent)", textDecoration:"none", display:"flex", alignItems:"center", gap:5}}>
+                  <Icon name="external" size={13}/>Open in a new tab
+                </a>
+              </div>
             )}
             {!item.libraryRef && item.media.fileUrl && item.status==="published" && (
               <div style={{display:"flex", alignItems:"center", gap:8, flexWrap:"wrap", padding:"9px 11px", borderRadius:8, border:"1px solid var(--border)", fontSize:12.5, color:"var(--ink-soft)"}}>
@@ -3801,6 +3829,7 @@ function CalendarCard({entry, onOpen, compact}){
       </div>
       {!compact && <span style={{fontSize:10.5, fontWeight:700, padding:"2px 8px", borderRadius:99, background:soft, color, whiteSpace:"nowrap", flexShrink:0}}>{label==="Approved"? "✓ " : ""}{label}</span>}
       <PlatformIcon platform={v.platform} size={11}/>
+      {!compact && <DownloadButton item={item} iconOnly/>}
     </div>
   );
 }
@@ -5574,6 +5603,18 @@ function PostAnalyticsDrawer({post, onClose}){
    a post worked, keep team notes, and start a new project from a winner. */
 const OUR_HANDLES = ["sanjugo", "sanjugo_restaurant", "sanjugouk", "sanjugo_london", "sanjugolondon"];
 const STUDY_DIMS = [["collab","Influencer"], ["promo","Promotion"], ["type","Content type"], ["branch","Branch"], ["dish","Dish"], ["platform","Platform"], ["weekday","Day"], ["slot","Time of day"]];
+// What each "Compare by" answers, in plain words.
+const STUDY_DIM_HELP = {
+  collab:"Each influencer's posts against our own. Views, how they compare with our usual, cost per 1,000 views, and whether to book them again.",
+  promo:"Average result of posts for each promotion or campaign. Did the offer pull people in?",
+  type:"Which kind of content (food close-up, behind the scenes, offer…) gets the most.",
+  branch:"Posts about Shoreditch vs Angel vs Victoria.",
+  dish:"Which dishes people watch and react to most.",
+  platform:"Instagram vs Facebook vs TikTok… for the same period.",
+  weekday:"Average for posts published on each day of the week. Tells you the best day to post.",
+  slot:"Average for posts published at each time of day (morning, lunch, evening…).",
+};
+const collabList = v=> String(v||"").split(/[\s,;]+|(?=@)/).map(x=>x.trim()).filter(x=>x.length>1).map(x=>x.startsWith("@")? x.toLowerCase() : "@"+x.toLowerCase());
 const STUDY_SLOTS = [["Morning",5,11], ["Lunch",11,14], ["Afternoon",14,17], ["Evening",17,21], ["Late",21,29]];
 const STUDY_DAYS = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
 const STUDY_CTA = ["see you", "save you a seat", "come by", "come in", "book", "link in bio", "visit", "order", "tag a friend", "dm", "join us", "swipe"];
@@ -5655,7 +5696,7 @@ function PublishedContentPage(){
       const m = e.manual; const title = (m.caption||"").split("\n")[0].slice(0,70) || (m.account+" collab");
       const eng = m.likes+m.comments+m.shares+m.saves;
       return {id:"m_"+e.key, key:e.key, manual:true, account:m.account, platform:m.platform, contentTitle:title, caption:m.caption, publishedAt:m.publishedAt, permalink:m.url,
-        views:m.views, reach:m.views, likes:m.likes, comments:m.comments, shares:m.shares, saves:m.saves, engagementRate: m.views? eng/m.views*100 : 0, gradient:grad(title), thumb:null, snapshots:[]};
+        views:m.views, reach:m.views, likes:m.likes, comments:m.comments, shares:m.shares, saves:m.saves, engagementRate: m.views? eng/m.views*100 : (m.likes+m.comments ? null : 0), gradient:grad(title), thumb:m.thumb||null, snapshots:[], fetch:m.fetch||null};
     });
     return [...real, ...manual].map(p=>{
       const item = p.contentId && items.get(p.contentId);
@@ -5666,6 +5707,7 @@ function PublishedContentPage(){
         if(saved[k]==="-") continue;
         if(saved[k]) tags[k] = saved[k]; else if(auto[k]){ tags[k] = auto[k]; isAuto[k] = true; }
       }
+      if(saved.cost && saved.cost!=="-" && tags.collab) tags.cost = saved.cost;
       const d = new Date(p.publishedAt);
       return {...p, item, tags, isAuto, weekday:studyDay(d), slot:studySlot(d), study:byKey[p.key]||null};
     });
@@ -5685,21 +5727,35 @@ function PublishedContentPage(){
   }, [inPeriod]);
   const timesUsual = p=>{ const u = (usual[p.platform]||{}).views; return u ? p.views/u : null; };
   const valueOf = (p, k)=> k==="platform" ? PLATFORM_META[p.platform].label : k==="weekday" ? p.weekday : k==="slot" ? p.slot : (p.tags[k] || null);
+  // A collab with two accounts counts for each of them.
+  const valuesOf = (p, k)=>{ const v = valueOf(p, k); return !v ? [] : k==="collab" ? collabList(v) : [v]; };
 
   const ql = q.trim().toLowerCase();
   const shown = inPeriod.filter(p=>
-    (!platform || p.platform===platform) && (!collabOnly || p.tags.collab) && (!pick || valueOf(p, pick.dim)===pick.value) &&
+    (!platform || p.platform===platform) && (!collabOnly || p.tags.collab) && (!pick || (pick.value==="Our own posts" ? !p.tags.collab : valuesOf(p, pick.dim).includes(pick.value))) &&
     (!ql || [p.contentTitle, p.caption, ...Object.values(p.tags)].join(" ").toLowerCase().includes(ql)));
-  const sorted = [...shown].sort((a,b)=> sort==="views" ? b.views-a.views : sort==="eng" ? b.engagementRate-a.engagementRate : sort==="usual" ? (timesUsual(b)||0)-(timesUsual(a)||0) : new Date(b.publishedAt)-new Date(a.publishedAt));
+  const sorted = [...shown].sort((a,b)=> sort==="views" ? b.views-a.views : sort==="eng" ? (b.engagementRate||0)-(a.engagementRate||0) : sort==="usual" ? (timesUsual(b)||0)-(timesUsual(a)||0) : new Date(b.publishedAt)-new Date(a.publishedAt));
 
   // Compare: average per tag value (for Influencer, posts without one count as "Our own posts").
   const base = inPeriod.filter(p=>(!platform || p.platform===platform) && (!collabOnly || p.tags.collab));
   const groups = {};
-  base.forEach(p=>{ const v = valueOf(p, dim) || (dim==="collab" ? "Our own posts" : null); if(!v) return; (groups[v] = groups[v]||[]).push(p); });
-  const bars = Object.entries(groups).map(([v, ps])=>({v, n:ps.length, val: metric==="views" ? ps.reduce((s,p)=>s+p.views,0)/ps.length : ps.reduce((s,p)=>s+p.engagementRate,0)/ps.length}))
-    .sort((a,b)=>b.val-a.val).slice(0, 8);
+  base.forEach(p=>{ const vs = valuesOf(p, dim); (vs.length ? vs : dim==="collab" ? ["Our own posts"] : []).forEach(v=>{ (groups[v] = groups[v]||[]).push(p); }); });
+  const engOf = ps=>{ const a = ps.filter(p=>p.engagementRate!=null); return a.length ? a.reduce((s,p)=>s+p.engagementRate,0)/a.length : 0; };
+  const bars = Object.entries(groups).map(([v, ps])=>({v, n:ps.length, val: metric==="views" ? ps.reduce((s,p)=>s+p.views,0)/ps.length : engOf(ps)}))
+    .sort((a,b)=>b.val-a.val).slice(0, dim==="collab" ? 30 : 10);
+  // Influencer scorecard: one row per account, our own posts as the baseline.
+  const score = dim==="collab" ? Object.entries(groups).map(([v, ps])=>{
+    const views = ps.reduce((s,p)=>s+p.views,0);
+    const xs = ps.map(timesUsual).filter(x=>x!=null);
+    const cost = ps.reduce((s,p)=>s+(Number(p.tags.cost)||0),0);
+    const last = ps.reduce((m,p)=>p.publishedAt>m? p.publishedAt : m, "");
+    const x = xs.length ? xs.reduce((s,a)=>s+a,0)/xs.length : null;
+    return {v, own: v==="Our own posts", n:ps.length, avg: views/ps.length, x, eng: engOf(ps), cost, per1k: cost && views ? cost/views*1000 : null, last};
+  }).sort((a,b)=> a.own? 1 : b.own? -1 : b.avg-a.avg) : [];
+  const verdict = r=> r.own || r.x==null ? null : r.x>=1.3 ? ["Book again", "var(--green)", "var(--green-soft)"] : r.x>=0.8 ? ["Okay", "var(--amber)", "var(--amber-soft)"] : ["Skip", "var(--red)", "var(--red-soft)"];
+  const dimLabel = STUDY_DIMS.find(d=>d[0]===dim)[1];
   const maxBar = Math.max(1, ...bars.map(b=>b.val));
-  const untagged = base.filter(p=>!valueOf(p, dim)).length;
+  const untagged = base.filter(p=>!valuesOf(p, dim).length).length;
 
   // When it works: average engagement per day × time of day.
   const heat = {};
@@ -5715,14 +5771,13 @@ function PublishedContentPage(){
   return (
     <div>
       <PageHeader title="Published Content" subtitle={inPeriod.length+" posts · study what worked"+(realData && realData.lastPull? " · stats "+fmtDateTime(realData.lastPull.at) : "")}
-        action={<Button variant="primary" icon="plus" onClick={()=>setAdding({})}>Add influencer post</Button>}/>
+        action={<Button variant="primary" icon="plus" onClick={()=>setAdding({})}>Add collab post</Button>}/>
 
       <div style={{display:"flex", gap:6, flexWrap:"wrap", alignItems:"center", marginBottom:14}}>
         {[[30,"30 days"],[90,"90 days"],[365,"1 year"],[0,"All time"]].map(([d,l])=><React.Fragment key={d}>{chip(period===d, l, ()=>setPeriod(d))}</React.Fragment>)}
         <span style={{width:6}}/>
         <Select value={platform} onChange={setPlatform} options={[{value:"", label:"All platforms"}, ...Object.entries(PLATFORM_META).map(([k,m])=>({value:k, label:m.label}))]} style={{minWidth:150}}/>
         {chip(collabOnly, "Collabs only", ()=>setCollabOnly(v=>!v))}
-        {pick && chip(true, "✕ "+pick.value, ()=>setPick(null))}
         <span style={{flex:1}}/>
         <div className="cf-search" style={{position:"relative", width:"min(100%, 240px)"}}>
           <Icon name="search" size={15} style={{position:"absolute", left:10, top:9, color:"var(--ink-mute)"}}/>
@@ -5730,23 +5785,44 @@ function PublishedContentPage(){
         </div>
       </div>
 
-      <div className="cf-study-top">
+      <div className={"cf-study-top"+(dim==="collab" ? " cf-study-wide" : "")}>
         <Card style={{padding:16}}>
-          <div style={{display:"flex", alignItems:"center", gap:8, flexWrap:"wrap", marginBottom:12}}>
+          <div style={{display:"flex", alignItems:"center", gap:8, flexWrap:"wrap", marginBottom:6}}>
             <span style={{fontWeight:600, fontSize:14}}>Compare by</span>
             <Select value={dim} onChange={v=>{ setDim(v); setPick(null); }} options={STUDY_DIMS.map(([k,l])=>({value:k, label:l}))} style={{minWidth:140}}/>
             <span style={{flex:1}}/>
-            {chip(metric==="views", "Avg views", ()=>setMetric("views"))}{chip(metric==="eng", "Avg engagement", ()=>setMetric("eng"))}
+            {dim!=="collab" && <>{chip(metric==="views", "Avg views", ()=>setMetric("views"))}{chip(metric==="eng", "Avg engagement", ()=>setMetric("eng"))}</>}
           </div>
-          {!bars.length ? <div style={{fontSize:12.5, color:"var(--ink-mute)", padding:"10px 0"}}>Nothing tagged with {STUDY_DIMS.find(d=>d[0]===dim)[1].toLowerCase()} yet. Open a post and add it.</div> : bars.map(b=>(
+          <div style={{fontSize:12, color:"var(--ink-mute)", lineHeight:1.45, marginBottom:12}}>{STUDY_DIM_HELP[dim]} <b style={{color:"var(--ink-soft)"}}>Tap a row to see only those posts.</b></div>
+          {!bars.length ? <div style={{fontSize:12.5, color:"var(--ink-mute)", padding:"10px 0"}}>Nothing tagged with {dimLabel.toLowerCase()} yet. Open a post and add it.</div>
+          : dim==="collab" ? (
+            <div style={{overflowX:"auto", margin:"0 -4px"}}>
+              <table className="cf-score" style={{width:"100%", borderCollapse:"collapse", fontSize:12.5, minWidth:520}}>
+                <thead><tr>{["Influencer","Posts","Avg views","vs our usual","Eng.","Cost","£ / 1k views","Last",""].map((h,i)=><th key={i} style={{textAlign: i===0? "left":"right"}}>{h}</th>)}</tr></thead>
+                <tbody>{score.map(r=>{ const vd = verdict(r); const on = pick && pick.value===r.v; return (
+                  <tr key={r.v} onClick={()=>setPick(on ? null : {dim, value:r.v})} title="Show only these posts" style={{cursor:"pointer", background: on? "var(--accent-soft)" : undefined, color: r.own? "var(--ink-mute)" : undefined}}>
+                    <td style={{fontWeight:700, maxWidth:150, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>{r.v}</td>
+                    <td className="num">{r.n}</td>
+                    <td className="num"><b>{fmtNum(Math.round(r.avg))}</b></td>
+                    <td className="num" style={{color: r.x==null? undefined : r.x>=1.3? "var(--green)" : r.x<0.8? "var(--red)" : undefined, fontWeight:600}}>{r.own? "baseline" : r.x==null? "—" : r.x.toFixed(1).replace(/\.0$/,"")+"×"}</td>
+                    <td className="num">{r.eng ? fmtPct(r.eng) : "—"}</td>
+                    <td className="num">{r.cost ? "£"+Math.round(r.cost) : "—"}</td>
+                    <td className="num">{r.per1k!=null ? "£"+r.per1k.toFixed(2) : "—"}</td>
+                    <td className="num" style={{whiteSpace:"nowrap"}}>{r.last ? fmtDate(r.last, {day:"numeric", month:"short"}) : ""}</td>
+                    <td style={{textAlign:"right"}}>{vd && <span style={{fontSize:10.5, fontWeight:700, padding:"2px 7px", borderRadius:99, background:vd[2], color:vd[1], whiteSpace:"nowrap"}}>{vd[0]}</span>}</td>
+                  </tr>); })}</tbody>
+              </table>
+              <div style={{fontSize:11, color:"var(--ink-mute)", marginTop:8}}>"vs our usual" = their views ÷ our usual views on that platform. Book again ≥ 1.3×, Skip &lt; 0.8×. Add a cost on each collab post to see £ per 1,000 views.</div>
+            </div>
+          ) : bars.map(b=>(
             <button key={b.v} onClick={()=>setPick(pick && pick.value===b.v ? null : {dim, value:b.v})} title="Show only these posts"
-              style={{width:"100%", display:"grid", gridTemplateColumns:"minmax(90px, 140px) 1fr auto", gap:10, alignItems:"center", padding:"5px 0", border:"none", background:"none", cursor:"pointer", color:"var(--ink)", textAlign:"left"}}>
-              <span style={{fontSize:12.5, fontWeight:600, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis", color: b.v==="Our own posts"? "var(--ink-mute)":"var(--ink)"}}>{b.v}</span>
-              <span style={{height:9, borderRadius:5, background:"var(--surface-2)"}}><span style={{display:"block", height:9, borderRadius:5, width:Math.max(3, b.val/maxBar*100)+"%", background: b.v==="Our own posts"? "var(--ink-mute)" : pick && pick.value===b.v ? "var(--accent-dark)" : "var(--accent)"}}/></span>
+              style={{width:"100%", display:"grid", gridTemplateColumns:"minmax(90px, 140px) 1fr auto", gap:10, alignItems:"center", padding:"5px 6px", margin:"0 -6px", borderRadius:8, border:"none", background: pick && pick.value===b.v ? "var(--accent-soft)" : "none", cursor:"pointer", color:"var(--ink)", textAlign:"left"}}>
+              <span style={{fontSize:12.5, fontWeight:600, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>{b.v}</span>
+              <span style={{height:9, borderRadius:5, background:"var(--surface-2)"}}><span style={{display:"block", height:9, borderRadius:5, width:Math.max(3, b.val/maxBar*100)+"%", background: pick && pick.value===b.v ? "var(--accent-dark)" : "var(--accent)"}}/></span>
               <span className="num" style={{fontSize:12, color:"var(--ink-soft)", whiteSpace:"nowrap"}}><b style={{color:"var(--ink)"}}>{metric==="views"? fmtNum(Math.round(b.val)) : fmtPct(b.val)}</b> · {b.n} post{b.n>1?"s":""}</span>
             </button>
           ))}
-          {untagged>0 && dim!=="collab" && <div style={{fontSize:11.5, color:"var(--ink-mute)", marginTop:6}}>{untagged} post{untagged>1?"s":""} without a {STUDY_DIMS.find(d=>d[0]===dim)[1].toLowerCase()} tag</div>}
+          {untagged>0 && dim!=="collab" && <div style={{fontSize:11.5, color:"var(--ink-mute)", marginTop:6}}>{untagged} post{untagged>1?"s":""} without a {dimLabel.toLowerCase()} tag</div>}
         </Card>
         <Card style={{padding:16}}>
           <div style={{fontWeight:600, fontSize:14, marginBottom:12}}>When it works <span style={{fontSize:11.5, fontWeight:500, color:"var(--ink-mute)"}}>avg engagement</span></div>
@@ -5766,6 +5842,9 @@ function PublishedContentPage(){
 
       <div style={{display:"flex", alignItems:"center", gap:8, margin:"18px 0 10px"}}>
         <span style={{fontWeight:600, fontSize:14}}>{sorted.length} post{sorted.length===1?"":"s"}</span>
+        {pick && <span style={{display:"inline-flex", alignItems:"center", gap:6, fontSize:12.5, padding:"4px 6px 4px 10px", borderRadius:99, background:"var(--accent-soft)", color:"var(--accent-dark)", fontWeight:600}}>
+          {(STUDY_DIMS.find(d=>d[0]===pick.dim)||[,""])[1]}: {pick.value}
+          <button onClick={()=>setPick(null)} aria-label="Show all posts" style={{border:"none", background:"none", cursor:"pointer", color:"inherit", display:"flex", padding:2}}><Icon name="x" size={13}/></button></span>}
         <span style={{flex:1}}/>
         <Select value={sort} onChange={setSort} options={[{value:"newest", label:"Newest"}, {value:"views", label:"Most views"}, {value:"eng", label:"Best engagement"}, {value:"usual", label:"Most above usual"}]} style={{minWidth:170}}/>
       </div>
@@ -5776,14 +5855,15 @@ function PublishedContentPage(){
               <div style={{height:120, position:"relative"}}>
                 <PostThumb post={p} radius={0} iconSize={24}/>
                 {x!=null && (x>=1.5 || x<=0.6) && <span style={{position:"absolute", top:8, right:8, fontSize:11, fontWeight:700, padding:"2px 8px", borderRadius:99, background: x>=1.5? "var(--green)":"var(--red)", color:"#fff"}}>{x>=1.5? x.toFixed(1).replace(/\.0$/,"")+"× usual" : "below usual"}</span>}
-                {p.manual && <span style={{position:"absolute", top:8, left:8, fontSize:11, fontWeight:700, padding:"2px 8px", borderRadius:99, background:"rgba(0,0,0,.6)", color:"#fff"}}>{p.account}</span>}
+                {p.manual && <span style={{position:"absolute", top:8, left:8, right:8, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", width:"fit-content", maxWidth:"calc(100% - 16px)", fontSize:11, fontWeight:700, padding:"2px 8px", borderRadius:99, background:"rgba(0,0,0,.6)", color:"#fff"}}>{p.account}</span>}
               </div>
               <div style={{padding:12}}>
                 <div style={{display:"flex", alignItems:"center", gap:6, fontSize:11, color:"var(--ink-mute)", fontWeight:600, marginBottom:5}}><PlatformIcon platform={p.platform} size={11}/>{p.weekday} {fmtDate(p.publishedAt, {day:"numeric", month:"short"})} · {new Date(p.publishedAt).toLocaleTimeString("en-GB", {hour:"2-digit", minute:"2-digit"})}</div>
                 <div style={{fontSize:13, fontWeight:600, lineHeight:1.35, marginBottom:8, overflow:"hidden", display:"-webkit-box", WebkitLineClamp:2, WebkitBoxOrient:"vertical"}}>{hook}</div>
-                <div style={{display:"flex", gap:12, fontSize:12, color:"var(--ink-soft)", marginBottom:8}}><span><b className="num" style={{color:"var(--ink)"}}>{fmtNum(p.views)}</b> views</span><span><b className="num" style={{color:"var(--ink)"}}>{fmtPct(p.engagementRate)}</b> eng.</span></div>
+                <div style={{display:"flex", gap:12, fontSize:12, color:"var(--ink-soft)", marginBottom:8}}><span><b className="num" style={{color:"var(--ink)"}}>{fmtNum(p.views)}</b> views</span>{p.engagementRate!=null ? <span><b className="num" style={{color:"var(--ink)"}}>{fmtPct(p.engagementRate)}</b> eng.</span> : <span><b className="num" style={{color:"var(--ink)"}}>{fmtNum(p.likes)}</b> likes</span>}
+                  {p.fetch && p.fetch.status==="pending" && <span style={{color:"var(--blue)"}}>fetching…</span>}</div>
                 <div style={{display:"flex", gap:4, flexWrap:"wrap"}}>
-                  {Object.entries(p.tags).map(([k, v])=><span key={k} style={{fontSize:10.5, fontWeight:600, padding:"2px 7px", borderRadius:99, background: k==="collab"? "var(--violet-soft)" : "var(--surface-2)", color: k==="collab"? "var(--violet)" : "var(--ink-soft)", whiteSpace:"nowrap"}}>{v}</span>)}
+                  {Object.entries(p.tags).filter(([k])=>k!=="cost").map(([k, v])=><span key={k} style={{fontSize:10.5, fontWeight:600, padding:"2px 7px", borderRadius:99, background: k==="collab"? "var(--violet-soft)" : "var(--surface-2)", color: k==="collab"? "var(--violet)" : "var(--ink-soft)", whiteSpace:"nowrap"}}>{v}</span>)}
                   {(p.study && p.study.notes && p.study.notes.length>0) && <span style={{fontSize:10.5, color:"var(--ink-mute)"}}>💬 {p.study.notes.length}</span>}
                 </div>
               </div>
@@ -5793,7 +5873,7 @@ function PublishedContentPage(){
       )}
       {open && <StudyDrawer post={open} usual={usual[open.platform]||{}} onClose={()=>setOpenKey(null)} reload={reload} onEdit={()=>{ setAdding(open); setOpenKey(null); }} campaigns={campaigns} known={[...new Set(all.map(p=>p.tags.collab).filter(Boolean))]}/>}
       {adding && <AddInfluencerPost post={adding.key ? adding : null} onClose={()=>setAdding(null)} onSaved={()=>{ setAdding(null); reload(); }}/>}
-      <style>{`.cf-study-top{display:grid; grid-template-columns:minmax(0,1.25fr) minmax(0,1fr); gap:14px;} @media (max-width:900px){ .cf-study-top{grid-template-columns:1fr;} }`}</style>
+      <style>{`.cf-score th{font-size:11px; font-weight:700; color:var(--ink-mute); padding:6px 6px; border-bottom:1px solid var(--border); white-space:nowrap;} .cf-score td{padding:7px 6px; border-bottom:1px solid var(--border); text-align:right;} .cf-score td:first-child{text-align:left;} .cf-score tbody tr:hover{background:var(--surface-2);} .cf-study-top{display:grid; grid-template-columns:minmax(0,1.25fr) minmax(0,1fr); gap:14px;} .cf-study-top.cf-study-wide{grid-template-columns:minmax(0,1fr);} @media (max-width:900px){ .cf-study-top{grid-template-columns:minmax(0,1fr);} }`}</style>
     </div>
   );
 }
@@ -5834,13 +5914,12 @@ function StudyDrawer({post, usual, onClose, reload, onEdit, campaigns, known}){
     </div>
   );
   const input = {width:"100%", borderRadius:8, border:"1px solid var(--border)", padding:"7px 9px", fontSize:13, background:"var(--surface)", color:"var(--ink)"};
-  const TagInput = ({k, placeholder, list})=>{
-    const [v, setV] = useState(post.tags[k]||"");
-    useEffect(()=>setV(post.tags[k]||""), [post.tags[k]]);
-    return <><input value={v} onChange={e=>setV(e.target.value)} onBlur={()=>{ if(v!==(post.tags[k]||"")) setTag(k, v); }} onKeyDown={e=>{ if(e.key==="Enter") e.currentTarget.blur(); }} placeholder={placeholder} list={list? "dl_"+k : undefined} style={input}/>
-      {list && <datalist id={"dl_"+k}>{list.map(o=><option key={o} value={o}/>)}</datalist>}</>;
-  };
-  const metrics = [["Views", post.views], ["Likes", post.likes], ["Comments", post.comments], ["Shares", post.shares], ["Saves", post.saves], ["Engagement", fmtPct(post.engagementRate)]];
+  const TagInput = ({k, placeholder, list, numeric})=><StudyTagField key={k} value={post.tags[k]||""} onSave={v=>setTag(k, v)} placeholder={placeholder} list={list} listId={"dl_"+k} numeric={numeric}/>;
+  async function refetch(){ setBusy(true); try{ await send("fetch", {key:post.key}); toast("Asking Instagram for the latest numbers…"); await pollStudy(reload, post.key); }catch(e){ toast(e.message, "danger"); } setBusy(false); }
+  const f = post.fetch;
+  const metrics = post.manual
+    ? [["Views", post.views], ["Likes", post.likes], ["Comments", post.comments], ...(post.shares||post.saves ? [["Shares", post.shares], ["Saves", post.saves]] : []), ["Engagement", post.engagementRate!=null ? fmtPct(post.engagementRate) : "—"]]
+    : [["Views", post.views], ["Likes", post.likes], ["Comments", post.comments], ["Shares", post.shares], ["Saves", post.saves], ["Engagement", fmtPct(post.engagementRate)]];
   return (
     <Drawer open onClose={onClose} width={640}>
       <div style={{padding:20}}>
@@ -5850,7 +5929,8 @@ function StudyDrawer({post, usual, onClose, reload, onEdit, campaigns, known}){
             <div style={{display:"flex", alignItems:"center", gap:6, fontSize:12, color:"var(--ink-mute)", fontWeight:600}}><PlatformIcon platform={post.platform} size={12}/>{PLATFORM_META[post.platform].label}{post.type? " "+post.type.toLowerCase() : ""} · {post.weekday} {fmtDateTime(post.publishedAt)}</div>
             <div style={{fontSize:16, fontWeight:700, margin:"4px 0 6px", lineHeight:1.3}}>{c.hook || post.contentTitle}</div>
             {x!=null && <span style={{fontSize:12, fontWeight:700, color: x>=1.2? "var(--green)" : x<=0.8? "var(--red)" : "var(--ink-soft)"}}>{x.toFixed(1).replace(/\.0$/,"")}× our usual {PLATFORM_META[post.platform].label} views</span>}
-            {post.manual && <div style={{fontSize:12, color:"var(--ink-mute)"}}>Posted by {post.account} · numbers entered by hand</div>}
+            {post.manual && <div style={{fontSize:12, color:"var(--ink-mute)"}}>Posted by {post.account} · {f && f.status==="ok" ? "numbers from Instagram, "+fmtDateTime(f.at)+" (refreshed nightly)" : f && f.status==="pending" ? "fetching numbers from Instagram…" : "numbers entered by hand"}</div>}
+            {post.manual && f && (f.status==="notfound" || f.status==="error") && <div style={{fontSize:12, color:"var(--amber)", marginTop:4, lineHeight:1.4}}>{f.error}</div>}
           </div>
           <IconButton icon="x" title="Close" onClick={onClose}/>
         </div>
@@ -5861,7 +5941,8 @@ function StudyDrawer({post, usual, onClose, reload, onEdit, campaigns, known}){
           <Button size="sm" variant="primary" icon="workspace" onClick={template}>Make another like it</Button>
           {post.permalink && <Button size="sm" icon="external" onClick={()=>window.open(post.permalink, "_blank", "noopener")}>Open post</Button>}
           {!post.manual && post.snapshots && post.snapshots.length>1 && <Button size="sm" icon="trend" onClick={()=>setTimeline(true)}>Growth over time</Button>}
-          {post.manual && <Button size="sm" icon="edit" onClick={onEdit}>Edit numbers</Button>}
+          {post.manual && post.platform==="instagram" && <Button size="sm" icon="refresh" onClick={refetch} disabled={busy}>{busy? "Fetching…" : "Refresh numbers"}</Button>}
+          {post.manual && <Button size="sm" icon="edit" onClick={onEdit}>Edit</Button>}
           {post.manual && <ConfirmButton confirmLabel="Remove this post?" onConfirm={async()=>{ try{ await send("delete", {key:post.key}); onClose(); reload(); }catch(e){ toast(e.message, "danger"); } }}>Remove</ConfirmButton>}
         </div>
 
@@ -5875,11 +5956,12 @@ function StudyDrawer({post, usual, onClose, reload, onEdit, campaigns, known}){
 
         <SectionTitle>Tags</SectionTitle>
         <div style={{marginBottom:18}}>
-          {tagRow("collab", "Influencer", <TagInput k="collab" placeholder="@handle, or leave empty for our own" list={known}/>)}
-          {tagRow("promo", "Promotion", <TagInput k="promo" placeholder="Campaign or offer" list={campaigns.map(x=>x.name)}/>)}
+          {tagRow("collab", "Influencer", TagInput({k:"collab", placeholder:"@handle (two? @one @two) — empty = our own", list:known}))}
+          {post.tags.collab && tagRow("cost", "Cost (£)", TagInput({k:"cost", placeholder:"Fee + free food, e.g. 150", numeric:true}))}
+          {tagRow("promo", "Promotion", TagInput({k:"promo", placeholder:"Campaign or offer", list:campaigns.map(x=>x.name)}))}
           {tagRow("type", "Content type", <Select value={post.tags.type||""} onChange={v=>setTag("type", v)} options={[{value:"", label:"—"}, ...Object.values(LIB_CATEGORY).map(v=>({value:v, label:v}))]}/>)}
           {tagRow("branch", "Branch", <Select value={post.tags.branch||""} onChange={v=>setTag("branch", v)} options={[{value:"", label:"—"}, ...["Shoreditch","Angel","Victoria","All branches"].map(v=>({value:v, label:v}))]}/>)}
-          {tagRow("dish", "Dish", <TagInput k="dish" placeholder="e.g. Wagyu Beef Roll" list={Object.values(LIB_DISH)}/>)}
+          {tagRow("dish", "Dish", TagInput({k:"dish", placeholder:"e.g. Wagyu Beef Roll", list:Object.values(LIB_DISH)}))}
         </div>
 
         <SectionTitle action={<Button size="sm" icon="zap" onClick={why} disabled={busy}>{busy? "Thinking…" : st.why? "Ask again" : "Explain"}</Button>}>Why it worked</SectionTitle>
@@ -5903,45 +5985,116 @@ function StudyDrawer({post, usual, onClose, reload, onEdit, campaigns, known}){
   );
 }
 
-// Influencer posts on their own accounts: the API can't read their numbers, so they're typed in from their insights.
+// One tag box: saves when you leave it, press Enter, pick a suggestion or tap ✕ — and also if the panel closes mid-edit.
+function StudyTagField({value, onSave, placeholder, list, listId, numeric}){
+  const [v, setV] = useState(value);
+  const [saved, setSaved] = useState(false);
+  const live = useRef({v:value, value, onSave});
+  live.current = {v, value, onSave};
+  useEffect(()=>{ setV(value); }, [value]);
+  useEffect(()=>()=>{ const c = live.current; if(c.v!==c.value) c.onSave(c.v); }, []);
+  const commit = next=>{ const x = next===undefined ? v : next; if(x!==value){ onSave(x); setSaved(true); setTimeout(()=>setSaved(false), 1500); } };
+  const input = {width:"100%", borderRadius:8, border:"1px solid var(--border)", padding:"7px 30px 7px 9px", fontSize:13, background:"var(--surface)", color:"var(--ink)"};
+  return (
+    <div style={{position:"relative", display:"flex", alignItems:"center"}}>
+      <input value={v} inputMode={numeric? "decimal" : undefined} placeholder={placeholder} list={list? listId : undefined} style={input}
+        onChange={e=>{ const x = numeric ? e.target.value.replace(/[^\d.]/g, "") : e.target.value; setV(x); if(list && list.includes(x)) commit(x); }}
+        onBlur={()=>commit()} onKeyDown={e=>{ if(e.key==="Enter") e.currentTarget.blur(); }}/>
+      {saved ? <span style={{position:"absolute", right:8, fontSize:11, fontWeight:700, color:"var(--green)"}}>✓</span>
+        : v && <button type="button" title="Remove" aria-label="Remove" onMouseDown={e=>e.preventDefault()} onClick={()=>{ setV(""); commit(""); }}
+          style={{position:"absolute", right:4, width:22, height:22, border:"none", background:"none", cursor:"pointer", color:"var(--ink-mute)", display:"flex", alignItems:"center", justifyContent:"center"}}><Icon name="x" size={13}/></button>}
+      {list && <datalist id={listId}>{list.map(o=><option key={o} value={o}/>)}</datalist>}
+    </div>
+  );
+}
+// After asking Make for a collab's numbers: check back every few seconds until they arrive (or ~1 minute).
+async function pollStudy(reload, key, tries=20){
+  for(let i=0; i<tries; i++){
+    await new Promise(r=>setTimeout(r, 3000));
+    const d = await fetch("/api/study", {cache:"no-store"}).then(r=>r.json()).catch(()=>null);
+    const e = d && (d.entries||[]).find(x=>x.key===key);
+    const st = e && e.manual && e.manual.fetch && e.manual.fetch.status;
+    if(st && st!=="pending"){ await reload(); return e; }
+  }
+  await reload();
+  return null;
+}
+
+// Collabs posted on someone else's account: paste the link and their @handle(s), and Instagram's numbers are
+// fetched through Make (Business / Creator accounts). Anything else, or if that fails, is typed in by hand.
 function AddInfluencerPost({post, onClose, onSaved}){
   const {dispatch} = useApp();
   const send = useStudyPost();
-  const m = post ? {url:post.permalink, platform:post.platform, account:post.account, caption:post.caption, views:post.views, likes:post.likes, comments:post.comments, shares:post.shares, saves:post.saves, publishedAt:isoToLocalInput(post.publishedAt)} : null;
-  const [f, setF] = useState(m || {url:"", platform:"instagram", account:"", caption:"", views:"", likes:"", comments:"", shares:"", saves:"", publishedAt:isoToLocalInput(new Date().toISOString())});
+  const m = post ? {url:post.permalink, platform:post.platform, account:post.account, caption:post.caption, views:post.views, likes:post.likes, comments:post.comments, shares:post.shares, saves:post.saves, publishedAt:isoToLocalInput(post.publishedAt), cost:post.tags && post.tags.cost || ""} : null;
+  const [f, setF] = useState(m || {url:"", platform:"instagram", account:"", caption:"", views:"", likes:"", comments:"", shares:"", saves:"", publishedAt:isoToLocalInput(new Date().toISOString()), cost:""});
   const [busy, setBusy] = useState(false);
+  const [byHand, setByHand] = useState(!!post);
+  const [status, setStatus] = useState(null); // {state:"fetching"|"ok"|"fail", text}
+  const [savedKey, setSavedKey] = useState(post && post.key || null); // after a first save, later saves edit the same entry
   const set = patch=>setF(x=>({...x, ...patch}));
+  const isIg = f.platform==="instagram";
+  const handles = collabList(f.account);
   function onUrl(u){
     const patch = {url:u};
     const e = wsEmbed(u); if(e.platform) patch.platform = e.platform;
-    const h = /tiktok\.com\/@([\w.]+)/i.exec(u); if(h && !f.account) patch.account = "@"+h[1];
+    const h = /tiktok\.com\/@([\w.]+)/i.exec(u) || /instagram\.com\/(?!p\/|reels?\/|tv\/)([\w.]+)\/(?:p|reels?|tv)\//i.exec(u);
+    if(h && !f.account) patch.account = "@"+h[1];
     set(patch);
   }
-  async function save(){
+  async function save(fetchNow){
     setBusy(true);
-    try{ await send("manual", {key: post && post.key, manual:{...f, publishedAt: f.publishedAt ? new Date(f.publishedAt).toISOString() : ""}}); dispatch({type:"ADD_TOAST", message: post? "Updated" : "Influencer post added"}); onSaved(); }
-    catch(e){ dispatch({type:"ADD_TOAST", message:e.message, variant:"danger"}); }
+    try{
+      const r = await send("manual", {key: savedKey, manual:{...f, fetch: !!fetchNow, publishedAt: f.publishedAt && (byHand || post) ? new Date(f.publishedAt).toISOString() : ""}});
+      if(!fetchNow){ dispatch({type:"ADD_TOAST", message: post? "Saved" : "Collab post added"}); onSaved(); return; }
+      const fe = r.entry && r.entry.manual && r.entry.manual.fetch;
+      if(r.entry && r.entry.key) setSavedKey(r.entry.key);
+      if(fe && fe.status==="error"){ setStatus({state:"fail", text:fe.error}); setByHand(true); setBusy(false); return; }
+      setStatus({state:"fetching", text:"Asking Instagram for "+handles.join(" / ")+"'s numbers… this takes up to a minute."});
+      const e = await pollStudy(async()=>{}, r.entry.key);
+      const done = e && e.manual && e.manual.fetch;
+      if(done && done.status==="ok"){
+        dispatch({type:"ADD_TOAST", message:"Collab added — "+fmtNum(e.manual.views)+" views, "+fmtNum(e.manual.likes)+" likes"});
+        onSaved(); return;
+      }
+      setStatus({state:"fail", text: done && done.error ? done.error+" It's saved — add the numbers below." : "Instagram hasn't answered yet. It's saved and will retry tonight — or add the numbers below."});
+      setByHand(true);
+      setSavedKey(r.entry.key);
+    }catch(e){ dispatch({type:"ADD_TOAST", message:e.message, variant:"danger"}); }
     setBusy(false);
   }
   const input = {width:"100%", borderRadius:9, border:"1px solid var(--border)", padding:"8px 10px", fontSize:13, background:"var(--surface)", color:"var(--ink)"};
-  const lbl = t=> <label style={{fontSize:12, fontWeight:700, display:"block", marginBottom:5}}>{t}</label>;
+  const lbl = (t, hint)=> <label style={{fontSize:12, fontWeight:700, display:"block", marginBottom:5}}>{t}{hint && <span style={{fontWeight:500, color:"var(--ink-mute)"}}> {hint}</span>}</label>;
+  const canFetch = isIg && /instagram\.com\/.*(p|reels?|tv)\//i.test(f.url) && handles.length>0;
   return (
-    <Modal open onClose={onClose} width={520}>
+    <Modal open onClose={onClose} width={540}>
       <div style={{padding:20}}>
-        <h3 style={{margin:"0 0 4px", fontSize:17}}>{post? "Edit influencer post" : "Add influencer post"}</h3>
-        <div style={{fontSize:12.5, color:"var(--ink-mute)", marginBottom:14}}>For collabs posted on the influencer's own account. Copy the numbers from their insights.</div>
+        <h3 style={{margin:"0 0 4px", fontSize:17}}>{post && post.permalink ? "Edit collab post" : "Add collab post"}</h3>
+        <div style={{fontSize:12.5, color:"var(--ink-mute)", marginBottom:14, lineHeight:1.45}}>For collabs that live on the other account (Instagram only gives us posts our own account owns). Paste the link and who posted it — we fetch the views, likes and comments and refresh them every night.</div>
         <div style={{marginBottom:10}}>{lbl("Link to the post")}<input value={f.url} onChange={e=>onUrl(e.target.value)} placeholder="https://www.instagram.com/reel/…" style={input}/></div>
-        <div style={{display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:10, marginBottom:10}}>
-          <div>{lbl("Influencer")}<input value={f.account} onChange={e=>set({account:e.target.value})} placeholder="@londonfoodie" style={input}/></div>
-          <div>{lbl("Platform")}<Select value={f.platform} onChange={v=>set({platform:v})} options={["instagram","tiktok","facebook","youtube"].map(k=>({value:k, label:PLATFORM_META[k].label}))}/></div>
-          <div>{lbl("Posted")}<input type="datetime-local" value={f.publishedAt} onChange={e=>set({publishedAt:e.target.value})} style={input}/></div>
+        <div style={{display:"grid", gridTemplateColumns:"1.4fr 1fr", gap:10, marginBottom:10}}>
+          <div>{lbl("Who posted it", "(two? @one @two)")}<input value={f.account} onChange={e=>set({account:e.target.value})} placeholder="@invited.app @daniafgx" style={input} autoCapitalize="off" autoCorrect="off"/></div>
+          <div>{lbl("Cost £", "(optional)")}<input inputMode="decimal" value={f.cost} onChange={e=>set({cost:e.target.value.replace(/[^\d.]/g,"")})} placeholder="fee + free food" style={input}/></div>
         </div>
-        <div style={{display:"grid", gridTemplateColumns:"repeat(5, 1fr)", gap:8, marginBottom:10}}>
-          {["views","likes","comments","shares","saves"].map(k=><div key={k}>{lbl(k[0].toUpperCase()+k.slice(1))}<input inputMode="numeric" value={f[k]} onChange={e=>set({[k]:e.target.value.replace(/[^\d]/g,"")})} style={input}/></div>)}
+        {status && <div style={{fontSize:12.5, lineHeight:1.45, padding:"9px 11px", borderRadius:9, marginBottom:10, background: status.state==="fail"? "var(--amber-soft)" : "var(--blue-soft)", color: status.state==="fail"? "var(--amber)" : "var(--blue)", fontWeight:600}}>{status.state==="fetching" && "⏳ "}{status.text}</div>}
+        {!byHand && <button onClick={()=>setByHand(true)} style={{border:"none", background:"none", padding:0, marginBottom:12, color:"var(--accent)", fontWeight:600, fontSize:12.5, cursor:"pointer"}}>{isIg? "Or type the numbers in yourself" : "Add the numbers"} ›</button>}
+        {(byHand || !isIg) && <>
+          <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, marginBottom:10}}>
+            <div>{lbl("Platform")}<Select value={f.platform} onChange={v=>set({platform:v})} options={["instagram","tiktok","facebook","youtube"].map(k=>({value:k, label:PLATFORM_META[k].label}))}/></div>
+            <div>{lbl("Posted")}<input type="datetime-local" value={f.publishedAt} onChange={e=>set({publishedAt:e.target.value})} style={input}/></div>
+          </div>
+          <div className="cf-infl-nums" style={{display:"grid", gridTemplateColumns:"repeat(5, 1fr)", gap:8, marginBottom:10}}>
+            {["views","likes","comments","shares","saves"].map(k=><div key={k}>{lbl(k[0].toUpperCase()+k.slice(1))}<input inputMode="numeric" value={f[k]} onChange={e=>set({[k]:e.target.value.replace(/[^\d]/g,"")})} style={input}/></div>)}
+          </div>
+          <div style={{marginBottom:14}}>{lbl("Caption", "(optional)")}<textarea value={f.caption} onChange={e=>set({caption:e.target.value})} rows={3} style={{...input, fontFamily:"inherit", resize:"vertical"}}/></div>
+        </>}
+        <div style={{display:"flex", justifyContent:"flex-end", gap:8, flexWrap:"wrap"}}>
+          <Button onClick={onClose}>{status && status.state==="fail" ? "Close" : "Cancel"}</Button>
+          {(byHand || !isIg) && <Button variant={isIg && !status ? undefined : "primary"} onClick={()=>save(false)} disabled={busy || !f.url.trim()}>{busy && !status? "Saving…" : "Save"}</Button>}
+          {isIg && !(status && status.state==="fail") && <Button variant="primary" icon="refresh" onClick={()=>save(true)} disabled={busy || !canFetch}>{busy? "Fetching…" : "Add & fetch numbers"}</Button>}
         </div>
-        <div style={{marginBottom:14}}>{lbl("Caption (optional)")}<textarea value={f.caption} onChange={e=>set({caption:e.target.value})} rows={4} style={{...input, fontFamily:"inherit", resize:"vertical"}}/></div>
-        <div style={{display:"flex", justifyContent:"flex-end", gap:8}}><Button onClick={onClose}>Cancel</Button><Button variant="primary" onClick={save} disabled={busy || !f.url.trim()}>{busy? "Saving…" : "Save"}</Button></div>
+        {isIg && !canFetch && f.url && <div style={{fontSize:11.5, color:"var(--ink-mute)", marginTop:8, textAlign:"right"}}>{handles.length? "That doesn't look like an Instagram post link." : "Add who posted it so we know where to look."}</div>}
       </div>
+      <style>{`@media (max-width:560px){ .cf-infl-nums{grid-template-columns:repeat(3, 1fr) !important;} }`}</style>
     </Modal>
   );
 }

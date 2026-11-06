@@ -7004,9 +7004,15 @@ function wsDay(iso){ const d = new Date(iso); return fmtDate(iso, d.getFullYear(
 function wsDays(from, to){ const n = Math.max(0, Math.round((new Date(to||Date.now()) - new Date(from))/86400e3)); return n===0 ? "same day" : n===1 ? "1 day" : n+" days"; }
 // Ideas everyone except the project's creator votes on. Enough No's (3, or everyone if fewer vote) and it's dropped.
 function wsIsRemoved(it, voters){ return (it.no||[]).filter(v=>voters.includes(v)).length >= Math.max(1, Math.min(3, voters.length)); }
+// "Picked" = someone marked it ⭐ Priority, or a majority of the voters (2 of 3) said Yes. Only picked ideas reach the creator.
+const wsNeed = voters=> Math.floor(voters.length/2)+1;
+const wsYes = (it, voters)=> (it.yes||[]).filter(v=>voters.includes(v)).length;
+function wsPicked(it, voters){ return !!it.priority || (voters.length>0 && wsYes(it, voters) >= wsNeed(voters)); }
+// The project's creator and Video Creators only see the picked ideas.
+function wsOnlyPicked(p, userId){ const u = USERS.find(x=>x.id===userId); return !!p && (p.creatorId===userId || (u && u.role==="video")); }
 function wsRank(list, voters){
   const n = it=>(it.no||[]).filter(v=>voters.includes(v)).length, y = it=>(it.yes||[]).filter(v=>voters.includes(v)).length;
-  return [...list].sort((a,b)=> n(a)-n(b) || y(b)-y(a) || b.createdAt.localeCompare(a.createdAt));
+  return [...list].sort((a,b)=> (b.priority?1:0)-(a.priority?1:0) || n(a)-n(b) || y(b)-y(a) || b.createdAt.localeCompare(a.createdAt));
 }
 
 function WsCover({p, height=150}){
@@ -7023,8 +7029,9 @@ function WsCover({p, height=150}){
 function WsCard({p, onOpen}){
   const {state, dispatch} = useApp();
   const user = USERS.find(u=>u.id===state.currentUserId);
-  const c = p.counts || {};
-  const bits = [c.ideas && c.ideas+" idea"+(c.ideas>1?"s":""), c.shots && c.shotsDone+"/"+c.shots+" shots", c.openNotes && c.openNotes+" open note"+(c.openNotes>1?"s":"")].filter(Boolean);
+  const c0 = p.counts || {};
+  const c = wsOnlyPicked(p, state.currentUserId) && c0.picked!==undefined ? {...c0, ideas:c0.picked} : c0;
+  const bits = [c.ideas && c.ideas+(c!==c0? " picked idea" : " idea")+(c.ideas>1?"s":""), c.shots && c.shotsDone+"/"+c.shots+" shots", c.openNotes && c.openNotes+" open note"+(c.openNotes>1?"s":"")].filter(Boolean);
   return (
     <Card onClick={onOpen} style={{padding:12, display:"flex", flexDirection:"column", gap:9, cursor:"pointer"}}>
       <WsCover p={p}/>
@@ -7122,7 +7129,7 @@ function WsProject({id, onBack}){
   if(!data) return <div><Skeleton h={28} w="40%"/><div style={{height:14}}/><Skeleton h={300} r={14}/></div>;
 
   const voters = p.voters || [];
-  const ideas = items.filter(i=>(i.kind==="link"||i.kind==="idea") && !wsIsRemoved(i, voters));
+  const ideas = items.filter(i=>(i.kind==="link"||i.kind==="idea") && !wsIsRemoved(i, voters) && (!wsOnlyPicked(p, me.id) || wsPicked(i, voters)));
   const toVote = voters.includes(me.id) ? ideas.filter(i=>!(i.yes||[]).includes(me.id) && !(i.no||[]).includes(me.id)).length : 0;
   const shots = items.filter(i=>i.kind==="shot");
   const openNotes = p.counts ? p.counts.openNotes : 0;
@@ -7198,6 +7205,17 @@ function WsDelete({it, act}){
   const me = USERS.find(u=>u.id===state.currentUserId);
   if(it.kind==="draft" || !(it.author===me.id || me.role==="admin")) return null;
   return <button title="Delete" onClick={()=>{ if(confirm("Delete this?")) act("/item/delete", {id:it.id}); }} style={{border:"none", background:"none", padding:2, cursor:"pointer", color:"var(--ink-mute)", marginLeft:"auto"}}><Icon name="trash" size={13}/></button>;
+}
+
+// ⭐ Priority (top right of an idea): anyone on the team taps it and the idea goes straight to the creator, votes or not.
+function WsPriority({it, act, canEdit}){
+  const on = !!it.priority;
+  if(!on && !canEdit) return null;
+  const who = on ? wsUser(it.priority.by).name : "";
+  return <button onClick={e=>{ e.stopPropagation(); if(canEdit) act("/item/priority", {id:it.id, on:!on}, on? "Priority taken off" : "Marked priority — the creator will see it"); }} disabled={!canEdit}
+    title={on ? "Priority · marked by "+who+(canEdit? " — tap to take it off" : "") : "Mark priority: the creator sees it even without votes"}
+    style={{position:"absolute", top:8, right:8, display:"inline-flex", alignItems:"center", gap:4, fontSize:11.5, fontWeight:700, padding:"4px 10px", borderRadius:99, cursor: canEdit? "pointer" : "default",
+      border:"1px solid "+(on? "var(--amber)" : "rgba(255,255,255,.7)"), background: on? "var(--amber)" : "rgba(0,0,0,.55)", color:"#fff"}}>{on? "★" : "☆"} Priority{on && who ? " · "+who : ""}</button>;
 }
 
 // Who said what: a small initial per voter — green for Yes, red for No, grey for not yet.
@@ -7280,7 +7298,12 @@ function WsIdeas({p, items, act}){
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
 
-  const visible = wsRank(items.filter(i=>(i.kind==="link"||i.kind==="idea") && !wsIsRemoved(i, voters)), voters);
+  const onlyPicked = wsOnlyPicked(p, me);
+  const all = wsRank(items.filter(i=>(i.kind==="link"||i.kind==="idea") && !wsIsRemoved(i, voters)), voters);
+  const [pickedView, setPickedView] = useState(false);
+  const visible = onlyPicked || pickedView ? all.filter(i=>wsPicked(i, voters)) : all;
+  const waiting = all.length - all.filter(i=>wsPicked(i, voters)).length;
+  const canStar = !onlyPicked && !p.filed;
   const unvoted = it=> canVote && !(it.yes||[]).includes(me) && !(it.no||[]).includes(me);
   async function add(){
     const t = text.trim(); if(!t) return;
@@ -7300,20 +7323,31 @@ function WsIdeas({p, items, act}){
         <Button variant="primary" icon="plus" onClick={add} disabled={busy || !text.trim()}>Add</Button>
       </div>}
       <div style={{display:"flex", alignItems:"center", gap:6, flexWrap:"wrap", marginBottom:14}}>
-        <span style={{fontSize:11.5, color:"var(--ink-mute)", marginLeft:4}}>{!p.filed && !voters.includes(me) ? "You're set as this project's creator, so only "+voters.map(v=>wsUser(v).name).join(" and ")+" vote. Not the creator? Edit → Creator → Not assigned yet." : "Vote 👍 or 👎 on each idea — "+voters.map(v=>wsUser(v).name).join(", ")+" vote · 3 👎 and an idea is removed"}</span>
+        {onlyPicked ? <span style={{fontSize:12, color:"var(--ink-soft)", marginLeft:4, lineHeight:1.5}}><b>These are the ideas the team picked for you</b> — ⭐ Priority first, then the ones {wsNeed(voters)} or more people said Yes to. {waiting>0 && <span style={{color:"var(--ink-mute)"}}>{waiting} more {waiting>1? "are" : "is"} still being voted on.</span>}</span> : <>
+        <span style={{display:"inline-flex", border:"1px solid var(--border)", borderRadius:99, overflow:"hidden", marginRight:4}}>
+          {[[false, "All "+all.length], [true, "Picked for the creator "+(all.length-waiting)]].map(([v, l])=><button key={String(v)} onClick={()=>setPickedView(v)} style={{border:"none", padding:"5px 11px", fontSize:12, fontWeight:600, cursor:"pointer", background: pickedView===v? "var(--accent-soft)" : "var(--surface)", color: pickedView===v? "var(--accent-dark)" : "var(--ink-soft)"}}>{l}</button>)}
+        </span>
+        <span style={{fontSize:11.5, color:"var(--ink-mute)", marginLeft:4}}>{!p.filed && !voters.includes(me) ? "You're set as this project's creator, so only "+voters.map(v=>wsUser(v).name).join(" and ")+" vote. Not the creator? Edit → Creator → Not assigned yet." : "Vote 👍 or 👎 on each idea — "+voters.map(v=>wsUser(v).name).join(", ")+" vote · "+wsNeed(voters)+" 👍 or ⭐ Priority and the creator sees it · 3 👎 and it's removed"}</span></>}
       </div>
 
-      {!visible.length ? <div style={{fontSize:13, color:"var(--ink-mute)"}}>No ideas yet. Ideas are optional — paste reels you like or write an idea if you want the team's input, or go straight to the plan and the draft.</div> : (
+      {!visible.length && onlyPicked ? <div style={{fontSize:13, color:"var(--ink-mute)"}}>{all.length ? "The team is still voting on the ideas — they'll show here once they're picked." : "No ideas yet."} You can still check the Plan tab for what to film.</div>
+       : !visible.length && pickedView ? <div style={{fontSize:13, color:"var(--ink-mute)"}}>Nothing picked yet. An idea gets here with {wsNeed(voters)} 👍 or when someone taps ⭐ Priority.</div>
+       : !visible.length ? <div style={{fontSize:13, color:"var(--ink-mute)"}}>No ideas yet. Ideas are optional — paste reels you like or write an idea if you want the team's input, or go straight to the plan and the draft.</div> : (
         <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(min(330px, 100%), 1fr))", gap:12, alignItems:"start"}}>
           {visible.map((it, i)=>{
             const n = noCount(it);
-            const tag = n===0 ? (voters.length && (it.yes||[]).filter(v=>voters.includes(v)).length===voters.length ? ["Everyone said yes", "var(--green)"] : null) : n===1 ? ["1 No", "var(--amber)"] : ["2 No's", "var(--red)"];
+            const yes = wsYes(it, voters), picked = wsPicked(it, voters);
+            const tag = voters.length && yes===voters.length ? ["Everyone said yes", "var(--green)"] : yes>=wsNeed(voters) ? [yes+" of "+voters.length+" said yes", "var(--green)"] : n===1 ? ["1 No", "var(--amber)"] : n>1 ? ["2 No's", "var(--red)"] : null;
             return (
-              <div key={it.id} style={{border:"1px solid "+(unvoted(it)? "var(--accent)" : "var(--border)"), borderRadius:12, overflow:"hidden", background:"var(--surface)", display:"flex", flexDirection:"column"}}>
+              <div key={it.id} style={{border:(it.priority? "2px solid var(--amber)" : "1px solid "+(unvoted(it)? "var(--accent)" : "var(--border)")), borderRadius:12, overflow:"hidden", background:"var(--surface)", display:"flex", flexDirection:"column"}}>
                 <div style={{position:"relative"}}>
                   <WsIdeaMedia it={it} height={it.kind==="link" ? 280 : 150}/>
-                  <span style={{position:"absolute", top:8, left:8, fontSize:11, fontWeight:700, padding:"2px 8px", borderRadius:99, background:"rgba(0,0,0,.62)", color:"#fff", pointerEvents:"none"}}>#{i+1}</span>
-                  {unvoted(it) && <span style={{position:"absolute", top:8, right:8, fontSize:11, fontWeight:700, padding:"2px 8px", borderRadius:99, background:"var(--accent)", color:"#fff", pointerEvents:"none"}}>Your vote?</span>}
+                  <span style={{position:"absolute", top:8, left:8, display:"flex", gap:5, pointerEvents:"none"}}>
+                    <span style={{fontSize:11, fontWeight:700, padding:"2px 8px", borderRadius:99, background:"rgba(0,0,0,.62)", color:"#fff"}}>#{i+1}</span>
+                    {unvoted(it) && <span style={{fontSize:11, fontWeight:700, padding:"2px 8px", borderRadius:99, background:"var(--accent)", color:"#fff"}}>Your vote?</span>}
+                    {!onlyPicked && picked && !it.priority && <span style={{fontSize:11, fontWeight:700, padding:"2px 8px", borderRadius:99, background:"var(--green)", color:"#fff"}}>✓ Creator sees it</span>}
+                  </span>
+                  <WsPriority it={it} act={act} canEdit={canStar}/>
                 </div>
                 <div style={{padding:10, display:"flex", flexDirection:"column", gap:8}}>
                   {it.kind==="link" && it.text && <div style={{fontSize:13, lineHeight:1.45, whiteSpace:"pre-wrap"}}>{it.text}</div>}
@@ -8433,7 +8467,7 @@ function SettingsPage(){
             ))}
           </tbody>
         </table></div>
-          <div style={{fontSize:12.5, color:"var(--ink-soft)", marginTop:10, lineHeight:1.5}}><b>Video Creator</b> (for new video creators) only sees the Dashboard, Team Chat, the Workspace and the Content Library. They upload drafts, vote and comment on ideas, and name their finished files, but can't approve content or make posts.</div>
+          <div style={{fontSize:12.5, color:"var(--ink-soft)", marginTop:10, lineHeight:1.5}}><b>Video Creator</b> (for new video creators) only sees the Dashboard, Team Chat, the Workspace and the Content Library. They see only the ideas the team picked (⭐ Priority or a majority 👍), comment on them, upload drafts and name their finished files, but can't approve content or make posts.</div>
         </MoreInfo>
         </Card>
       </>}

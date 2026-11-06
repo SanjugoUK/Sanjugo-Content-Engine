@@ -2201,9 +2201,9 @@ What Creator Studio can do (use this to explain how things work):
 - Stats: Make pulls the latest posts with likes, comments, shares, saves, reach and views every night (about 4am UK time), or any time with "Get latest" (Settings → Stats). TikTok stats come from the public @sanjugouk profile via HasData. Each platform has its own Make scenario ("Pull · Instagram", "Publish · Facebook", …) so one can be fixed without touching the others; "Clear stats" removes a platform's stats (e.g. after switching accounts).
 - Analytics: Real data (from Make) or Sample data; ranges 7/30/90 days, 12 months, All time, custom; filters by platform, campaign, content pillar, post; per-platform and per-post views, reach, likes, comments, shares, saves, engagement rate; best time to post; top posts; a growth forecaster.
 - Published Content: a study page for every live post (and collabs on other accounts added with "Add collab post": paste the link and who posted it, e.g. "@invited.app @daniafgx", and Instagram's views, likes and comments are fetched and refreshed nightly — Business/Creator accounts only, otherwise type the numbers in; optional cost in £). Filter by period, platform, Collabs only, search; "Compare by" Influencer / Promotion / Content type / Branch / Dish / Platform / Day / Time of day with average views or engagement (Influencer shows a scorecard: posts, avg views, × our usual, engagement, cost, £ per 1,000 views, last collab and Book again / Okay / Skip; tap a row to filter the posts); a day × time heatmap; each post shows how it did against the usual. Open a post for the caption breakdown (hook, words, emojis, hashtags, call to action), editable tags (guessed from the caption, marked "auto"; ✕ removes one; they save when you leave the box), "Explain" (AI says why it worked), team notes, and "Make another like it".
-- Workspace (tile in the menu): one project per video. Create project (name, branch, category, dish, creator — or "not assigned yet", due date). Tabs: Ideas (paste reel links or write ideas; everyone except the project's creator votes Yes/No and comments on each with 💬; best first, three No's removes an idea; cards you haven't voted on say "Your vote?"), Plan (the idea text and a shot list the creator ticks off while filming), Draft review (upload Draft 1, Draft 2…; player with −2s/+2s, 0.5× slow motion, loop and download; one "Review chat" for all drafts where a message is pinned to a second of a draft, about a whole draft — both are to-dos ticked "Fixed" — or General; "draft 1 at 0:12" in a message becomes a link; "Send draft N for approval"). Then the draft plays in a phone preview; anyone except the uploader taps "Approve content" or "Needs changes". Only big moments (new project, sent for approval, approved, changes requested, undone, saved to the Library, deleted) post in Team Chat — Workspace comments and votes don't. The uploader confirms the file name (SANJUGO filing system, e.g. 20261031_AL_FC_SP_FIN_v1_S465.mp4) and it is saved to Google Drive (Creator Studio Projects folder) and the Content Library. "Create post from this" then starts a normal post for the Approval Queue. This is content approval only — publishing still goes through the Approval Queue.
+- Workspace (tile in the menu): one project per video. Create project (name, branch, category, dish, creator — or "not assigned yet", due date). Tabs: Ideas (paste reel links or write ideas; everyone except the project's creator votes Yes/No and comments on each with 💬; best first, three No's removes an idea; ⭐ Priority or Yes from a majority (2 of 3) = picked, and the project's creator and Video Creators only see picked ideas; cards you haven't voted on say "Your vote?"), Plan (the idea text and a shot list the creator ticks off while filming), Draft review (upload Draft 1, Draft 2…; player with −2s/+2s, 0.5× slow motion, loop and download; one "Review chat" for all drafts where a message is pinned to a second of a draft, about a whole draft — both are to-dos ticked "Fixed" — or General; "draft 1 at 0:12" in a message becomes a link; "Send draft N for approval"). Then the draft plays in a phone preview; anyone except the uploader taps "Approve content" or "Needs changes". Only big moments (new project, sent for approval, approved, changes requested, undone, saved to the Library, deleted) post in Team Chat — Workspace comments and votes don't. The uploader confirms the file name (SANJUGO filing system, e.g. 20261031_AL_FC_SP_FIN_v1_S465.mp4) and it is saved to Google Drive (Creator Studio Projects folder) and the Content Library. "Create post from this" then starts a normal post for the Approval Queue. This is content approval only — publishing still goes through the Approval Queue.
 - Settings: Stats (Get latest), Notifications, and for admins Team workload, Recent activity, Content library (Google Drive), Storage, Campaigns, Smart insights, Weekly posting slots, Platforms, Make.com connections (webhooks, auto-publish) and Team & access (roles, passwords). Your name and password are under your name at the top right of Settings. There is no separate Team page any more.
-- Roles: Creator — create, edit, submit. Approver — approve and schedule. Admin — everything including team and settings. Video Creator (for new video creators) — only the Dashboard, Team Chat, the Workspace and the Content Library: uploads drafts, votes and comments on ideas, names finished files, but can't approve content or make posts.`;
+- Roles: Creator — create, edit, submit. Approver — approve and schedule. Admin — everything including team and settings. Video Creator (for new video creators) — only the Dashboard, Team Chat, the Workspace and the Content Library: sees only the ideas the team picked, comments, uploads drafts, names finished files, but can't approve content or make posts.`;
 
 async function botSnapshot(env, askerId) {
   const state = await readState(env);
@@ -2385,7 +2385,10 @@ const WS_DISHES = { YK: "Chicken Yakitori", ED: "Edamame", FD: "Fried Dumplings"
 const WS_NAME_RE = /^(\d{8})_([A-Z]{2})_([A-Z]{2})((?:_[A-Z0-9]{2})*)_([A-Z]{3})_v(\d{1,2})_([A-Z])(\d{3})\.([a-z0-9]{2,5})$/;
 const WS_ITEM_KINDS = ["link", "idea", "comment", "draft", "note", "shot"];
 // Ideas and reference reels get a Yes or No from everyone except the project's creator; enough No's and it's dropped.
-function wsVoters(p, members) { return members.filter((m) => m.active !== false && m.id !== p.creatorId).map((m) => m.id); }
+// Video Creators don't vote: they film what the team picked.
+function wsVoters(p, members) { return members.filter((m) => m.active !== false && m.id !== p.creatorId && m.role !== "video").map((m) => m.id); }
+// "Picked" = marked Priority by anyone on the team, or Yes from a majority of the voters (2 of 3). Only picked ideas reach the creator.
+function wsPicked(it, voters) { return !!it.priority || (voters.length > 0 && (it.yes || []).filter((v) => voters.includes(v)).length >= Math.floor(voters.length / 2) + 1); }
 function wsRemoved(it, voters) { return (it.no || []).filter((v) => voters.includes(v)).length >= Math.max(1, Math.min(3, voters.length)); }
 
 let wsTablesReady = false;
@@ -2446,7 +2449,7 @@ function wsSummary(p, items, members, me) {
   const shown = (p.submitted && drafts.find((d) => d.id === p.submitted.draftId)) || latest;
   return { ...p, status: wsStatus(p, items),
     finishedAt: p.filed ? p.filed.at : null, voters,
-    counts: { ideas: ideas.length, toVote: me && voters.includes(me) && !p.filed ? ideas.filter((i) => !(i.yes || []).includes(me) && !(i.no || []).includes(me)).length : 0, shots: shots.length, shotsDone: shots.filter((i) => i.done).length,
+    counts: { ideas: ideas.length, picked: ideas.filter((i) => wsPicked(i, voters)).length, toVote: me && voters.includes(me) && !p.filed ? ideas.filter((i) => !(i.yes || []).includes(me) && !(i.no || []).includes(me)).length : 0, shots: shots.length, shotsDone: shots.filter((i) => i.done).length,
       comments: items.filter((i) => i.kind === "comment" && !i.parentId).length, drafts: drafts.length,
       openNotes: items.filter((i) => i.kind === "note" && !i.resolved && (!shown || i.draftId === shown.id)).length },
     cover: shown ? { fileUrl: shown.media && shown.media.fileUrl, mime: shown.media && shown.media.mime, cut: shown.cut } : null,
@@ -2575,12 +2578,22 @@ async function workspaceRoute(request, env, url, viewer, ctx) {
     return json({ item: it });
   }
 
+  if (path === "item/priority") { // anyone who votes can push an idea straight to the creator
+    const it = await wsItem(env, body.id);
+    const p = await wsProject(env, it.projectId);
+    if (it.kind !== "link" && it.kind !== "idea") throw new HttpError(400, "Only ideas and reels can be marked priority.");
+    if (me.id === p.creatorId || me.role === "video") throw new HttpError(403, "The team marks priority — the creator films what's picked.");
+    it.priority = body.on === false ? null : { by: me.id, at: now };
+    await wsSaveItem(env, it);
+    return json({ item: it });
+  }
+
   if (path === "item/vote" || path === "item/resolve" || path === "item/delete") {
     const it = await wsItem(env, body.id);
     const p = await wsProject(env, it.projectId);
     if (path === "item/vote") {
       if (it.kind !== "link" && it.kind !== "idea") throw new HttpError(400, "Only ideas and reels take votes.");
-      if (me.id === p.creatorId) throw new HttpError(403, "The project's creator doesn't vote — the rest of the team decides.");
+      if (me.id === p.creatorId || me.role === "video") throw new HttpError(403, "The project's creator doesn't vote — the rest of the team decides.");
       const v = body.vote === "yes" || body.vote === "no" ? body.vote : null;
       it.yes = (it.yes || []).filter((x) => x !== me.id);
       it.no = (it.no || []).filter((x) => x !== me.id);

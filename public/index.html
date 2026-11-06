@@ -219,6 +219,11 @@ function applyTeam(members){
   });
   if(next.length) USERS.splice(0, USERS.length, ...next);
 }
+// The signed-in person is known before the full team list loads, so add them straight away (new people aren't in the built-in list).
+function addSignedInUser(m){
+  if(!m || !m.id || USERS.some(u=>u.id===m.id)) return;
+  applyTeam([...USERS.map(u=>({id:u.id, name:u.name, role:u.role, email:u.email, active:u.active!==false, lastSeen:u.lastSeen})), m]);
+}
 const activeUsers = () => USERS.filter(u=>u.active!==false);
 // A post's approver field is ANY_APPROVER for new posts; since Oct 2026 every post needs ALL approvers (Cyrus and Yan Yan) — see requiredApprovers().
 const ANY_APPROVER = "any";
@@ -8583,7 +8588,7 @@ function App(){
         const d = await r.json().catch(()=>({}));
         if(cancelled) return;
         if(r.status===401 || r.status===403) { dispatch({type:"SET_ME", me:null, lock:{code:d.code, message:d.error, signin:d.signin}}); dispatch({type:"BOOT_DONE"}); return; }
-        if(r.ok){ SIGNED_IN = !!(d && d.member); dispatch({type:"SET_ME", me:d}); }
+        if(r.ok){ SIGNED_IN = !!(d && d.member); if(d && d.member) addSignedInUser(d.member); dispatch({type:"SET_ME", me:d}); }
         const t = await fetch("/api/team", {cache:"no-store"});
         if(t.ok && !cancelled){ const td = await t.json(); if(Array.isArray(td.members) && td.members.length) dispatch({type:"TEAM_LOADED", members:td.members}); }
       }catch(e){ /* offline or no server: keep the built-in team */ }
@@ -8682,8 +8687,9 @@ function App(){
     return ()=>{ cancelled=true; unsub(); };
   }, [caps.ready, caps.db]);
 
-  const user = USERS.find(u=>u.id===state.currentUserId);
-  const perms = PERMS[user.role];
+  // Never crash on someone missing from the list: fall back to the signed-in member, then to the most limited role.
+  const user = USERS.find(u=>u.id===state.currentUserId) || (state.me && state.me.member && state.me.member.id===state.currentUserId ? {...state.me.member, brands:["sanjugo"], avatarColor:"#7A5AF8", title:(ROLE_META[state.me.member.role]||{}).label} : null) || {id:state.currentUserId, name:"", role:"video", brands:["sanjugo"], avatarColor:"#7A5AF8"};
+  const perms = PERMS[user.role] || PERMS.video;
   const viewerIsRealAdmin = !!(caps.viewerEmail && state.adminEmails.includes(caps.viewerEmail));
   const ctx = useMemo(()=>({state, dispatch, openDetails: setDetailItem, caps, viewerIsRealAdmin, chat}), [state, caps, viewerIsRealAdmin, chat]);
 

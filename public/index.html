@@ -7245,7 +7245,7 @@ function WsIdeaMedia({it, height}){
   const e = it.kind==="link" ? wsEmbed(it.url) : null;
   const [play, setPlay] = useState(false);
   if(it.kind!=="link") return (
-    <div style={{height, borderRadius:10, background:"var(--surface-2)", padding:14, display:"flex", flexDirection:"column", gap:8, overflow:"hidden"}}>
+    <div style={{height, borderRadius:10, background:"var(--surface-2)", padding:"40px 14px 14px", display:"flex", flexDirection:"column", gap:8, overflow:"hidden"}}>
       <div style={{display:"flex", alignItems:"center", gap:6, fontSize:11, fontWeight:700, color:"var(--ink-mute)", textTransform:"uppercase", letterSpacing:".4px"}}><Icon name="bulb" size={13}/>Idea</div>
       <div style={{fontSize: height>300? 16:13.5, lineHeight:1.5, whiteSpace:"pre-wrap", overflow:"auto"}}>{it.text}</div>
     </div>

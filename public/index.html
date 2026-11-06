@@ -8310,7 +8310,10 @@ function PushSettings(){
   else if(sub){ hint = "On this device, for "+name; right = <><Button size="sm" icon="send" onClick={test} disabled={busy}>Test</Button><Button size="sm" variant="subtle" onClick={turnOff} disabled={busy}>Turn off</Button></>; }
   else if(perm==="denied"){ hint = "Blocked — allow notifications in the browser's site settings"; right = <Badge label="Blocked" color="var(--red)" soft="var(--red-soft)"/>; }
   else right = <Button variant="primary" size="sm" icon="bell" onClick={turnOn} disabled={busy}>{busy? "Turning on…" : "Turn on"}</Button>;
-  return <SettingRow label="Phone & desktop alerts" hint={hint} on={!!sub}>{right}</SettingRow>;
+  return <>
+    <SettingRow label="Phone & desktop alerts" hint={hint} on={!!sub}>{right}</SettingRow>
+    <div style={{fontSize:12, color:"var(--ink-mute)", margin:"-4px 0 10px", lineHeight:1.5}}>🌙 Every night at 9pm you get a reminder of what's still waiting on you (or just "have a good night" when nothing is). ☀️ With more than 5 things left you also get one at 9am.</div>
+  </>;
 }
 
 /* One line in Settings: a short label (and an optional one-line hint) on the left, the control on the right. */

@@ -16,6 +16,7 @@ export default {
       ctx.waitUntil(autoPublishDue(env).catch((e) => console.error("auto-publish failed", e)));
       ctx.waitUntil(expireStuckJobs(env).catch((e) => console.error("expire jobs failed", e)));
       ctx.waitUntil(remindPendingApprovals(env).catch((e) => console.error("approval reminders failed", e)));
+      ctx.waitUntil(dailyDigest(env).catch((e) => console.error("daily digest failed", e)));
     }
   },
 
@@ -1623,6 +1624,14 @@ async function pushRoute(request, env, url, viewer) {
   if (url.pathname === "/api/push/key" && request.method === "GET") {
     return json({ publicKey: (await vapidKeys(env)).publicKey });
   }
+  if (url.pathname === "/api/push/digest" && request.method === "GET") { // admins: see tonight's / tomorrow morning's messages without sending
+    if (viewer.accessEnabled && !(viewer.member && viewer.member.role === "admin")) return json({ error: "Admins only" }, 403);
+    const night = await dailyDigest(env, "preview");
+    const all = await digestTasks(env);
+    const c = londonClock();
+    const morning = all.filter((x) => x.tasks.length > DIGEST_MANY).map((x) => ({ name: x.member.name, tasks: x.tasks.length, ...digestMessage(x.member, x.tasks, "morning", c.day) }));
+    return json({ night: night.sent, morning, times: { night: DIGEST_NIGHT + ":00", morning: DIGEST_MORNING + ":00", morningOnlyOver: DIGEST_MANY } });
+  }
   if (request.method !== "POST") return json({ error: "Not found" }, 404);
   const body = await request.json().catch(() => ({}));
   await ensurePushTable(env);
@@ -2045,6 +2054,92 @@ async function remindPendingApprovals(env) {
     const posted = await postSystemChat(env, { text, mentions: who, contentId: item.id, eventId: "remind_" + item.id + "_" + at });
     if (posted) await pushToUsers(env, who, { title: "Approval needed — " + left, body: `“${item.title || "Untitled"}” goes out ${when}. Tap to review.`, url: "/#/queue", tag: "remind-" + item.id }).catch(() => {});
   }
+}
+
+// ---- Daily reminder on everyone's phone ----
+// 9pm (London): what's still waiting on you, or "have a good night" when nothing is. People with more than
+// 5 things left also get a 9am "good morning" one. It's the same list as "Waiting on you" on the Dashboard.
+const DIGEST_NIGHT = 21, DIGEST_MORNING = 9, DIGEST_MANY = 5;
+function londonClock(t = Date.now()) {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/London", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" })
+    .formatToParts(new Date(t)).map((p) => [p.type, p.value]));
+  return { day: `${parts.year}-${parts.month}-${parts.day}`, hour: Number(parts.hour), minute: Number(parts.minute) };
+}
+async function digestTasks(env) {
+  const [state, { members }] = await Promise.all([readState(env), listTeam(env)]);
+  await ensureWsTables(env);
+  const [{ results: rows }, { results: itemRows }] = await Promise.all([
+    env.DB.prepare("SELECT data FROM ws_projects").all(), env.DB.prepare("SELECT data FROM ws_items").all()]);
+  const byProject = new Map();
+  for (const r of itemRows || []) { const it = JSON.parse(r.data); if (it.deleted) continue; if (!byProject.has(it.projectId)) byProject.set(it.projectId, []); byProject.get(it.projectId).push(it); }
+  const projects = (rows || []).map((r) => JSON.parse(r.data)).filter((p) => !p.deleted);
+  const items = state.contentItems || [];
+  const active = members.filter((m) => m.active !== false);
+  const reviewerIds = active.filter((m) => m.role === "approver" || m.role === "admin").map((m) => m.id);
+  const soon = (it) => Object.values(it.variants || {}).some((v) => v && v.scheduledAt && londonTime(v.scheduledAt) - Date.now() < 24 * 3600e3);
+  const out = [];
+  for (const m of active) {
+    const t = []; // {urgent, kind}
+    const video = m.role === "video";
+    if (!video) {
+      if (reviewerIds.includes(m.id)) for (const it of items) {
+        if (it.status !== "submitted" || !requiredFor(it, reviewerIds).includes(m.id)) continue;
+        const pending = Object.values(it.variants || {}).filter((v) => v && (v.status === "submitted" || !v.status));
+        if (pending.some((v) => !(v.approvals || {})[m.id])) t.push({ kind: "approve", urgent: soon(it), title: it.title });
+      }
+      for (const it of items) {
+        if (it.status === "changes_requested" && it.creator === m.id) t.push({ kind: "changes", title: it.title });
+        if (it.status === "failed" || Object.values(it.variants || {}).some((v) => v && v.publishStatus === "failed")) t.push({ kind: "failed", urgent: true, title: it.title });
+      }
+    }
+    for (const p of projects) {
+      const sum = wsSummary(p, byProject.get(p.id) || [], members, m.id);
+      if (!video && sum.status === "waiting" && p.submitted && p.submitted.by !== m.id) t.push({ kind: "draft", title: p.title });
+      if (sum.status === "approved" && p.submitted && p.submitted.by === m.id) t.push({ kind: "name", title: p.title });
+      if (sum.counts.toVote > 0) t.push({ kind: "vote", title: p.title, n: sum.counts.toVote });
+    }
+    out.push({ member: m, tasks: t });
+  }
+  return out;
+}
+const DIGEST_WORDS = { failed: ["failed post", "failed posts"], approve: ["post to approve", "posts to approve"], changes: ["post to fix", "posts to fix"],
+  draft: ["draft to watch", "drafts to watch"], name: ["file to name", "files to name"], vote: ["project to vote on", "projects to vote on"] };
+const DIGEST_ICON = { failed: "🔴", approve: "✅", changes: "✏️", draft: "🎬", name: "📁", vote: "👍" };
+const DIGEST_NIGHTS = ["Rest well, tomorrow's a fresh start. 🌙", "Thanks for today — sleep well. 😴", "Switch off and recharge. Good night! ✨", "Great work today. Sweet dreams. 🌙", "Enjoy your evening — it'll keep till tomorrow. 💛"];
+const DIGEST_CLEAR = ["Nothing is waiting on you. Have a good night! 🌙", "All clear today — well done. Have a good night! ✨", "Inbox zero for Creator Studio. Sleep well! 😴", "You're all caught up. Enjoy your evening! 💛"];
+function digestMessage(m, tasks, slot, day) {
+  const first = String(m.name || "").trim() || "there";
+  const pick = (list) => list[(Number(day.replace(/-/g, "")) + first.length) % list.length];
+  const urgent = tasks.filter((x) => x.urgent).length;
+  const counts = {};
+  for (const x of tasks) counts[x.kind] = (counts[x.kind] || 0) + 1;
+  const order = ["failed", "approve", "changes", "draft", "name", "vote"].filter((k) => counts[k]);
+  const list = order.map((k) => `${DIGEST_ICON[k]} ${counts[k]} ${DIGEST_WORDS[k][counts[k] > 1 ? 1 : 0]}`).join(" · ");
+  const n = tasks.length;
+  const things = n + (n > 1 ? " things" : " thing");
+  if (slot === "morning") return { title: `☀️ Good morning, ${first} — ${things} waiting`, body: `${list}${urgent ? ` (${urgent} urgent)` : ""}. Tap to start with the urgent ones. Have a great day!`, url: "/#/dashboard", tag: "digest" };
+  if (!n) return { title: `🌙 Have a good night, ${first}`, body: pick(DIGEST_CLEAR), url: "/#/dashboard", tag: "digest" };
+  return { title: `🌙 Good night, ${first} — ${things} left${urgent ? `, ${urgent} urgent` : ""}`, body: `${list}. Just a reminder for tomorrow. ${pick(DIGEST_NIGHTS)}`, url: "/#/dashboard", tag: "digest" };
+}
+// Runs with the 5-minute timer; sends once per slot per day (a claim in app_kv stops repeats).
+async function dailyDigest(env, force) {
+  const c = londonClock();
+  const slot = force || (c.hour === DIGEST_NIGHT ? "night" : c.hour === DIGEST_MORNING ? "morning" : null);
+  if (!slot || (!force && c.minute > 30)) return { skipped: true };
+  if (!force) {
+    await ensureStorageTables(env);
+    const claim = await env.DB.prepare("INSERT OR IGNORE INTO app_kv (k, v) VALUES (?1, ?2)").bind(`digest_${slot}_${c.day}`, JSON.stringify(Date.now())).run();
+    if (!claim.meta || !claim.meta.changes) return { skipped: "already sent" };
+  }
+  const all = await digestTasks(env);
+  const sent = [];
+  for (const { member, tasks } of all) {
+    if (slot === "morning" && tasks.length <= DIGEST_MANY) continue;
+    const msg = digestMessage(member, tasks, slot, c.day);
+    sent.push({ name: member.name, tasks: tasks.length, ...msg });
+    if (force !== "preview") await pushToUsers(env, [member.id], msg).catch(() => {});
+  }
+  return { slot, sent };
 }
 
 // Every 5 minutes (when switched on): send approved posts whose scheduled time has arrived.

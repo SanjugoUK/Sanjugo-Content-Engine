@@ -207,8 +207,13 @@ async function getState(env) {
 }
 
 // Who must approve a post: one named approver, or (default "any") every approver/admin — Cyrus and Yan Yan.
+// "either" = Cyrus or Yan Yan: both are asked, and one approval is enough.
 function requiredFor(item, reviewerIds) {
   return item && item.approver && item.approver !== "any" && reviewerIds.includes(item.approver) ? [item.approver] : reviewerIds;
+}
+function approvalsDone(item, approvals, reviewerIds) {
+  const req = requiredFor(item, reviewerIds);
+  return req.length > 0 && (item && item.approver === "either" ? req.some((id) => (approvals || {})[id]) : req.every((id) => (approvals || {})[id]));
 }
 
 // Two-person approval is checked here on the server too, so it can't be faked by sending a doctored save:
@@ -230,7 +235,7 @@ async function guardApprovals(env, body, stored, viewer) {
       const added = Object.keys((v && v.approvals) || {}).filter((id) => !was[id]);
       if (added.some((id) => id !== me || !canApprove)) bad = true;
       const wasApproved = ((prev.variants || {})[p] || {}).status === "approved";
-      if (v && v.status === "approved" && !wasApproved && !requiredFor(it, reviewers).every((id) => (v.approvals || {})[id])) bad = true;
+      if (v && v.status === "approved" && !wasApproved && !approvalsDone(it, v.approvals, reviewers)) bad = true;
     }
     if ((it.approver || "any") !== (prev.approver || "any") && !canApprove && !["draft", "changes_requested", "rejected"].includes(prev.status)) bad = true;
     if (it.status === "approved" && prev.status !== "approved" && prev.status !== "scheduled" &&
@@ -1472,7 +1477,7 @@ async function postWorkflowUpdates(env, body) {
       text = `👍 ${actor} approved “${title}” — it still needs ${left.length ? left.map(nameOf).join(" and ") : "the other approver"} to approve before it can go out.`;
     } else if (a.type === "approved") {
       notify = creator;
-      text = requiredFor(item, reviewers.map((r) => r.id)).length > 1 ? `✅ “${title}” is approved — ${actor} gave the final approval, so both approvals are in.` : `✅ ${actor} approved “${title}”.`;
+      text = requiredFor(item, reviewers.map((r) => r.id)).length > 1 && item.approver !== "either" ? `✅ “${title}” is approved — ${actor} gave the final approval, so both approvals are in.` : `✅ ${actor} approved “${title}”.`;
     } else if (a.type === "changes_requested") {
       notify = creator;
       text = `✏️ ${actor} asked for changes on “${title}”.${note}`;
@@ -2284,7 +2289,7 @@ How to answer:
 
 What Creator Studio can do (use this to explain how things work):
 - Dashboard ("Sanjugo Dashboard", top of the menu): a greeting and "Waiting on you" — everything that needs this person, most urgent first (failed posts, posts to approve, Workspace cuts to approve, file names to confirm, ideas to vote on, posts sent back, and reminders for coming-up occasions with Plan / Done / Not for us); Last 7 days vs the week before (views, engagement, posts out vs the weekly goal, saves + shares); private sticky notes ("My notes", only that person sees them); This week (Mon–Sun, empty days in orange with "+ add"); a slim row with the best post ("make another" starts a Workspace project), Workspace stage counts and finished videos not posted yet.
-- Approvers per post (chosen in Create Content): "Cyrus and Yan Yan (both must approve)" — the default — or "Cyrus only" / "Yan Yan only". With both: every post needs BOTH Cyrus and Yan Yan to approve. The first approval is recorded ("Yan Yan ✓ · waiting for Cyrus") and the post stays in "To review" for the other approver; only the second approval makes it Approved and schedules it. Either approver can Reject or Request Edits on their own, which clears approvals; resubmitting starts approvals again.
+- Approvers per post (chosen in Create Content): "Cyrus and Yan Yan (both must approve)" — the default — "Cyrus or Yan Yan (either one can approve)" — both see it and whoever approves first makes it Approved — or "Cyrus only" / "Yan Yan only". With both: every post needs BOTH Cyrus and Yan Yan to approve. The first approval is recorded ("Yan Yan ✓ · waiting for Cyrus") and the post stays in "To review" for the other approver; only the second approval makes it Approved and schedules it. Either approver can Reject or Request Edits on their own, which clears approvals; resubmitting starts approvals again.
 - Approval reminders: if a post, reel or story is still waiting for approval 1 hour before its publish time, Creator Studio @mentions the assigned approver(s) in Team Chat and sends a phone/desktop alert — once per publish time. Approved, sent-back or rejected posts aren't reminded.
 - Multi-photo (carousel) posts: in Create Content pick several photos at once (up to 10), or tap "Add photo" / pick more from the library under "Photos in this post"; reorder with ‹ and remove with ✕. Photos are re-saved as JPEG and trimmed to Instagram's 4:5–1.91:1 shape. Make posts them as an Instagram carousel and a Facebook multi-photo post; Google Business gets the first photo; YouTube can't post photos; TikTok photo posts go up from the TikTok app.
 - Create Content: first pick the content style — "Post / Reel" or "Story" (full-screen 9:16, Instagram/Facebook/TikTok only, with an optional link sticker and posting notes instead of a caption; approvers see it as a real story; Make can't post stories, so after approval someone posts it from the phone app and uses "Mark as published"). Then upload a video/photo, or pick one from the Content Library by barcode (e.g. G219). Choose platforms, write a caption per platform, pick a campaign (or "No campaign"), priority, and the approvers — every post needs both Cyrus and Yan Yan to approve. Then submit for approval, or "Save as Draft" (drafts show in the Content Calendar and can be opened, finished and submitted later). To delete a post: open it (tap it in the Calendar, Approval Queue or Dashboard) and tap "Delete draft" / "Delete post" at the top, then confirm. Creators can delete their own post while it is a draft, sent back for changes, or rejected; admins (Cyrus, Yan Yan) can delete any post that is not published. Published posts can\'t be deleted in Creator Studio (delete them in the social app itself).
@@ -2304,7 +2309,7 @@ async function botSnapshot(env, askerId) {
   const state = await readState(env);
   const { members } = await listTeam(env);
   const byId = new Map(members.map((m) => [m.id, m]));
-  const name = (id) => (id === "any" ? "Cyrus and Yan Yan (both must approve)" : (byId.get(id) || {}).name || id || "—");
+  const name = (id) => (id === "any" ? "Cyrus and Yan Yan (both must approve)" : id === "either" ? "Cyrus or Yan Yan (either one can approve)" : (byId.get(id) || {}).name || id || "—");
   const items = Array.isArray(state.contentItems) ? state.contentItems : [];
   const counts = {};
   for (const i of items) counts[i.status] = (counts[i.status] || 0) + 1;

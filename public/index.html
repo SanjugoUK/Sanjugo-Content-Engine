@@ -227,6 +227,11 @@ function addSignedInUser(m){
 const activeUsers = () => USERS.filter(u=>u.active!==false);
 // A post's approver field is ANY_APPROVER for new posts; since Oct 2026 every post needs ALL approvers (Cyrus and Yan Yan) — see requiredApprovers().
 const ANY_APPROVER = "any";
+// "Cyrus or Yan Yan": both see it, and whoever gets to it first approves it on their own.
+const EITHER_APPROVER = "either";
+const isEither = item => !!item && item.approver===EITHER_APPROVER;
+// Has a platform got enough approvals? Either → one of them; otherwise every required approver.
+function approvalsDone(item, approvals){ const req = requiredApprovers(item); return !!req.length && (isEither(item) ? req.some(id=>(approvals||{})[id]) : req.every(id=>(approvals||{})[id])); }
 // Average time from a post being sent for approval to this person's decision on it, from the real activity log.
 function reviewTurnaround(log, userId){
   const sentAt = {}; const waits = [];
@@ -276,6 +281,7 @@ function approvalProgress(item){
   const req = approversOf(item); const vs = Object.values(item.variants||{});
   const done = req.filter(u=> vs.length && vs.every(v=> v.status==="approved" || (v.approvals||{})[u.id]));
   const left = req.filter(u=> !done.includes(u));
+  if(isEither(item)) return done.length ? done.map(u=>u.name+" ✓").join(" · ") : "Waiting for "+req.map(u=>u.name).join(" or ")+" (either one)";
   if(!done.length) return "0 of "+req.length+" — waiting for "+left.map(u=>u.name).join(" and ");
   return done.map(u=>u.name+" ✓").join(" · ") + (left.length? " · waiting for "+left.map(u=>u.name).join(" and ") : "");
 }
@@ -286,12 +292,12 @@ function stillToApprove(item){
   return approversOf(item).filter(u=> pend.some(v=> !(v.approvals||{})[u.id]));
 }
 function approverName(item){
-  const n = approversOf(item).map(u=>u.name); return n.length ? n.join(" and ") : "—";
+  const n = approversOf(item).map(u=>u.name); return n.length ? n.join(isEither(item)? " or " : " and ") : "—";
 }
 function approverOptions(){
   const list = reviewers();
   if(list.length<2) return [{value:ANY_APPROVER, label:(list[0]||{}).name || "Approver"}];
-  return [{value:ANY_APPROVER, label:list.map(u=>u.name).join(" and ")+" (both must approve)"}, ...list.map(u=>({value:u.id, label:u.name+" only"}))];
+  return [{value:ANY_APPROVER, label:list.map(u=>u.name).join(" and ")+" (both must approve)"}, {value:EITHER_APPROVER, label:list.map(u=>u.name).join(" or ")+" (either one can approve)"}, ...list.map(u=>({value:u.id, label:u.name+" only"}))];
 }
 const BRANDS = [
   {id:"sanjugo", name:"Sanjugo", color:"#D9642A", logo:true, accounts:{instagram:"@sanjugo", facebook:"Sanjugo", tiktok:"@sanjugo", youtube:"Sanjugo", gbp:"Sanjugo — Shoreditch, Angel, Victoria"}},
@@ -1046,7 +1052,7 @@ function baseReducer(state, action){
         if(decision==="approved"){
           if(v.status==="approved") return;
           const approvals = {...(v.approvals||{}), [me]: now};
-          const done = required.every(id=>approvals[id]);
+          const done = approvalsDone(item, approvals);
           variants[p] = {...v, approvals, status: done? "approved" : "submitted"};
           if(done){
             if(!variants[p].scheduledAt){
@@ -1205,7 +1211,7 @@ function baseReducer(state, action){
       if(patch.approver && !resubmit && updated.status==="submitted"){
         const req = requiredApprovers(updated);
         Object.entries(updated.variants).forEach(([p, v])=>{
-          if(v && v.status==="submitted" && req.length && req.every(id=>(v.approvals||{})[id]))
+          if(v && v.status==="submitted" && approvalsDone(updated, v.approvals))
             updated.variants[p] = {...v, status:"approved", publishStatus: v.scheduledAt? "scheduled" : "not_scheduled"};
         });
         if(Object.values(updated.variants).every(v=>v.status==="approved")) updated = {...updated, status:"approved"};
@@ -3880,7 +3886,7 @@ function calendarStatus(item, v){
   if(st==="rejected") return ["Rejected", "var(--red)", "var(--red-soft)"];
   if(st==="submitted"){
     const left = requiredApprovers(item).filter(id=>!(v.approvals||{})[id]).map(id=>(USERS.find(u=>u.id===id)||{}).name).filter(Boolean);
-    return ["Waiting"+(left.length? " · "+left.join(" & ") : ""), "var(--blue)", "var(--blue-soft)"];
+    return ["Waiting"+(left.length? " · "+left.join(isEither(item)? " or " : " & ") : ""), "var(--blue)", "var(--blue-soft)"];
   }
   return ["Draft", "#64748B", "var(--surface-2)"];
 }
@@ -8144,7 +8150,7 @@ function TeamWorkload(){
           <tbody>
             {activeUsers().map(u=>{
               const created = state.contentItems.filter(i=>i.creator===u.id).length;
-              const pending = state.contentItems.filter(i=>(i.creator===u.id || i.approver===u.id || (i.approver===ANY_APPROVER && isReviewer(u))) && ["submitted","changes_requested"].includes(i.status)).length;
+              const pending = state.contentItems.filter(i=>(i.creator===u.id || i.approver===u.id || ((i.approver===ANY_APPROVER || i.approver===EITHER_APPROVER) && isReviewer(u))) && ["submitted","changes_requested"].includes(i.status)).length;
               const turnaround = isReviewer(u) ? reviewTurnaround(state.activityLog, u.id) : "—";
               return (
                 <tr key={u.id} style={{borderBottom:"1px solid var(--border)"}}>

@@ -2581,6 +2581,18 @@ async function wsSaveItem(env, it) {
   return it;
 }
 
+// A song on a project (picked in the plan) or on a draft (mixed in). Library songs keep their details so they can be
+// loaded again and credited; a song typed by hand (Instagram's own library) is just a title and a link.
+function wsSong(m, mixed) {
+  const url = wsText(m.url || m.page, 300);
+  const t = m.id && /^[0-9a-f-]{36}$/.test(String(m.id)) ? { id: String(m.id), title: wsText(m.title, 120), artist: wsText(m.artist, 80), duration: Number(m.duration) || null,
+    license: wsText(m.license, 12), licenseLabel: wsText(m.licenseLabel, 30), licenseUrl: /^https:\/\//i.test(String(m.licenseUrl || "")) ? wsText(m.licenseUrl, 200) : "",
+    page: /^https:\/\//i.test(url) ? url : "", needsCredit: !!m.needsCredit, credit: wsText(m.credit, 200), genres: Array.isArray(m.genres) ? m.genres.slice(0, 3).map((g) => wsText(g, 20)) : [] } : null;
+  if (mixed) return t ? { ...t, start: Number(m.start) || 0, musicVol: Number(m.musicVol) || 0, origVol: Number(m.origVol) || 0, fade: !!m.fade,
+    ...(/^\/api\/media\/workspace\/[\w.-]+$/.test(String(m.sourceUrl || "")) ? { sourceUrl: m.sourceUrl } : {}) } : null;
+  return { title: wsText(m.title, 120), url: /^https:\/\//i.test(url) ? url : "", ...(t ? { track: t } : {}) };
+}
+
 // Ideas → Draft review → Waiting for approval → Approved (naming) → In Library.
 function wsStatus(p, items) {
   if (p.filed) return "filed";
@@ -2667,7 +2679,7 @@ async function workspaceRoute(request, env, url, viewer, ctx) {
     if (isNew || body.creatorId !== undefined) p.creatorId = members.some((m) => m.id === body.creatorId) ? body.creatorId : body.creatorId === "" ? null : me.id;
     if (isNew || body.due !== undefined) p.due = /^\d{4}-\d{2}-\d{2}$/.test(body.due || "") ? body.due : null;
     if (isNew || body.brief !== undefined) p.brief = wsText(body.brief, 2000);
-    if (body.music !== undefined) { const t = wsText(body.music && body.music.title, 120), u = wsText(body.music && body.music.url, 300); p.music = t ? { title: t, url: /^https:\/\//i.test(u) ? u : "" } : null; }
+    if (body.music !== undefined) p.music = body.music && body.music.title ? wsSong(body.music) : null;
     await wsSaveProject(env, p);
     if (isNew) await wsNotify(env, ctx, { actor: me, members, project: p, text: `📁 ${me.name} started a Workspace project: "${p.title}"`, push: { title: "New Workspace project", body: `${me.name}: ${p.title}` } });
     return json({ project: wsSummary(p, await wsItems(env, p.id), members) });
@@ -2712,7 +2724,8 @@ async function workspaceRoute(request, env, url, viewer, ctx) {
       if (!/^video\//.test(m.mime || "")) throw new HttpError(400, "Drafts must be videos.");
       const existing = (await wsItems(env, p.id)).filter((i) => i.kind === "draft");
       it.cut = existing.length + 1;
-      it.media = { fileUrl: m.fileUrl, mime: wsText(m.mime, 60), name: wsText(m.name, 200), size: Number(m.size) || null, duration: Number(m.duration) || null, w: Number(m.w) || null, h: Number(m.h) || null };
+      it.media = { fileUrl: m.fileUrl, mime: wsText(m.mime, 60), name: wsText(m.name, 200), size: Number(m.size) || null, duration: Number(m.duration) || null, w: Number(m.w) || null, h: Number(m.h) || null,
+        ...(m.music && m.music.title ? { music: wsSong(m.music, true) } : {}) };
     } else if (kind === "note") {
       const d = await wsItem(env, body.draftId);
       if (d.projectId !== p.id || d.kind !== "draft") throw new HttpError(400, "That draft isn't part of this project.");
@@ -2933,9 +2946,10 @@ async function wsFile(env, request, ctx, body, me, members) {
     const { rootId, folderId, branch } = await wsDriveFolder(env, token, p.branch);
     const approver = (members.find((m) => m.id === p.approval.by) || {}).name || "the team";
     const creator = (members.find((m) => m.id === d.author) || {}).name || "the creator";
-    const description = `Workspace project: ${p.title}. Filmed by ${creator}, draft ${d.cut}, approved by ${approver} on ${p.approval.at.slice(0, 10)}.` + (p.brief ? " Brief: " + p.brief.slice(0, 400) : "");
+    const song = d.media && d.media.music;
+    const description = `Workspace project: ${p.title}. Filmed by ${creator}, draft ${d.cut}, approved by ${approver} on ${p.approval.at.slice(0, 10)}.` + (song ? ` Music: ${song.credit || song.title + " by " + song.artist} (mixed in).` : "") + (p.brief ? " Brief: " + p.brief.slice(0, 400) : "");
     const driveId = await driveUploadFromR2(env, token, key, name, folderId, description);
-    p.filed = { driveId, name, barcode: check.barcode, by: me.id, at: new Date().toISOString(), folderId, rootId, draftId: d.id };
+    p.filed = { driveId, name, barcode: check.barcode, by: me.id, at: new Date().toISOString(), folderId, rootId, draftId: d.id, ...(song ? { music: song } : {}) };
     delete p.filing;
     await wsSaveProject(env, p);
     await wsAddToLibraryIndex(env, request, { id: driveId, name, mime: obj.httpMetadata && obj.httpMetadata.contentType || d.media.mime, size: obj.size, branch: branch.folder, path: [], modified: p.filed.at, note: description });

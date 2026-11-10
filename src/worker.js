@@ -148,6 +148,10 @@ export default {
       }
     }
 
+    if (url.pathname.startsWith("/api/music/") && request.method === "GET") {
+      try { return await musicRoute(url); } catch (e) { return json({ error: e.message || "Music error" }, e.status || 500); }
+    }
+
     if (url.pathname.startsWith("/api/push/")) {
       try {
         return await pushRoute(request, env, url, viewer);
@@ -1625,6 +1629,45 @@ async function pushToUsers(env, userIds, message) {
   await Promise.all((results || []).map((s) => sendPushTo(env, s, message).catch((e) => console.error("push error", e))));
 }
 
+// ---- Music library (royalty-free) ----
+// Search comes from Openverse (openverse.org), limited to music whose licence allows business use
+// (CC0, CC BY and public domain only: "non-commercial", "no-derivatives" and "share-alike" tracks can't be synced to
+// a business reel). The song is mixed into the video in the browser, so the
+// reel posts normally with the music in it. CC BY tracks need a credit, which the app adds to the caption.
+const OPENVERSE = "https://api.openverse.org/v1/audio/";
+const MUSIC_UA = { "User-Agent": "SanjugoCreatorStudio/1.0", Accept: "application/json" };
+function musicTrack(r) {
+  const lic = String(r.license || "").toLowerCase();
+  const label = lic === "cc0" ? "CC0" : lic === "pdm" ? "Public domain" : "CC " + lic.toUpperCase() + (r.license_version ? " " + r.license_version : "");
+  return { id: r.id, title: String(r.title || "Untitled").slice(0, 120), artist: String(r.creator || "Unknown artist").slice(0, 80),
+    duration: r.duration ? Math.round(r.duration / 1000) : null, license: lic, licenseLabel: label, licenseUrl: r.license_url || "",
+    page: r.foreign_landing_url || "", source: r.source || r.provider || "", genres: (r.genres || []).slice(0, 3),
+    needsCredit: !["cc0", "pdm"].includes(lic), credit: `🎵 Music: “${String(r.title || "Untitled").slice(0, 80)}” by ${String(r.creator || "Unknown").slice(0, 60)} (${label})` };
+}
+async function musicRoute(url) {
+  if (url.pathname === "/api/music/search") {
+    const q = String(url.searchParams.get("q") || "").trim().slice(0, 80) || "upbeat";
+    const page = Math.min(10, Math.max(1, Number(url.searchParams.get("page")) || 1));
+    const qs = new URLSearchParams({ q, license: "cc0,by,pdm", category: "music", page_size: "20", page: String(page), mature: "false" });
+    const r = await fetch(OPENVERSE + "?" + qs, { headers: MUSIC_UA, cf: { cacheTtl: 3600, cacheEverything: true } });
+    if (!r.ok) throw new HttpError(502, "The music library didn't answer (" + r.status + "). Try again in a minute.");
+    const d = await r.json();
+    const tracks = (d.results || []).filter((x) => x.url && (!x.duration || x.duration >= 10000) && ["cc0", "by", "pdm"].includes(String(x.license))).map(musicTrack);
+    return json({ tracks, total: d.result_count || tracks.length, page, pages: d.page_count || 1 });
+  }
+  const m = url.pathname.match(/^\/api\/music\/audio\/([0-9a-f-]{36})$/);
+  if (m) { // the song file, fetched through here so the editor can read it (only tracks from the library)
+    const info = await fetch(OPENVERSE + m[1] + "/", { headers: MUSIC_UA, cf: { cacheTtl: 86400, cacheEverything: true } });
+    if (!info.ok) throw new HttpError(404, "That song isn't in the library any more.");
+    const t = await info.json();
+    if (!t.url || !["cc0", "by", "pdm"].includes(String(t.license))) throw new HttpError(404, "That song can't be used.");
+    const a = await fetch(t.url, { headers: { "User-Agent": MUSIC_UA["User-Agent"] }, cf: { cacheTtl: 86400, cacheEverything: true } });
+    if (!a.ok || !a.body) throw new HttpError(502, "Couldn't load the song (" + a.status + ").");
+    return new Response(a.body, { headers: { "Content-Type": a.headers.get("Content-Type") || "audio/mpeg", "Cache-Control": "private, max-age=86400", ...(a.headers.get("Content-Length") ? { "Content-Length": a.headers.get("Content-Length") } : {}) } });
+  }
+  throw new HttpError(404, "Not found");
+}
+
 async function pushRoute(request, env, url, viewer) {
   if (url.pathname === "/api/push/key" && request.method === "GET") {
     return json({ publicKey: (await vapidKeys(env)).publicKey });
@@ -1778,7 +1821,7 @@ function absoluteMediaUrl(u, origin) {
 // Send one post to Make for the given platforms. Returns the jobs created (or reasons they weren't).
 const isStory = (item, v) => item.format === "story" || (v && v.postType === "Story");
 // Instagram/Meta don't let apps add library songs, so a post with a song is posted from the phone on these platforms.
-const musicByPhone = (item, platform) => !!(item.music && item.music.title) && ["instagram", "facebook", "tiktok"].includes(platform);
+const musicByPhone = (item, platform) => !!(item.music && item.music.title && !item.music.baked) && ["instagram", "facebook", "tiktok"].includes(platform);
 
 async function sendPublishJobs(env, { item, platforms, origin, userId, trigger }) {
   const cfg = await makeConfig(env);

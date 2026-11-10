@@ -1634,8 +1634,8 @@ async function pushRoute(request, env, url, viewer) {
     const night = await dailyDigest(env, "preview");
     const all = await digestTasks(env);
     const c = londonClock();
-    const morning = all.filter((x) => x.tasks.length > DIGEST_MANY).map((x) => ({ name: x.member.name, tasks: x.tasks.length, ...digestMessage(x.member, x.tasks, "morning", c.day) }));
-    return json({ night: night.sent, morning, times: { night: DIGEST_NIGHT + ":00", morning: DIGEST_MORNING + ":00", morningOnlyOver: DIGEST_MANY } });
+    const morning = all.map((x) => ({ name: x.member.name, tasks: x.tasks.length, ...digestMessage(x.member, x.tasks, "morning", c.day) }));
+    return json({ night: night.sent, morning, times: { night: DIGEST_NIGHT + ":00", morning: DIGEST_MORNING + ":00" } });
   }
   if (request.method !== "POST") return json({ error: "Not found" }, 404);
   const body = await request.json().catch(() => ({}));
@@ -1777,6 +1777,8 @@ function absoluteMediaUrl(u, origin) {
 
 // Send one post to Make for the given platforms. Returns the jobs created (or reasons they weren't).
 const isStory = (item, v) => item.format === "story" || (v && v.postType === "Story");
+// Instagram/Meta don't let apps add library songs, so a post with a song is posted from the phone on these platforms.
+const musicByPhone = (item, platform) => !!(item.music && item.music.title) && ["instagram", "facebook", "tiktok"].includes(platform);
 
 async function sendPublishJobs(env, { item, platforms, origin, userId, trigger }) {
   const cfg = await makeConfig(env);
@@ -1801,6 +1803,7 @@ async function sendPublishJobs(env, { item, platforms, origin, userId, trigger }
     }
     if (photos && platform === "youtube") { results.push({ platform, skipped: "YouTube can't post photos — this is a multi-photo post." }); continue; }
     if (isStory(item, v)) { results.push({ platform, skipped: "Stories can't be posted through Make — post it from the " + PLATFORM_NAMES[platform] + " app, then mark it as published." }); continue; }
+    if (musicByPhone(item, platform)) { results.push({ platform, skipped: "This post has a song (" + item.music.title + "). Apps can't add Instagram music — post it from the " + PLATFORM_NAMES[platform] + " app with the song, then mark it as published." }); continue; }
     if (!mediaUrl) { results.push({ platform, skipped: "The video or photo hasn't finished uploading to Creator Studio." }); continue; }
     // Google Business "Gallery photo": every photo of the post goes into each chosen listing's Photos (a cover takes the first only).
     const gbpGallery = platform === "gbp" && v.gbpType === "photo";
@@ -2062,9 +2065,9 @@ async function remindPendingApprovals(env) {
 }
 
 // ---- Daily reminder on everyone's phone ----
-// 9pm (London): what's still waiting on you, or "have a good night" when nothing is. People with more than
-// 5 things left also get a 9am "good morning" one. It's the same list as "Waiting on you" on the Dashboard.
-const DIGEST_NIGHT = 21, DIGEST_MORNING = 9, DIGEST_MANY = 5;
+// 10am (London) "good morning, here's what's waiting" and 9pm "good night" with what's still left — for everyone.
+// It's the same list as "Waiting on you" on the Dashboard.
+const DIGEST_NIGHT = 21, DIGEST_MORNING = 10;
 function londonClock(t = Date.now()) {
   const parts = Object.fromEntries(new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/London", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" })
     .formatToParts(new Date(t)).map((p) => [p.type, p.value]));
@@ -2111,6 +2114,8 @@ const DIGEST_WORDS = { failed: ["failed post", "failed posts"], approve: ["post 
   draft: ["draft to watch", "drafts to watch"], name: ["file to name", "files to name"], vote: ["project to vote on", "projects to vote on"] };
 const DIGEST_ICON = { failed: "🔴", approve: "✅", changes: "✏️", draft: "🎬", name: "📁", vote: "👍" };
 const DIGEST_NIGHTS = ["Rest well, tomorrow's a fresh start. 🌙", "Thanks for today — sleep well. 😴", "Switch off and recharge. Good night! ✨", "Great work today. Sweet dreams. 🌙", "Enjoy your evening — it'll keep till tomorrow. 💛"];
+const DIGEST_MORNINGS = ["Start your day — you've got this! 💪", "Let's make it a great one. ☀️", "Coffee first, then let's go! ☕", "Have a brilliant day! ✨"];
+const DIGEST_MORNING_CLEAR = ["Nothing is waiting on you — have a great day! ☀️", "All clear this morning. Enjoy your day! ✨", "You're all caught up. Have a lovely day! 💛"];
 const DIGEST_CLEAR = ["Nothing is waiting on you. Have a good night! 🌙", "All clear today — well done. Have a good night! ✨", "Inbox zero for Creator Studio. Sleep well! 😴", "You're all caught up. Enjoy your evening! 💛"];
 function digestMessage(m, tasks, slot, day) {
   const first = String(m.name || "").trim() || "there";
@@ -2122,7 +2127,8 @@ function digestMessage(m, tasks, slot, day) {
   const list = order.map((k) => `${DIGEST_ICON[k]} ${counts[k]} ${DIGEST_WORDS[k][counts[k] > 1 ? 1 : 0]}`).join(" · ");
   const n = tasks.length;
   const things = n + (n > 1 ? " things" : " thing");
-  if (slot === "morning") return { title: `☀️ Good morning, ${first} — ${things} waiting`, body: `${list}${urgent ? ` (${urgent} urgent)` : ""}. Tap to start with the urgent ones. Have a great day!`, url: "/#/dashboard", tag: "digest" };
+  if (slot === "morning") return !n ? { title: `☀️ Good morning, ${first}`, body: pick(DIGEST_MORNING_CLEAR), url: "/#/dashboard", tag: "digest" }
+    : { title: `☀️ Good morning, ${first} — ${things} waiting${urgent ? `, ${urgent} urgent` : ""}`, body: `${list}. ${urgent ? "Start with the urgent ones. " : ""}${pick(DIGEST_MORNINGS)}`, url: "/#/dashboard", tag: "digest" };
   if (!n) return { title: `🌙 Have a good night, ${first}`, body: pick(DIGEST_CLEAR), url: "/#/dashboard", tag: "digest" };
   return { title: `🌙 Good night, ${first} — ${things} left${urgent ? `, ${urgent} urgent` : ""}`, body: `${list}. Just a reminder for tomorrow. ${pick(DIGEST_NIGHTS)}`, url: "/#/dashboard", tag: "digest" };
 }
@@ -2139,7 +2145,6 @@ async function dailyDigest(env, force) {
   const all = await digestTasks(env);
   const sent = [];
   for (const { member, tasks } of all) {
-    if (slot === "morning" && tasks.length <= DIGEST_MANY) continue;
     const msg = digestMessage(member, tasks, slot, c.day);
     sent.push({ name: member.name, tasks: tasks.length, ...msg });
     if (force !== "preview") await pushToUsers(env, [member.id], msg).catch(() => {});
@@ -2160,7 +2165,7 @@ async function autoPublishDue(env) {
     const due = [];
     for (const platform of MAKE_PLATFORMS) {
       const v = (item.variants || {})[platform];
-      if (!publishHookFor(cfg, platform) || !v || v.publishStatus === "published" || !v.scheduledAt || isStory(item, v)) continue;
+      if (!publishHookFor(cfg, platform) || !v || v.publishStatus === "published" || !v.scheduledAt || isStory(item, v) || musicByPhone(item, platform)) continue;
       const at = londonTime(v.scheduledAt);
       if (!(at <= now) || now - at > 6 * 3600e3) continue; // not yet, or too old to post without someone checking
       // A failed attempt for this same time isn't retried automatically — someone decides from the post.
@@ -2619,6 +2624,7 @@ async function workspaceRoute(request, env, url, viewer, ctx) {
     if (isNew || body.creatorId !== undefined) p.creatorId = members.some((m) => m.id === body.creatorId) ? body.creatorId : body.creatorId === "" ? null : me.id;
     if (isNew || body.due !== undefined) p.due = /^\d{4}-\d{2}-\d{2}$/.test(body.due || "") ? body.due : null;
     if (isNew || body.brief !== undefined) p.brief = wsText(body.brief, 2000);
+    if (body.music !== undefined) { const t = wsText(body.music && body.music.title, 120), u = wsText(body.music && body.music.url, 300); p.music = t ? { title: t, url: /^https:\/\//i.test(u) ? u : "" } : null; }
     await wsSaveProject(env, p);
     if (isNew) await wsNotify(env, ctx, { actor: me, members, project: p, text: `📁 ${me.name} started a Workspace project: "${p.title}"`, push: { title: "New Workspace project", body: `${me.name}: ${p.title}` } });
     return json({ project: wsSummary(p, await wsItems(env, p.id), members) });

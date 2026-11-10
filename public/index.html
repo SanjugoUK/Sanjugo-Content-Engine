@@ -1205,7 +1205,7 @@ function baseReducer(state, action){
       const nextVersion = resubmit ? item.currentVersion + 1 : item.currentVersion;
       const versions = resubmit ? [...(item.versions||[]), {version:nextVersion, editor, date:new Date().toISOString(), changes: note || "Revised after feedback", decision:"—", feedback:null}] : item.versions;
       let updated = {...item, ...(patch.title!=null? {title:patch.title} : {}), ...(patch.media? {media:{...item.media, ...patch.media}} : {}),
-        ...(patch.libraryRef!==undefined? {libraryRef:patch.libraryRef} : {}), ...(patch.approver? {approver:patch.approver} : {}), ...(patch.notes!==undefined? {notes:patch.notes} : {}), variants, versions, currentVersion:nextVersion,
+        ...(patch.libraryRef!==undefined? {libraryRef:patch.libraryRef} : {}), ...(patch.approver? {approver:patch.approver} : {}), ...(patch.notes!==undefined? {notes:patch.notes} : {}), ...(patch.music!==undefined? {music:patch.music} : {}), variants, versions, currentVersion:nextVersion,
         ...(resubmit? {status:"submitted"} : {})};
       // New approver who has already approved (e.g. "both" → "Cyrus only" after Cyrus said yes): those platforms are done now.
       if(patch.approver && !resubmit && updated.status==="submitted"){
@@ -1503,7 +1503,13 @@ function MakePublishSection({item, onDone}){
   const {state, dispatch} = useApp();
   const mk = useMakeStore();
   const jobs = latestMakeJobs(item.id);
-  const pending = MAKE_PLATFORMS.filter(p=> makeReady("publish", p) && item.variants && item.variants[p] && item.variants[p].publishStatus!=="published" && !(jobs[p] && jobs[p].status==="sent"));
+  const pending = MAKE_PLATFORMS.filter(p=> makeReady("publish", p) && item.variants && item.variants[p] && item.variants[p].publishStatus!=="published" && !(jobs[p] && jobs[p].status==="sent") && !musicByPhone(item, p));
+  const byPhone = songOf(item) && !isStoryItem(item) ? item.platforms.filter(p=>musicByPhone(item, p) && (item.variants[p]||{}).publishStatus!=="published") : [];
+  const phoneNote = byPhone.length>0 && (
+    <div style={{border:"1px solid var(--violet)", background:"var(--violet-soft)", borderRadius:10, padding:12, marginBottom:12, fontSize:12.5, color:"var(--ink-soft)", lineHeight:1.5}}>
+      <div style={{fontSize:13.5, fontWeight:600, color:"var(--ink)", marginBottom:4}}>🎵 Post {byPhone.map(p=>PLATFORM_META[p].label).join(" and ")} from the phone (it has a song)</div>
+      Download the video, open {byPhone.map(p=>PLATFORM_META[p].label).join(" / ")}, add <b>{songOf(item).title}</b>{songOf(item).url? <> (<a href={songOf(item).url} target="_blank" rel="noopener noreferrer" style={{color:"var(--violet)"}}>open the song</a>)</> : null}, paste the caption, post it, then mark it as published below.
+    </div>);
   const [sel, setSel] = useState(pending);
   const [busy, setBusy] = useState(false);
   const [results, setResults] = useState(null);
@@ -1514,7 +1520,7 @@ function MakePublishSection({item, onDone}){
       <div style={{fontSize:13.5, fontWeight:600, color:"var(--ink)", marginBottom:4}}>Post this story from the phone app</div>
       Make can't post stories, so open {item.platforms.map(p=>PLATFORM_META[p].label).join(", ")} on the phone, post the story{item.platforms.some(p=>(item.variants[p]||{}).url)? " (add the link sticker)" : ""}, then mark it as published below.
     </div>);
-  if(!pending.length && !results) return null;
+  if(!pending.length && !results) return phoneNote || null;
   async function go(){
     setBusy(true);
     try{
@@ -1527,7 +1533,7 @@ function MakePublishSection({item, onDone}){
     }catch(e){ dispatch({type:"ADD_TOAST", message:e.message, variant:"danger"}); }
     setBusy(false);
   }
-  return (
+  return (<>{phoneNote}
     <div style={{border:"1px solid var(--accent)", background:"var(--accent-soft)", borderRadius:10, padding:12, marginBottom:16}}>
       <div style={{fontSize:13.5, fontWeight:600, marginBottom:4, display:"flex", alignItems:"center", gap:6}}><Icon name="send" size={14}/> Publish now with Make</div>
       <div style={{fontSize:12, color:"var(--ink-soft)", lineHeight:1.5, marginBottom:10}}>Posts straight to the accounts connected in Make — publicly, right away. You'll see the live link here and in Team Chat.</div>
@@ -1543,7 +1549,7 @@ function MakePublishSection({item, onDone}){
         <div key={r.platform} style={{fontSize:12, color:"var(--ink-soft)", marginTop:4}}><strong>{PLATFORM_META[r.platform].label}:</strong> {r.skipped || r.error}</div>
       ))}
       {pending.length>0 && <div style={{marginTop:10}}><Button variant="primary" size="sm" icon="send" disabled={busy || !sel.length || cantMedia} onClick={go}>{busy? "Sending…" : "Publish now"}</Button></div>}
-    </div>
+    </div></>
   );
 }
 
@@ -1949,6 +1955,7 @@ function ContentDetailDrawer({item, onClose}){
               <div style={{display:"flex", gap:8, flexWrap:"wrap"}}>{item.platforms.map(p=><span key={p} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 10px 5px 6px",borderRadius:99,background:"var(--surface-2)",fontSize:12.5,fontWeight:600}}><PlatformIcon platform={p} size={13}/>{PLATFORM_META[p].label}</span>)}</div>
             </div>
             {item.notes && <InfoField label="Note for the approvers" value={item.notes} block/>}
+            <MusicChip item={item}/>
             {item.lastFeedback && (
               <div style={{background:"var(--amber-soft)", border:"1px solid #F0D6A0", borderRadius:12, padding:14}}>
                 <div style={{fontSize:11.5, fontWeight:700, color:"var(--amber)", marginBottom:5}}>LATEST FEEDBACK — {USERS.find(u=>u.id===item.lastFeedback.by).name}</div>
@@ -2480,7 +2487,7 @@ function TikTokScreen({item, variant, brand, playing, muted}){
         <PhoneCaption lines={2} style={{fontSize:pt(14.5), marginBottom:pt(7)}}>{withTags(fullCaption(variant), {fontWeight:700})}</PhoneCaption>
         <div style={{display:"flex", alignItems:"center", gap:pt(6), fontSize:pt(13.5), whiteSpace:"nowrap", overflow:"hidden"}}>
           <svg viewBox="0 0 24 24" style={{width:pt(13), height:pt(13), flexShrink:0}}><path d="M9 18V5.5L19 4v11.5" fill="none" stroke="#fff" strokeWidth="2"/><circle cx="6.5" cy="18" r="2.5" fill="#fff"/><circle cx="16.5" cy="16" r="2.5" fill="#fff"/></svg>
-          <span style={{overflow:"hidden", textOverflow:"ellipsis"}}>original sound - {account}</span>
+          <span style={{overflow:"hidden", textOverflow:"ellipsis"}}>{songOf(item) ? songOf(item).title : "original sound - "+account}</span>
         </div>
       </div>
       <div style={{position:"absolute", left:0, right:0, bottom:0, height:pt(NAV), background:"#000", borderTop:"1px solid rgba(255,255,255,.08)", display:"flex", justifyContent:"space-around", alignItems:"flex-start", paddingTop:pt(8), color:"#fff"}}>
@@ -2767,6 +2774,37 @@ function ImmersiveViewer({entry, platform, onPlatform, onDecision, onClose, busy
   );
 }
 
+/* ---- Music: a song from Instagram's library ----
+   Instagram (Meta) doesn't let any outside app add its library songs, so a post with a song is posted from the phone:
+   Download → post in the app with the song → Mark as published. Auto-posting skips those platforms. */
+const MUSIC_PLATFORMS = ["instagram", "facebook", "tiktok"];
+const songOf = item => item && item.music && item.music.title ? item.music : null;
+const musicByPhone = (item, p) => !!songOf(item) && MUSIC_PLATFORMS.includes(p);
+function cleanMusic(m){ const title = String((m && m.title) || "").trim().slice(0, 120); const url = String((m && m.url) || "").trim().slice(0, 300); return title ? {title, url: /^https:\/\//i.test(url) ? url : ""} : null; }
+function MusicFields({value, onChange, hint=true}){
+  const m = value || {title:"", url:""};
+  const input = {width:"100%", padding:"9px 11px", borderRadius:10, border:"1px solid var(--border)", background:"var(--surface)", color:"var(--ink)", fontSize:13, boxSizing:"border-box"};
+  return (
+    <div>
+      <div style={{display:"grid", gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)", gap:8}} className="cf-field-grid">
+        <input value={m.title||""} onChange={e=>onChange({...m, title:e.target.value})} placeholder="Song — artist, e.g. Espresso — Sabrina Carpenter" style={input}/>
+        <input value={m.url||""} onChange={e=>onChange({...m, url:e.target.value})} placeholder="Instagram audio link (optional)" style={input}/>
+      </div>
+      {hint && <div style={{fontSize:11.5, color:"var(--ink-mute)", marginTop:5, lineHeight:1.5}}>Find the song in Instagram (Reels → tap the song name → Share → Copy link). Instagram doesn't let apps add its music, so a post with a song is <b>posted from the phone</b>: Download → add the song in Instagram → Mark as published. Business accounts only get Instagram's licensed songs, so pick one that shows up there.</div>}
+    </div>
+  );
+}
+function MusicChip({item, stop}){
+  const m = songOf(item); if(!m) return null;
+  return (
+    <div onPointerDown={stop} style={{display:"flex", alignItems:"center", gap:8, padding:"8px 11px", borderRadius:10, background:"var(--violet-soft)", border:"1px solid var(--violet)", fontSize:12.5, lineHeight:1.4}}>
+      <span style={{color:"var(--violet)", display:"inline-flex"}}><Icon name="musicNote" size={15}/></span>
+      <span style={{flex:1, minWidth:0}}><b>Music:</b> {m.title}<span style={{display:"block", fontSize:11, color:"var(--ink-mute)"}}>Added in the {item.platforms.filter(p=>MUSIC_PLATFORMS.includes(p)).map(p=>PLATFORM_META[p].label).join(" / ") || "Instagram"} app when posting from the phone</span></span>
+      {m.url && <a href={m.url} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()} style={{fontSize:12, fontWeight:700, color:"var(--violet)", textDecoration:"none", whiteSpace:"nowrap"}}>Open song ↗</a>}
+    </div>
+  );
+}
+
 function variantFields(platform, v){
   if(!v) return [];
   if(v.postType==="Story") return [["Link sticker", v.url || "None"], ["Posting notes", v.storyNotes]];
@@ -2869,6 +2907,7 @@ function SwipeCard({entry, onDecision, onOpenDetails, isTop, narrow, paused, onI
           <Badge label={PRIORITY_META[item.priority].label} color={PRIORITY_META[item.priority].color} soft="var(--surface-2)"/>
         </div>
         {(item.notes || item.currentVersion>1) && <div style={{padding:"0 12px 8px", flexShrink:0}}><ApproverNote item={item} creator={creator} compact stop={stop}/></div>}
+        {songOf(item) && <div style={{padding:"0 12px 8px", flexShrink:0}}><MusicChip item={item} stop={stop}/></div>}
         <div className="cf-noscrollbar" style={{display:"flex", alignItems:"center", gap:6, padding:"0 12px 8px", flexShrink:0, overflowX:"auto"}}>
           {tabs || singlePlatform}
         </div>
@@ -2897,6 +2936,7 @@ function SwipeCard({entry, onDecision, onOpenDetails, isTop, narrow, paused, onI
           </div>
         </div>
         <ApproverNote item={item} creator={creator} stop={stop}/>
+        <MusicChip item={item} stop={stop}/>
         <div>
           <div style={{fontSize:11, fontWeight:700, color:"var(--ink-mute)", textTransform:"uppercase", letterSpacing:".5px", marginBottom:8}}>Preview as it will appear on</div>
           <div style={{display:"flex", flexWrap:"wrap", gap:6, alignItems:"center"}}>{tabs || singlePlatform}{soundBtn}{fullBtn}</div>
@@ -3021,7 +3061,7 @@ function RevisionEditor({item, onClose}){
     if(!item){ setF(null); return; }
     const variants = {};
     Object.entries(item.variants||{}).forEach(([p,v])=>{ variants[p] = {caption:v.caption||"", hashtags:(v.hashtags||[]).join(" "), title:v.title||"", description:v.description||"", cta:v.cta||"", url:v.url||"", listing:gbpListing(v), gbpType: isGbpPhoto(v)? "photo" : "update", category:gbpCategory(v), storyNotes:v.storyNotes||"", scheduledAt: v.scheduledAt ? isoToLocalInput(v.scheduledAt) : ""}; });
-    setF({title:item.title, approver:item.approver||ANY_APPROVER, variants, media:null, libraryRef:undefined, note:"", notes:item.notes||"", mediaStatus:""});
+    setF({title:item.title, approver:item.approver||ANY_APPROVER, variants, media:null, libraryRef:undefined, note:"", notes:item.notes||"", music:item.music||{title:"", url:""}, mediaStatus:""});
     setTab(item.platforms[0]);
     setNotify(true);
     // Always start with one date for every platform — creators expect changing it to move the whole post.
@@ -3073,6 +3113,7 @@ function RevisionEditor({item, onClose}){
     });
     return {title:f.title.trim() || item.title, variants, ...(f.media? {media:f.media} : {}), ...(f.libraryRef!==undefined? {libraryRef:f.libraryRef} : {}),
       ...(f.approver !== (item.approver||ANY_APPROVER) ? {approver:f.approver} : {}),
+      ...(JSON.stringify(cleanMusic(f.music)) !== JSON.stringify(cleanMusic(item.music)) ? {music:cleanMusic(f.music)} : {}),
       ...((f.notes||"") !== (item.notes||"") ? {notes:f.notes} : {})};
   }
   async function save(resubmit){
@@ -3140,6 +3181,10 @@ function RevisionEditor({item, onClose}){
           <div><Button variant="text" size="sm" onClick={()=>{ setAllTimes((f.variants[item.platforms[0]]||{}).scheduledAt||""); setPerPlatform(false); }}>Use {PLATFORM_META[item.platforms[0]].label}'s time for all</Button></div>
         </div>}
 
+        {item.platforms.some(p=>MUSIC_PLATFORMS.includes(p)) && <>
+          <label style={label}>Music from Instagram (optional)</label>
+          <MusicFields value={f.music} onChange={m=>setF(x=>({...x, music:m}))} hint={false}/>
+        </>}
         <label style={label}>{isStoryItem(item)? "Story details per platform" : "Wording per platform"}</label>
         <div className="cf-noscrollbar" style={{display:"flex", gap:6, overflowX:"auto", marginBottom:10}}>
           {item.platforms.map(p=>(
@@ -5107,7 +5152,7 @@ function CreateContentPage(){
   const user = USERS.find(u=>u.id===state.currentUserId);
   const [step, setStep] = useState(0);
   const [form, setForm] = useState({
-    title:"", campaign: "", brand: BRANDS[0].id, pillar: PILLARS[0], creator: user.id, approver: ANY_APPROVER, priority:"normal", notes:"",
+    title:"", campaign: "", brand: BRANDS[0].id, pillar: PILLARS[0], creator: user.id, approver: ANY_APPROVER, priority:"normal", notes:"", music:{title:"", url:""},
     format:"post", mediaType:"video", aspectRatio:"9:16", duration:20, fileName:"", gallery:[], galleryStatus:"",
     platforms:["instagram"], scheduledAt:"", variants:{},
     ...(state.createPrefill || {}),
@@ -5241,6 +5286,8 @@ function CreateContentPage(){
     if(form.uploadStatus==="failed") w.push((form.uploadError? form.uploadError+" — " : "The file upload failed — ")+"re-upload it, or continue and add it later.");
     const conflict = state.contentItems.some(it=> it.brand===form.brand && it.platforms.some(p=>form.platforms.includes(p)) && Object.values(it.variants).some(v=> v.scheduledAt && form.scheduledAt && Math.abs(new Date(v.scheduledAt)-new Date(form.scheduledAt))<30*60000));
     if(conflict) w.push("Another post from this brand is scheduled within 30 minutes of this time.");
+    const byPhone = cleanMusic(form.music) ? form.platforms.filter(p=>MUSIC_PLATFORMS.includes(p)) : [];
+    if(byPhone.length && !story) w.push("🎵 With a song, "+byPhone.map(p=>PLATFORM_META[p].label).join(" and ")+" won't post automatically — Instagram doesn't let apps add music. Post it from the phone at its time (Download → add the song → Mark as published). If the song is already in your video, clear the Music box.");
     return w;
   }, [form, step, state.contentItems]);
 
@@ -5254,7 +5301,7 @@ function CreateContentPage(){
     });
     return {
       id: uid("ct"), title: form.title||"Untitled content", brand: form.brand, campaign: form.campaign, pillar: form.pillar,
-      creator: form.creator, approver: form.approver, priority: form.priority, notes: form.notes, status,
+      creator: form.creator, approver: form.approver, priority: form.priority, notes: form.notes, music: cleanMusic(form.music), status,
       createdAt: new Date().toISOString(), platforms: form.platforms, currentVersion: 1, format: story? "story" : "post",
       media: (!story && form.gallery.length>1) ? galleryMedia(form.gallery)
         : {type:form.mediaType, duration: form.mediaType==="video"?Number(form.duration):null, aspectRatio: form.aspectRatio, previewUrl: form.previewUrl || null, fileUrl: form.fileUrl || null},
@@ -5490,6 +5537,10 @@ function CreateContentPage(){
           {step===3 && (
             <div style={{display:"flex", flexDirection:"column", gap:16}}>
               {form.platforms.length===0 && <EmptyState icon="grid" title="No platforms selected" subtitle="Go back and select at least one platform to continue."/>}
+              {form.platforms.some(p=>MUSIC_PLATFORMS.includes(p)) && <Card style={{padding:16}}>
+                <div style={{display:"flex", alignItems:"center", gap:8, marginBottom:10}}><span style={{color:"var(--violet)", display:"inline-flex"}}><Icon name="musicNote" size={16}/></span><span style={{fontWeight:700, fontSize:14}}>Music from Instagram (optional)</span></div>
+                <MusicFields value={form.music} onChange={m=>set({music:m})}/>
+              </Card>}
               {form.platforms.map(p=>{
                 const v = form.variants[p]||{};
                 return (
@@ -7008,7 +7059,7 @@ function WsHome({onOpen}){
 
 function wsCreatePost(dispatch, p){
   LIBRARY_CACHE = null;
-  dispatch({type:"SET_ROUTE", route:"create", createPrefill:{libraryBarcode: p.filed.barcode, wsFresh:true, title: p.title}});
+  dispatch({type:"SET_ROUTE", route:"create", createPrefill:{libraryBarcode: p.filed.barcode, wsFresh:true, title: p.title, ...(cleanMusic(p.music)? {music:cleanMusic(p.music)} : {})}});
 }
 // "31 Oct" (and the year when it isn't this year).
 function wsDay(iso){ const d = new Date(iso); return fmtDate(iso, d.getFullYear()===new Date().getFullYear() ? {day:"numeric", month:"short"} : {day:"numeric", month:"short", year:"numeric"}); }
@@ -7381,6 +7432,8 @@ function WsIdeas({p, items, act}){
 function WsPlan({p, items, act}){
   const [brief, setBrief] = useState(p.brief || "");
   const [savedBrief, setSavedBrief] = useState(p.brief || "");
+  const [music, setMusic] = useState(p.music || {title:"", url:""});
+  useEffect(()=>{ setMusic(p.music || {title:"", url:""}); }, [JSON.stringify(p.music||null)]);
   const [shot, setShot] = useState("");
   useEffect(()=>{ if((p.brief||"")!==savedBrief){ setSavedBrief(p.brief||""); setBrief(p.brief||""); } }, [p.brief]);
   const shots = items.filter(i=>i.kind==="shot");
@@ -7397,6 +7450,17 @@ function WsPlan({p, items, act}){
             style={{width:"100%", borderRadius:10, border:"1px solid var(--border)", padding:11, fontSize:13.5, lineHeight:1.5, fontFamily:"inherit", resize:"vertical", background:"var(--surface)", color:"var(--ink)"}}/>
           <div style={{display:"flex", justifyContent:"flex-end", marginTop:8}}><Button size="sm" variant="primary" disabled={brief===(p.brief||"")} onClick={()=>act("/project", {id:p.id, brief}, "Plan saved")}>Save plan</Button></div>
         </>}
+        <div style={{borderTop:"1px solid var(--border)", marginTop:12, paddingTop:12}}>
+          <div style={{display:"flex", alignItems:"center", gap:7, fontWeight:600, fontSize:13.5, marginBottom:8}}><span style={{color:"var(--violet)", display:"inline-flex"}}><Icon name="musicNote" size={15}/></span>Music from Instagram</div>
+          {ro ? (cleanMusic(p.music) ? <div style={{fontSize:13}}>{p.music.title}{p.music.url && <> · <a href={p.music.url} target="_blank" rel="noopener noreferrer" style={{color:"var(--violet)"}}>Open song ↗</a></>}</div> : <div style={{fontSize:12.5, color:"var(--ink-mute)"}}>No song picked.</div>) : <>
+            <MusicFields value={music} onChange={setMusic} hint={false}/>
+            <div style={{display:"flex", alignItems:"center", gap:8, marginTop:8}}>
+              <span style={{flex:1, fontSize:11.5, color:"var(--ink-mute)", lineHeight:1.45}}>Optional. The creator films to it, and it's carried into the post (added in Instagram when posting from the phone).</span>
+              {cleanMusic(p.music) && cleanMusic(p.music).url && <a href={p.music.url} target="_blank" rel="noopener noreferrer" style={{fontSize:12, fontWeight:700, color:"var(--violet)", textDecoration:"none"}}>Open song ↗</a>}
+              <Button size="sm" disabled={JSON.stringify(cleanMusic(music))===JSON.stringify(cleanMusic(p.music))} onClick={()=>act("/project", {id:p.id, music:cleanMusic(music)}, cleanMusic(music)? "Song saved" : "Song removed")}>Save song</Button>
+            </div>
+          </>}
+        </div>
       </Card>
       <Card style={{padding:16}}>
         <div style={{display:"flex", alignItems:"center", gap:8, marginBottom:10}}>
@@ -8323,7 +8387,7 @@ function PushSettings(){
   else right = <Button variant="primary" size="sm" icon="bell" onClick={turnOn} disabled={busy}>{busy? "Turning on…" : "Turn on"}</Button>;
   return <>
     <SettingRow label="Phone & desktop alerts" hint={hint} on={!!sub}>{right}</SettingRow>
-    <div style={{fontSize:12, color:"var(--ink-mute)", margin:"-4px 0 10px", lineHeight:1.5}}>🌙 Every night at 9pm you get a reminder of what's still waiting on you (or just "have a good night" when nothing is). ☀️ With more than 5 things left you also get one at 9am.</div>
+    <div style={{fontSize:12, color:"var(--ink-mute)", margin:"-4px 0 10px", lineHeight:1.5}}>☀️ Every morning at 10am and 🌙 every night at 9pm you get a reminder of what's waiting on you (or just "good morning" / "have a good night" when nothing is).</div>
   </>;
 }
 

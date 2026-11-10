@@ -3012,6 +3012,19 @@ function VideoMusicEditor({form, setForm}){
     </div>
   );
 }
+function MusicFields({value, onChange, hint=true}){
+  const m = value || {title:"", url:""};
+  const input = {width:"100%", padding:"9px 11px", borderRadius:10, border:"1px solid var(--border)", background:"var(--surface)", color:"var(--ink)", fontSize:13, boxSizing:"border-box"};
+  return (
+    <div>
+      <div style={{display:"grid", gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)", gap:8}} className="cf-field-grid">
+        <input value={m.title||""} onChange={e=>onChange({...m, title:e.target.value})} placeholder="Song — artist, e.g. Espresso — Sabrina Carpenter" style={input}/>
+        <input value={m.url||""} onChange={e=>onChange({...m, url:e.target.value})} placeholder="Instagram audio link (optional)" style={input}/>
+      </div>
+      {hint && <div style={{fontSize:11.5, color:"var(--ink-mute)", marginTop:5, lineHeight:1.5}}>Find the song in Instagram (Reels → tap the song name → Share → Copy link). Instagram doesn't let apps add its music, so a post with a song is <b>posted from the phone</b>: Download → add the song in Instagram → Mark as published. Business accounts only get Instagram's licensed songs, so pick one that shows up there.</div>}
+    </div>
+  );
+}
 function MusicChip({item, stop}){
   const m = songOf(item); if(!m) return null;
   if(m.baked) return (

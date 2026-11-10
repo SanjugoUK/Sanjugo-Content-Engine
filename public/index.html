@@ -2781,7 +2781,12 @@ function ImmersiveViewer({entry, platform, onPlatform, onDecision, onClose, busy
 const MUSIC_PLATFORMS = ["instagram", "facebook", "tiktok"];
 const songOf = item => item && item.music && item.music.title ? item.music : null;
 const musicByPhone = (item, p) => !!songOf(item) && !item.music.baked && MUSIC_PLATFORMS.includes(p);
-function cleanMusic(m){ const title = String((m && m.title) || "").trim().slice(0, 120); const url = String((m && m.url) || "").trim().slice(0, 300); return title ? {title, url: /^https:\/\//i.test(url) ? url : "", ...(m.baked? {baked:true, credit:String(m.credit||"").slice(0,200)} : {})} : null; }
+// A 30-second Apple Music preview of an Instagram song (only to listen in Creator Studio; never posted).
+const APPLE_AUDIO = /^https:\/\/[a-z0-9.-]+\.(apple|mzstatic)\.com\//;
+function cleanPreview(p){ return p && APPLE_AUDIO.test(String(p.preview||"")) ? {id:String(p.id||"").slice(0,30), name:String(p.name||"").slice(0,120), artist:String(p.artist||"").slice(0,80),
+  art: APPLE_AUDIO.test(String(p.art||"")) ? String(p.art) : "", preview:String(p.preview).slice(0,400), link: /^https:\/\/music\.apple\.com\//.test(String(p.link||"")) ? String(p.link).slice(0,300) : ""} : null; }
+function cleanMusic(m){ const title = String((m && m.title) || "").trim().slice(0, 120); const url = String((m && m.url) || "").trim().slice(0, 300); const pv = !m || m.baked ? null : cleanPreview(m.preview);
+  return title ? {title, url: /^https:\/\//i.test(url) ? url : "", ...(pv? {preview:pv} : {}), ...(m.baked? {baked:true, credit:String(m.credit||"").slice(0,200)} : {})} : null; }
 
 /* ---- Music library: royalty-free songs mixed into the video before posting ----
    Search: /api/music/search (Openverse, business-safe licences only). The mix runs in the browser with ffmpeg.wasm
@@ -2827,10 +2832,137 @@ async function mixMusicIntoVideo({videoUrl, track, start, musicVol, origVol, fad
     for(const f of ["in.mp4", "song.mp3", "out.mp4"]){ try{ await ff.deleteFile(f); }catch(e){} }
   }
 }
+/* A single photo turned into a short silent video (so a song can be mixed in like any reel).
+   The frame is drawn once on a canvas: 9:16 with a blurred copy of the photo behind it, or the photo's own shape.
+   ffmpeg then encodes that still, with an optional slow zoom. Returns a blob: URL of the MP4. */
+async function photoToVideo({imageUrl, seconds=12, zoom=true, fill=true, onStatus}){
+  onStatus && onStatus("Preparing the photo…");
+  const img = await new Promise((res, rej)=>{ const i = new Image(); i.crossOrigin = "anonymous"; i.onload = ()=>res(i); i.onerror = ()=>rej(new Error("Couldn't load the photo")); i.src = imageUrl; });
+  const iw = img.naturalWidth, ih = img.naturalHeight;
+  let W = 1080, H = 1920;
+  if(!fill){ H = Math.round(W * ih / iw / 2) * 2; if(H > 1920){ H = 1920; W = Math.round(H * iw / ih / 2) * 2; } }
+  const c = document.createElement("canvas"); c.width = W; c.height = H; const g = c.getContext("2d");
+  g.fillStyle = "#000"; g.fillRect(0, 0, W, H);
+  if(fill){
+    const k = Math.max(W/iw, H/ih); g.filter = "blur(40px) brightness(0.6)";
+    g.drawImage(img, (W-iw*k)/2 - 40, (H-ih*k)/2 - 40, iw*k + 80, ih*k + 80); g.filter = "none";
+  }
+  const k = Math.min(W/iw, H/ih); g.drawImage(img, (W-iw*k)/2, (H-ih*k)/2, iw*k, ih*k);
+  const jpg = await new Promise(r=>c.toBlob(r, "image/jpeg", 0.92));
+  const ff = await loadFFmpeg(onStatus);
+  await ff.writeFile("photo.jpg", new Uint8Array(await jpg.arrayBuffer()));
+  const S = Math.max(3, Math.min(60, Number(seconds) || 12));
+  const onProg = ({progress})=> onStatus && progress>0 && progress<=1 && onStatus("Turning the photo into a video… "+Math.round(progress*100)+"%");
+  ff.on("progress", onProg);
+  const base = ["-loop", "1", "-framerate", "25", "-i", "photo.jpg", "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100", "-t", String(S)];
+  const enc = ["-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", "-movflags", "+faststart", "photo.mp4"];
+  const zoomVf = `scale=w='2*trunc(${W}*(1+0.08*t/${S})/2)':h=-2:eval=frame,crop=${W}:${H}`;
+  try{
+    onStatus && onStatus("Turning the photo into a video…");
+    let code = zoom ? await ff.exec([...base, "-vf", zoomVf, ...enc]) : -1;
+    if(code!==0){ try{ await ff.deleteFile("photo.mp4"); }catch(e){} code = await ff.exec([...base, "-tune", "stillimage", ...enc]); }
+    if(code!==0) throw new Error("Couldn't turn the photo into a video.");
+    const data = await ff.readFile("photo.mp4");
+    return {url: URL.createObjectURL(new Blob([data.buffer], {type:"video/mp4"})), seconds:S, aspectRatio: fill ? "9:16" : (nearestAspect(W, H) || "4:5")};
+  } finally {
+    ff.off("progress", onProg);
+    for(const f of ["photo.jpg", "photo.mp4"]){ try{ await ff.deleteFile(f); }catch(e){} }
+  }
+}
 const MUSIC_MOODS = ["Upbeat", "Chill", "Happy", "Jazz", "Acoustic", "Lofi", "Piano", "Cinematic", "Electronic", "Funk", "Latin", "Summer"];
 const fmtSecs = s => { s = Math.max(0, Math.round(s||0)); return Math.floor(s/60)+":"+String(s%60).padStart(2, "0"); };
 let MUSIC_PREVIEW = null; // one song plays at a time across the page
 function stopMusicPreview(){ if(MUSIC_PREVIEW){ MUSIC_PREVIEW.pause(); MUSIC_PREVIEW = null; } }
+/* Plays an Instagram song's Apple Music clip (looped) alongside a phone preview while `on`. */
+const clipOf = m => m && !m.baked && m.preview && m.preview.preview ? m.preview : null;
+function useSongClip(music, on){
+  const clip = clipOf(music); const src = clip ? clip.preview : "";
+  useEffect(()=>{
+    if(!src || !on) return;
+    stopMusicPreview();
+    const a = new Audio(src); a.loop = true; a.volume = 0.8; MUSIC_PREVIEW = a;
+    const p = a.play(); if(p && p.catch) p.catch(()=>{});
+    return ()=>{ a.pause(); if(MUSIC_PREVIEW===a) MUSIC_PREVIEW = null; };
+  }, [src, on]);
+  return clip;
+}
+function ClipPlayButton({clip, size=32}){
+  const [on, setOn] = useState(false); const [pct, setPct] = useState(0);
+  const ref = useRef(null);
+  useEffect(()=>()=>{ if(ref.current){ ref.current.pause(); if(MUSIC_PREVIEW===ref.current) MUSIC_PREVIEW = null; } }, []);
+  function toggle(e){
+    e && e.stopPropagation();
+    if(on && ref.current){ ref.current.pause(); return; }
+    stopMusicPreview();
+    const a = ref.current && ref.current.src===clip.preview ? ref.current : new Audio(clip.preview);
+    ref.current = a; MUSIC_PREVIEW = a;
+    a.onplay = ()=>setOn(true); a.onpause = ()=>setOn(false); a.onended = ()=>{ setOn(false); setPct(0); };
+    a.ontimeupdate = ()=>setPct(a.duration ? a.currentTime/a.duration : 0);
+    const p = a.play(); if(p && p.catch) p.catch(()=>setOn(false));
+  }
+  return (
+    <button onPointerDown={e=>e.stopPropagation()} onClick={toggle} title={on? "Stop" : "Listen to a 30-second preview"} aria-label={on? "Stop" : "Listen"}
+      style={{width:size, height:size, borderRadius:99, border:"none", cursor:"pointer", flexShrink:0, fontSize:12, color: on? "#fff" : "var(--violet)",
+        background: on? `conic-gradient(var(--violet) ${Math.round(pct*360)}deg, #7c6fd6 0)` : "var(--surface)", boxShadow:"inset 0 0 0 1.5px var(--violet)"}}>{on? "■" : "▶"}</button>
+  );
+}
+/* Finds the typed Instagram song on Apple Music and shows its 30-second clip, with the top 3 matches to choose from. */
+function ApplePreviewFinder({value, onChange}){
+  const m = value || {};
+  const latest = useRef(m); latest.current = m;
+  const [matches, setMatches] = useState(null); const [open, setOpen] = useState(false); const [status, setStatus] = useState("");
+  const title = String(m.title||"").trim();
+  const searched = useRef(m.preview ? title : null);
+  useEffect(()=>{
+    if(title.length < 3 || searched.current===title) return;
+    const t = setTimeout(async ()=>{
+      searched.current = title; setStatus("Finding a preview…");
+      try{
+        const r = await fetch("/api/music/preview?q="+encodeURIComponent(title)); const d = await r.json().catch(()=>({}));
+        if(!r.ok) throw new Error(d.error || "Couldn't find a preview");
+        const songs = (d.songs||[]).map(cleanPreview).filter(Boolean);
+        setMatches(songs); setStatus(songs.length ? "" : "No preview found. Check the name (Song — artist).");
+        if(String(latest.current.title||"").trim()===title) onChange({...latest.current, preview: songs[0] || null});
+      }catch(e){ setStatus(e.message); }
+    }, 700);
+    return ()=>clearTimeout(t);
+  }, [title]);
+  async function showOthers(){
+    setOpen(o=>!o);
+    if(matches || !title) return;
+    try{ const d = await fetch("/api/music/preview?q="+encodeURIComponent(title)).then(r=>r.json()); setMatches((d.songs||[]).map(cleanPreview).filter(Boolean)); }catch(e){}
+  }
+  const pv = m.preview;
+  if(!title) return null;
+  if(!pv) return status ? <div style={{fontSize:11.5, color:"var(--ink-mute)", marginTop:8}}>{status}</div> : null;
+  return (
+    <div style={{marginTop:10}}>
+      <div style={{display:"flex", alignItems:"center", gap:10, padding:"8px 10px", borderRadius:10, background:"var(--violet-soft)", border:"1px solid var(--violet)"}}>
+        {pv.art ? <img src={pv.art} alt="" style={{width:38, height:38, borderRadius:6, objectFit:"cover", flexShrink:0}}/> : <span style={{width:38, height:38, borderRadius:6, background:"var(--violet)", flexShrink:0}}/>}
+        <div style={{flex:1, minWidth:0, lineHeight:1.35}}>
+          <div style={{fontSize:13, fontWeight:700, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>{pv.name}</div>
+          <div style={{fontSize:11.5, color:"var(--ink-mute)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>{pv.artist} · 30s preview from Apple Music</div>
+        </div>
+        <ClipPlayButton clip={pv}/>
+      </div>
+      <div style={{display:"flex", gap:12, marginTop:5, fontSize:11.5, flexWrap:"wrap", alignItems:"center"}}>
+        <button onClick={showOthers} style={{border:"none", background:"none", padding:0, color:"var(--violet)", fontWeight:600, cursor:"pointer", fontSize:11.5}}>{open? "Hide other matches" : "Not this song?"}</button>
+        <button onClick={()=>onChange({...m, preview:null})} style={{border:"none", background:"none", padding:0, color:"var(--ink-mute)", cursor:"pointer", fontSize:11.5, textDecoration:"underline"}}>No preview</button>
+        <span style={{color:"var(--ink-mute)"}}>Only for listening here. The real song is added in Instagram.</span>
+      </div>
+      {open && matches && <div style={{display:"flex", flexDirection:"column", gap:6, marginTop:8}}>
+        {matches.filter(x=>x.id!==pv.id).map(x=>(
+          <div key={x.id} style={{display:"flex", alignItems:"center", gap:9, padding:"6px 8px", borderRadius:9, border:"1px solid var(--border)"}}>
+            {x.art && <img src={x.art} alt="" style={{width:30, height:30, borderRadius:5, flexShrink:0}}/>}
+            <div style={{flex:1, minWidth:0, fontSize:12, lineHeight:1.35}}><b>{x.name}</b><div style={{color:"var(--ink-mute)"}}>{x.artist}</div></div>
+            <ClipPlayButton clip={x} size={28}/>
+            <Button size="sm" onClick={()=>{ onChange({...m, preview:x}); setOpen(false); }}>Use</Button>
+          </div>))}
+        {matches.filter(x=>x.id!==pv.id).length===0 && <div style={{fontSize:11.5, color:"var(--ink-mute)"}}>No other matches. Try adding the artist to the song name.</div>}
+      </div>}
+    </div>
+  );
+}
 // The library list: mood buttons, search, ▶ listen and a pick button. Used in Create, the Workspace plan and Draft review.
 function MusicSearch({onPick, pickLabel="Use", selectedId, onClose, startQuery="upbeat"}){
   const {dispatch} = useApp();
@@ -2887,11 +3019,11 @@ function MusicSearch({onPick, pickLabel="Use", selectedId, onClose, startQuery="
 }
 // Fit a song to a video: where the song starts, volumes, fade-out, a synced preview, then mix it in.
 // onApply(blob, settings, setBusy) saves the mixed video (as the post's video, or as a new Workspace draft).
-function MusicFitter({videoUrl, duration, track, init, applyLabel="Add to video", onApply, onBack}){
+function MusicFitter({videoUrl, duration, track, init, applyLabel="Add to video", onApply, onBack, noOriginal}){
   const {dispatch} = useApp();
   const [start, setStart] = useState((init && init.start) || 0);
   const [musicVol, setMusicVol] = useState(init && init.musicVol!=null ? init.musicVol : 80);
-  const [origVol, setOrigVol] = useState(init && init.origVol!=null ? init.origVol : 20);
+  const [origVol, setOrigVol] = useState(noOriginal ? 0 : init && init.origVol!=null ? init.origVol : 20);
   const [fade, setFade] = useState(init && init.fade!=null ? init.fade : true);
   const [busy, setBusy] = useState("");
   const [previewing, setPreviewing] = useState(false);
@@ -2942,7 +3074,7 @@ function MusicFitter({videoUrl, duration, track, init, applyLabel="Add to video"
         <div style={{fontSize:13.5}}><b>{track.title}</b> — {track.artist}<div style={{fontSize:11.5, color:"var(--ink-mute)"}}>{track.duration? fmtSecs(track.duration)+" song · " : ""}video {fmtSecs(vidDur)} · {track.licenseLabel}</div></div>
         {slider("Song starts at", start, setStart, 0, Math.max(0.5, maxStart), 0.5, fmtSecs)}
         {slider("Music volume", musicVol, setMusicVol, 0, 100, 5, v=>v+"%")}
-        {slider("Original sound", origVol, setOrigVol, 0, 100, 5, v=> v? v+"%" : "Off")}
+        {!noOriginal && slider("Original sound", origVol, setOrigVol, 0, 100, 5, v=> v? v+"%" : "Off")}
         <label style={{display:"flex", alignItems:"center", gap:8, fontSize:12.5}}><input type="checkbox" checked={fade} onChange={e=>setFade(e.target.checked)}/> Fade the music out at the end</label>
         {track.needsCredit && <div style={{fontSize:11.5, color:"var(--ink-mute)", lineHeight:1.45}}>This song's licence asks for a credit, so this line goes in the caption when it's posted: <i>{track.credit}</i></div>}
         <div style={{display:"flex", gap:8, flexWrap:"wrap"}}>
@@ -2974,42 +3106,82 @@ function VideoMusicEditor({form, setForm}){
   const mix = form.musicMix;
   const [open, setOpen] = useState(false);
   const [pick, setPick] = useState(null);
-  const videoUrl = (mix && mix.original) || form.fileUrl;
-  // A song picked in the Workspace plan comes along with "Create post from this": ready to fit.
+  // A single photo: it becomes a short video (photo settings below) and the song is mixed into that.
+  const photo = mix && mix.photo ? mix.photo : (form.mediaType==="image" && form.fileUrl ? {url: form.fileUrl, previewUrl: form.previewUrl || form.fileUrl, aspectRatio: form.aspectRatio} : null);
+  const [photoOpts, setPhotoOpts] = useState(()=>({seconds: (mix && mix.photo && mix.photo.seconds) || 12, zoom: mix && mix.photo ? !!mix.photo.zoom : true, fill: mix && mix.photo ? mix.photo.fill!==false : true}));
+  const [photoVid, setPhotoVid] = useState(null); // {url, seconds, aspectRatio, key}
+  const [making, setMaking] = useState("");
+  const videoUrl = photo ? (photoVid && photoVid.url) : (mix && mix.original) || form.fileUrl;
   const plannedUsed = useRef(false);
-  useEffect(()=>{ if(!plannedUsed.current && !mix && form.plannedTrack && form.fileUrl && !(form.music && form.music.baked)){ plannedUsed.current = true; setPick(form.plannedTrack); } }, [form.fileUrl]);
+  useEffect(()=>{ if(!plannedUsed.current && !mix && !photo && form.plannedTrack && form.fileUrl && !(form.music && form.music.baked)){ plannedUsed.current = true; setPick(form.plannedTrack); } }, [form.fileUrl]);
+  useEffect(()=>()=>{ if(photoVid) URL.revokeObjectURL(photoVid.url); }, [photoVid]);
+  async function choose(t){
+    if(!photo){ setPick(t); return; }
+    const key = photo.url+"|"+photoOpts.seconds+"|"+photoOpts.zoom+"|"+photoOpts.fill;
+    if(!(photoVid && photoVid.key===key)){
+      try{ setMaking("Turning the photo into a video…");
+        const v = await photoToVideo({imageUrl: photo.url, ...photoOpts, onStatus: setMaking});
+        setPhotoVid({...v, key});
+      }catch(e){ dispatch({type:"ADD_TOAST", message:e.message || "Couldn't turn the photo into a video", variant:"danger"}); setMaking(""); return; }
+      setMaking("");
+    }
+    setPick(t);
+  }
   async function saveMix(blob, settings, setBusy){
     setBusy("Saving the new video…");
-    const base = String(form.fileName || "video").replace(/\.[^.]+$/, "");
+    const base = String(form.fileName || (photo? "photo" : "video")).replace(/\.[^.]+$/, "");
     const up = await uploadMediaFile(new File([blob], base+"-music.mp4", {type:"video/mp4"}));
     const credit = pick.needsCredit ? pick.credit : "";
-    setForm(f=>({...f, fileUrl: up.url, musicMix:{track:trackInfo(pick), ...settings, original: (f.musicMix && f.musicMix.original) || f.fileUrl},
+    setForm(f=>({...f, fileUrl: up.url, musicMix:{track:trackInfo(pick), ...settings, original: photo ? null : (f.musicMix && f.musicMix.original) || f.fileUrl,
+        ...(photo ? {photo:{url:photo.url, previewUrl:photo.previewUrl, aspectRatio:photo.aspectRatio, ...photoOpts}} : {})},
+      ...(photo ? {mediaType:"video", duration: photoVid.seconds, aspectRatio: photoVid.aspectRatio, previewUrl: photo.previewUrl} : {}),
       music:{title: pick.title+" — "+pick.artist, url: pick.page, baked:true, credit}, variants: withMusicCredit(f.variants, credit, true, f.platforms)}));
-    dispatch({type:"ADD_TOAST", message:"Music added — the preview now plays the video with the song"});
+    dispatch({type:"ADD_TOAST", message: photo ? "Done — the photo is now a "+photoVid.seconds+"s reel with the song" : "Music added — the preview now plays the video with the song"});
     setPick(null); setOpen(false);
   }
   function remove(){
-    setForm(f=>({...f, fileUrl: (f.musicMix && f.musicMix.original) || f.fileUrl, musicMix:null, music:{title:"", url:""}, variants: withMusicCredit(f.variants, "", false, f.platforms)}));
-    dispatch({type:"ADD_TOAST", message:"Music removed — back to the original sound"});
+    setForm(f=>{
+      const m = f.musicMix || {};
+      const back = m.photo ? {fileUrl: m.photo.url, previewUrl: m.photo.previewUrl, mediaType:"image", aspectRatio: m.photo.aspectRatio || f.aspectRatio} : {fileUrl: m.original || f.fileUrl};
+      return {...f, ...back, musicMix:null, music:{title:"", url:""}, variants: withMusicCredit(f.variants, "", false, f.platforms)};
+    });
+    setPhotoVid(null);
+    dispatch({type:"ADD_TOAST", message: mix && mix.photo ? "Music removed — back to the photo" : "Music removed — back to the original sound"});
   }
-  if(!form.fileUrl) return <div style={{fontSize:12.5, color:"var(--ink-mute)"}}>Upload the video first (step 2), then add music here.</div>;
-  if(pick) return <MusicFitter videoUrl={videoUrl} duration={form.duration} track={pick} init={mix && mix.track && mix.track.id===pick.id ? mix : null} applyLabel={mix? "Apply changes" : "Add to video"} onApply={saveMix} onBack={()=>setPick(null)}/>;
+  if(!form.fileUrl) return <div style={{fontSize:12.5, color:"var(--ink-mute)"}}>Upload the {form.mediaType==="image"? "photo" : "video"} first (step 2), then add music here.</div>;
+  if(making) return <div style={{display:"flex", alignItems:"center", gap:10, fontSize:13, color:"var(--ink-soft)", padding:"10px 0"}}><span aria-hidden="true">⏳</span>{making}</div>;
+  if(pick && videoUrl) return <MusicFitter videoUrl={videoUrl} duration={photo ? photoVid.seconds : form.duration} track={pick} noOriginal={!!photo}
+    init={mix && mix.track && mix.track.id===pick.id ? mix : null} applyLabel={mix? "Apply changes" : photo? "Make the reel" : "Add to video"} onApply={saveMix} onBack={()=>setPick(null)}/>;
+  const opt = (label, on, fn) => <label style={{display:"flex", alignItems:"center", gap:6, fontSize:12.5, cursor:"pointer"}}><input type="checkbox" checked={on} onChange={e=>fn(e.target.checked)}/>{label}</label>;
+  const photoSettings = photo && (
+    <div style={{display:"flex", alignItems:"center", gap:14, flexWrap:"wrap", padding:"9px 11px", borderRadius:10, background:"var(--surface-2)", marginBottom:10}}>
+      <span style={{fontSize:12.5, fontWeight:700}}>Photo → reel</span>
+      <label style={{display:"flex", alignItems:"center", gap:6, fontSize:12.5}}>Length
+        <select value={photoOpts.seconds} onChange={e=>setPhotoOpts(o=>({...o, seconds:Number(e.target.value)}))} style={{borderRadius:7, border:"1px solid var(--border)", padding:"3px 6px", background:"var(--surface)", color:"var(--ink)"}}>
+          {[7, 10, 12, 15, 20, 30].map(n=><option key={n} value={n}>{n} s</option>)}
+        </select></label>
+      {opt("Slow zoom", photoOpts.zoom, v=>setPhotoOpts(o=>({...o, zoom:v})))}
+      {opt("Full screen 9:16 (blurred edges)", photoOpts.fill, v=>setPhotoOpts(o=>({...o, fill:v})))}
+    </div>);
   return (
     <div>
       {form.music && form.music.baked && !mix && <div style={{marginBottom:10}}><MusicChip item={{music:form.music, platforms:form.platforms}}/>
         <div style={{fontSize:11.5, color:"var(--ink-mute)", marginTop:4}}>This video already has the music in it (from the Workspace){form.music.credit? ", and the credit line is in the caption" : ""}.</div></div>}
       {mix && <div style={{display:"flex", alignItems:"center", gap:10, padding:"9px 11px", borderRadius:10, background:"var(--violet-soft)", border:"1px solid var(--violet)", marginBottom: open? 12 : 0, flexWrap:"wrap"}}>
         <span style={{color:"var(--violet)", display:"inline-flex"}}><Icon name="musicNote" size={16}/></span>
-        <span style={{flex:"1 1 200px", minWidth:0, fontSize:13}}><b>{mix.track.title}</b> — {mix.track.artist}<span style={{display:"block", fontSize:11.5, color:"var(--ink-mute)"}}>Mixed into the video from {fmtSecs(mix.start)} · music {mix.musicVol}% · original sound {mix.origVol}%{mix.track.needsCredit? " · credit added to the caption" : ""}</span></span>
-        <Button size="sm" onClick={()=>setPick(mix.track)}>Adjust</Button>
+        <span style={{flex:"1 1 200px", minWidth:0, fontSize:13}}><b>{mix.track.title}</b> — {mix.track.artist}<span style={{display:"block", fontSize:11.5, color:"var(--ink-mute)"}}>{mix.photo ? "Photo made into a "+mix.photo.seconds+"s reel" : "Mixed into the video"} from {fmtSecs(mix.start)} · music {mix.musicVol}%{mix.photo? "" : " · original sound "+mix.origVol+"%"}{mix.track.needsCredit? " · credit added to the caption" : ""}</span></span>
+        <Button size="sm" onClick={()=>choose(mix.track)}>Adjust</Button>
         <Button size="sm" onClick={()=>setOpen(o=>!o)}>Change song</Button>
         <Button size="sm" variant="subtle" onClick={remove}>Remove</Button>
       </div>}
+      {(!mix || open) && photoSettings}
       {!mix && !open && !(form.music && form.music.baked) && <div style={{display:"flex", alignItems:"center", gap:10, flexWrap:"wrap"}}>
-        <span style={{flex:"1 1 220px", fontSize:12.5, color:"var(--ink-soft)", lineHeight:1.5}}>Search royalty-free songs, fit one to your video, and it's mixed in, so the reel posts with the music like a normal reel.</span>
+        <span style={{flex:"1 1 220px", fontSize:12.5, color:"var(--ink-soft)", lineHeight:1.5}}>{photo
+          ? "Search royalty-free songs. The photo becomes a short reel with the song mixed in, so it posts automatically like a normal reel."
+          : "Search royalty-free songs, fit one to your video, and it's mixed in, so the reel posts with the music like a normal reel."}</span>
         <Button variant="primary" size="sm" icon="search" onClick={()=>setOpen(true)}>Find music</Button>
       </div>}
-      {open && <MusicSearch onPick={t=>setPick(t)} onClose={()=>setOpen(false)}/>}
+      {open && <MusicSearch onPick={t=>choose(t)} onClose={()=>setOpen(false)}/>}
     </div>
   );
 }
@@ -3019,9 +3191,10 @@ function MusicFields({value, onChange, hint=true}){
   return (
     <div>
       <div style={{display:"grid", gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)", gap:8}} className="cf-field-grid">
-        <input value={m.title||""} onChange={e=>onChange({...m, title:e.target.value})} placeholder="Song — artist, e.g. Espresso — Sabrina Carpenter" style={input}/>
+        <input value={m.title||""} onChange={e=>onChange({...m, title:e.target.value, preview:null})} placeholder="Song — artist, e.g. Espresso — Sabrina Carpenter" style={input}/>
         <input value={m.url||""} onChange={e=>onChange({...m, url:e.target.value})} placeholder="Instagram audio link (optional)" style={input}/>
       </div>
+      <ApplePreviewFinder value={m} onChange={onChange}/>
       {hint && <div style={{fontSize:11.5, color:"var(--ink-mute)", marginTop:5, lineHeight:1.5}}>Find the song in Instagram (Reels → tap the song name → Share → Copy link). Instagram doesn't let apps add its music, so a post with a song is <b>posted from the phone</b>: Download → add the song in Instagram → Mark as published. Business accounts only get Instagram's licensed songs, so pick one that shows up there.</div>}
     </div>
   );
@@ -3037,7 +3210,8 @@ function MusicChip({item, stop}){
   return (
     <div onPointerDown={stop} style={{display:"flex", alignItems:"center", gap:8, padding:"8px 11px", borderRadius:10, background:"var(--violet-soft)", border:"1px solid var(--violet)", fontSize:12.5, lineHeight:1.4}}>
       <span style={{color:"var(--violet)", display:"inline-flex"}}><Icon name="musicNote" size={15}/></span>
-      <span style={{flex:1, minWidth:0}}><b>Music:</b> {m.title}<span style={{display:"block", fontSize:11, color:"var(--ink-mute)"}}>Added in the {item.platforms.filter(p=>MUSIC_PLATFORMS.includes(p)).map(p=>PLATFORM_META[p].label).join(" / ") || "Instagram"} app when posting from the phone</span></span>
+      <span style={{flex:1, minWidth:0}}><b>Music:</b> {m.title}<span style={{display:"block", fontSize:11, color:"var(--ink-mute)"}}>Added in the {item.platforms.filter(p=>MUSIC_PLATFORMS.includes(p)).map(p=>PLATFORM_META[p].label).join(" / ") || "Instagram"} app when posting from the phone{m.preview? " · ▶ 30s preview" : ""}</span></span>
+      {m.preview && <ClipPlayButton clip={m.preview} size={28}/>}
       {m.url && <a href={m.url} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()} style={{fontSize:12, fontWeight:700, color:"var(--violet)", textDecoration:"none", whiteSpace:"nowrap"}}>Open song ↗</a>}
     </div>
   );
@@ -3084,7 +3258,8 @@ function SwipeCard({entry, onDecision, onOpenDetails, isTop, narrow, paused, onI
   const variant = item.variants[activePlatform];
   const caption = entry.platform? variant.caption||variant.description||variant.title : Object.values(item.variants).map(v=>v.caption||v.title||v.description).find(Boolean);
   const scheduledAt = entry.platform? variant.scheduledAt : (Object.values(item.variants).find(v=>v.scheduledAt)||{}).scheduledAt;
-  const hasVideo = item.media.type==="video" && !!item.media.fileUrl;
+  const clip = useSongClip(item.music, !muted && isTop && !paused);
+  const hasVideo = (item.media.type==="video" && !!item.media.fileUrl) || !!clip;
   const warnings = [];
   if(!caption && !isStoryItem(item)) warnings.push("Missing caption/title");
   if(isStoryItem(item) && item.media.aspectRatio!=="9:16") warnings.push("Not 9:16 — will be cropped as a story");
@@ -5641,7 +5816,9 @@ function CreateContentPage(){
   const [previewOpen, setPreviewOpen] = useState(false);
   // Starts muted (browsers block autoplay with sound); one tap turns the sound on.
   const [previewMuted, setPreviewMuted] = useState(true);
-  const previewHasVideo = form.mediaType==="video" && !!form.fileUrl;
+  // An Instagram song with an Apple Music clip plays along with the preview when the sound is on.
+  const previewClip = useSongClip(form.musicMix ? null : form.music, !previewMuted && !!previewItem);
+  const previewHasVideo = (form.mediaType==="video" && !!form.fileUrl) || !!previewClip;
   const renderPreview = h => (<>
             {form.platforms.length>1 && <div className="cf-noscrollbar" style={{display:"flex", gap:5, overflowX:"auto", marginBottom:10}}>
               {form.platforms.map(p=>(
@@ -5657,7 +5834,7 @@ function CreateContentPage(){
               <button onClick={()=>setPreviewMuted(m=>!m)} title={previewMuted?"Turn sound on":"Mute"}
                 style={{display:"flex", alignItems:"center", gap:6, padding:"7px 14px", borderRadius:99, border:"1px solid "+(previewMuted?"var(--border)":"var(--accent)"), background: previewMuted?"var(--surface)":"var(--accent-soft)", color: previewMuted?"var(--ink-soft)":"var(--accent)", fontSize:12.5, fontWeight:700, cursor:"pointer"}}>
                 <svg viewBox="0 0 24 24" width="15" height="15"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z" fill="currentColor"/>{previewMuted ? <path d="m16 9.5 5 5M21 9.5l-5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/> : <path d="M16 9a4.5 4.5 0 0 1 0 6M18.5 6.5a8 8 0 0 1 0 11" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round"/>}</svg>
-                {previewMuted? "Sound off · tap for sound" : "Sound on"}
+                {previewMuted? "Sound off · tap for sound" : previewClip? "Sound on · song preview" : "Sound on"}
               </button>
             </div>}
   </>);
@@ -5877,8 +6054,8 @@ function CreateContentPage(){
           {step===3 && (
             <div style={{display:"flex", flexDirection:"column", gap:16}}>
               {form.platforms.length===0 && <EmptyState icon="grid" title="No platforms selected" subtitle="Go back and select at least one platform to continue."/>}
-              {form.mediaType==="video" && form.gallery.length<=1 && <Card style={{padding:16}}>
-                <div style={{display:"flex", alignItems:"center", gap:8, marginBottom:10}}><span style={{color:"var(--violet)", display:"inline-flex"}}><Icon name="musicNote" size={16}/></span><span style={{fontWeight:700, fontSize:14}}>Add music to the video</span></div>
+              {form.gallery.length<=1 && (form.mediaType==="video" || (form.mediaType==="image" && !story)) && <Card style={{padding:16}}>
+                <div style={{display:"flex", alignItems:"center", gap:8, marginBottom:10}}><span style={{color:"var(--violet)", display:"inline-flex"}}><Icon name="musicNote" size={16}/></span><span style={{fontWeight:700, fontSize:14}}>{form.mediaType==="image" || (form.musicMix && form.musicMix.photo) ? "Add music to the photo" : "Add music to the video"}</span></div>
                 <VideoMusicEditor form={form} setForm={setForm}/>
               </Card>}
               {!form.musicMix && form.platforms.some(p=>MUSIC_PLATFORMS.includes(p)) && <Card style={{padding:16}}>

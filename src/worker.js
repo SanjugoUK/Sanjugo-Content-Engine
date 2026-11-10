@@ -1655,6 +1655,20 @@ async function musicRoute(url) {
     const tracks = (d.results || []).filter((x) => x.url && (!x.duration || x.duration >= 10000) && ["cc0", "by", "pdm"].includes(String(x.license))).map(musicTrack);
     return json({ tracks, total: d.result_count || tracks.length, page, pages: d.page_count || 1 });
   }
+  if (url.pathname === "/api/music/preview") {
+    // Instagram songs can't be played outside Instagram, so we find the same song's free 30-second preview on
+    // Apple Music (iTunes Search API) — only to hear it in Creator Studio, never posted.
+    const q = String(url.searchParams.get("q") || "").replace(/[—–-]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 100);
+    if (!q) return json({ songs: [] });
+    const qs = new URLSearchParams({ term: q, media: "music", entity: "song", limit: "5", country: "GB" });
+    const r = await fetch("https://itunes.apple.com/search?" + qs, { headers: { "User-Agent": MUSIC_UA["User-Agent"] }, cf: { cacheTtl: 86400, cacheEverything: true } });
+    if (!r.ok) throw new HttpError(502, "Apple Music didn't answer (" + r.status + "). Try again in a minute.");
+    const d = await r.json();
+    const songs = (d.results || []).filter((x) => x.previewUrl && /^https:\/\/[a-z0-9.-]+\.(apple|mzstatic)\.com\//.test(x.previewUrl)).slice(0, 3).map((x) => ({
+      id: String(x.trackId), name: String(x.trackName || "").slice(0, 120), artist: String(x.artistName || "").slice(0, 80),
+      art: String(x.artworkUrl100 || "").replace(/^http:/, "https:"), preview: x.previewUrl, link: x.trackViewUrl || "" }));
+    return json({ songs });
+  }
   const m = url.pathname.match(/^\/api\/music\/audio\/([0-9a-f-]{36})$/);
   if (m) { // the song file, fetched through here so the editor can read it (only tracks from the library)
     const info = await fetch(OPENVERSE + m[1] + "/", { headers: MUSIC_UA, cf: { cacheTtl: 86400, cacheEverything: true } });
@@ -2598,7 +2612,10 @@ function wsSong(m, mixed) {
     page: /^https:\/\//i.test(url) ? url : "", needsCredit: !!m.needsCredit, credit: wsText(m.credit, 200), genres: Array.isArray(m.genres) ? m.genres.slice(0, 3).map((g) => wsText(g, 20)) : [] } : null;
   if (mixed) return t ? { ...t, start: Number(m.start) || 0, musicVol: Number(m.musicVol) || 0, origVol: Number(m.origVol) || 0, fade: !!m.fade,
     ...(/^\/api\/media\/workspace\/[\w.-]+$/.test(String(m.sourceUrl || "")) ? { sourceUrl: m.sourceUrl } : {}) } : null;
-  return { title: wsText(m.title, 120), url: /^https:\/\//i.test(url) ? url : "", ...(t ? { track: t } : {}) };
+  const pv = m.preview && /^https:\/\/[a-z0-9.-]+\.(apple|mzstatic)\.com\//.test(String(m.preview.preview || "")) ? { id: wsText(m.preview.id, 30), name: wsText(m.preview.name, 120),
+    artist: wsText(m.preview.artist, 80), art: /^https:\/\/[a-z0-9.-]+\.(apple|mzstatic)\.com\//.test(String(m.preview.art || "")) ? wsText(m.preview.art, 300) : "",
+    preview: wsText(m.preview.preview, 400), link: /^https:\/\/music\.apple\.com\//.test(String(m.preview.link || "")) ? wsText(m.preview.link, 300) : "" } : null;
+  return { title: wsText(m.title, 120), url: /^https:\/\//i.test(url) ? url : "", ...(t ? { track: t } : {}), ...(pv && !t ? { preview: pv } : {}) };
 }
 
 // Ideas → Draft review → Waiting for approval → Approved (naming) → In Library.

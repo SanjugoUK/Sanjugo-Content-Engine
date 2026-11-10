@@ -1886,6 +1886,7 @@ function ContentDetailDrawer({item, onClose}){
         <div style={{display:"flex", gap:8, marginTop:10, flexWrap:"wrap"}}><StatusBadge status={item.status}/><PriorityDot priority={item.priority}/><Badge label={"v"+item.currentVersion} color="var(--accent)" soft="var(--accent-soft)"/></div>
         {(canMarkPublished || canDeleteContent(item, state.currentUserId) || canEditContent(item, state.currentUserId)) && <div style={{display:"flex", gap:8, marginTop:12, flexWrap:"wrap"}}>
           {canMarkPublished && <Button variant="success" size="sm" icon="check" onClick={()=>setPublishing(true)}>Publish…</Button>}
+          {item.status==="draft" && item.creator===state.currentUserId && <Button variant="primary" size="sm" icon="create" onClick={()=>{ onClose(); dispatch({type:"SET_ROUTE", route:"create", createPrefill:{resumeDraft:item.id}}); }}>Continue in Create</Button>}
           {canEditContent(item, state.currentUserId) && <Button variant="ghost" size="sm" icon="edit" onClick={()=>setEditingPost(true)}>Edit post</Button>}
           {canDeleteContent(item, state.currentUserId) && <ConfirmButton confirmLabel={item.status==="draft"? "Yes, delete draft" : "Yes, delete post"}
             onConfirm={()=>{ dispatch({type:"DELETE_CONTENT", id:item.id}); onClose(); }}>{item.status==="draft"? "Delete draft" : "Delete post"}</ConfirmButton>}
@@ -5386,17 +5387,85 @@ function TextField({label, value, onChange, placeholder, textarea, hint}){
 }
 
 const WIZARD_STEPS = ["Basic Info","Master Media","Select Platforms","Platform Variations","Schedule & Submit"];
+/* Drafts saved from Create remember the form and the step (item.createState), so "Continue" picks up exactly there.
+   Older drafts (saved before this) are rebuilt from the post itself and open at Platform Variations. */
+const DRAFT_SKIP = ["previewUrl","previewLoading","galleryStatus","uploadError","libraryPick","libraryBarcode","wsFresh","draftId","draftCreatedAt","draftVersions"];
+function draftCreateState(form, step){
+  const f = {};
+  Object.entries(form).forEach(([k, v])=>{ if(!DRAFT_SKIP.includes(k) && !(typeof v==="string" && v.startsWith("blob:"))) f[k] = v; });
+  if(f.uploadStatus==="uploading" || f.uploadStatus==="importing") f.uploadStatus = f.fileUrl ? "done" : null;
+  return {step, form: f};
+}
+function myDrafts(items, userId){
+  return items.filter(i=>i.status==="draft" && i.creator===userId)
+    .sort((a, b)=>String(b.updatedAt||b.createdAt||"").localeCompare(String(a.updatedAt||a.createdAt||"")));
+}
+function draftStep(item){ return item.createState && Number.isInteger(item.createState.step) ? item.createState.step : 3; }
+function formFromDraft(item){
+  const m = item.media || {};
+  const base = {draftId:item.id, draftCreatedAt:item.createdAt, draftVersions:item.versions, previewUrl: m.previewUrl || null};
+  if(item.createState && item.createState.form) return {...item.createState.form, ...base, gallery: item.createState.form.gallery || m.gallery || []};
+  const variants = {};
+  Object.entries(item.variants || {}).forEach(([p, v])=>{
+    const {status, publishStatus, approvals, hashtags, scheduledAt, platform, ...rest} = v || {};
+    variants[p] = {...rest, hashtagsText: (hashtags||[]).join(" ")};
+  });
+  const firstAt = Object.values(item.variants || {}).map(v=>v && v.scheduledAt).find(Boolean) || "";
+  return {...base, title: item.title==="Untitled content" ? "" : item.title, campaign:item.campaign||"", brand:item.brand, pillar:item.pillar, creator:item.creator,
+    approver:item.approver, priority:item.priority||"normal", notes:item.notes||"", music:item.music||{title:"", url:""},
+    format:item.format||"post", mediaType:m.type||"video", aspectRatio:m.aspectRatio||"9:16", duration:m.duration||20, fileName:"",
+    gallery:m.gallery||[], galleryStatus:"", platforms:item.platforms||["instagram"], scheduledAt:firstAt, variants,
+    fileUrl:m.fileUrl||null, uploadStatus: m.fileUrl ? "done" : null, libraryRef:item.libraryRef||null};
+}
+function DraftsToContinue({items, onOpen}){
+  const [all, setAll] = useState(false);
+  if(!items.length) return null;
+  const ago = iso=>{ const mins = Math.max(0, Math.round((Date.now()-new Date(iso))/60000)); return mins<1? "just now" : mins<60? mins+" min ago" : mins<1440? Math.round(mins/60)+" h ago" : Math.round(mins/1440)+" d ago"; };
+  const shown = all ? items : items.slice(0, 3);
+  return (
+    <Card style={{padding:14, marginBottom:16}}>
+      <div style={{display:"flex", alignItems:"center", gap:8, marginBottom:10}}>
+        <span style={{color:"var(--accent)", display:"inline-flex"}}><Icon name="edit" size={16}/></span>
+        <span style={{fontWeight:700, fontSize:14}}>Continue where you left off</span>
+        <span style={{fontSize:12, color:"var(--ink-mute)"}}>{items.length} draft{items.length>1?"s":""}</span>
+      </div>
+      <div style={{display:"flex", flexDirection:"column", gap:8}}>
+        {shown.map(it=>{ const s = draftStep(it); return (
+          <button key={it.id} onClick={()=>onOpen(it)} style={{display:"flex", alignItems:"center", gap:11, padding:8, borderRadius:11, border:"1px solid var(--border)", background:"var(--surface)", cursor:"pointer", textAlign:"left", color:"var(--ink)", width:"100%"}}>
+            <div style={{width:44, height:44, flexShrink:0}}><Thumb item={it} radius={8} iconSize={14}/></div>
+            <div style={{flex:1, minWidth:0}}>
+              <div style={{fontWeight:700, fontSize:13.5, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>{it.title || "Untitled content"}</div>
+              <div style={{fontSize:11.5, color:"var(--ink-mute)", marginTop:2, display:"flex", alignItems:"center", gap:6, flexWrap:"wrap"}}>
+                <span style={{fontWeight:600, color:"var(--accent)"}}>Step {s+1}: {WIZARD_STEPS[s]}</span>
+                <span>· saved {ago(it.updatedAt || it.createdAt)}</span>
+                <span style={{display:"inline-flex", gap:3}}>{(it.platforms||[]).map(p=><PlatformIcon key={p} platform={p} size={9}/>)}</span>
+              </div>
+            </div>
+            <span style={{fontSize:12.5, fontWeight:700, color:"var(--accent)", flexShrink:0, paddingRight:4}}>Continue →</span>
+          </button>); })}
+      </div>
+      {items.length>3 && <button onClick={()=>setAll(a=>!a)} style={{marginTop:8, border:"none", background:"none", color:"var(--ink-soft)", fontSize:12.5, fontWeight:600, cursor:"pointer", padding:0}}>{all? "Show fewer" : "Show all "+items.length+" drafts"}</button>}
+    </Card>
+  );
+}
 
 function CreateContentPage(){
   const {state, dispatch} = useApp();
   const user = USERS.find(u=>u.id===state.currentUserId);
-  const [step, setStep] = useState(0);
-  const [form, setForm] = useState({
-    title:"", campaign: "", brand: BRANDS[0].id, pillar: PILLARS[0], creator: user.id, approver: ANY_APPROVER, priority:"normal", notes:"", music:{title:"", url:""},
-    format:"post", mediaType:"video", aspectRatio:"9:16", duration:20, fileName:"", gallery:[], galleryStatus:"",
-    platforms:["instagram"], scheduledAt:"", variants:{},
-    ...(state.createPrefill || {}),
+  // "Continue" on a draft: open it with everything filled in, at the step it was saved from.
+  const resumeItem = state.createPrefill && state.createPrefill.resumeDraft ? state.contentItems.find(i=>i.id===state.createPrefill.resumeDraft && i.status==="draft") : null;
+  const [step, setStep] = useState(resumeItem ? draftStep(resumeItem) : 0);
+  const [form, setForm] = useState(()=>{
+    const fresh = {
+      title:"", campaign: "", brand: BRANDS[0].id, pillar: PILLARS[0], creator: user.id, approver: ANY_APPROVER, priority:"normal", notes:"", music:{title:"", url:""},
+      format:"post", mediaType:"video", aspectRatio:"9:16", duration:20, fileName:"", gallery:[], galleryStatus:"",
+      platforms:["instagram"], scheduledAt:"", variants:{},
+    };
+    if(resumeItem) return {...fresh, ...formFromDraft(resumeItem)};
+    const {resumeDraft, ...prefill} = state.createPrefill || {};
+    return {...fresh, ...prefill};
   });
+  const drafts = form.draftId || state.createPrefill ? [] : myDrafts(state.contentItems, state.currentUserId);
   function set(patch){ setForm(f=>({...f, ...patch})); }
 
   // Pull a file from the Drive content library into this post: fill in what the filename tells us,
@@ -5594,15 +5663,27 @@ function CreateContentPage(){
   </>);
 
   function submit(status){
-    const item = buildItem(status);
-    dispatch({type:"CREATE_CONTENT", item});
-    dispatch({type:"ADD_TOAST", message: status==="draft"? "Saved as draft" : "Submitted for approval"});
+    const built = buildItem(status);
+    const item = {...built, createState: status==="draft" ? draftCreateState(form, step) : null};
+    const stillDraft = form.draftId && state.contentItems.some(i=>i.id===form.draftId && i.status==="draft");
+    if(stillDraft){
+      // Continuing a draft: save into the same post instead of making a second copy.
+      const versions = status==="draft" && form.draftVersions && form.draftVersions.length ? form.draftVersions : item.versions;
+      dispatch({type:"UPDATE_CONTENT", id:form.draftId, patch:{...item, id:form.draftId, createdAt: form.draftCreatedAt || item.createdAt, versions}});
+    } else dispatch({type:"CREATE_CONTENT", item});
+    dispatch({type:"ADD_TOAST", message: status==="draft"? "Draft saved at step "+(step+1)+" — continue it any time from Create" : "Submitted for approval"});
     dispatch({type:"SET_ROUTE", route: status==="draft"?"calendar":"queue"});
   }
 
   return (
     <div>
       <PageHeader title="Create Content" subtitle="Build one creative concept and tailor it per platform."/>
+      {step===0 && <DraftsToContinue items={drafts} onOpen={it=>dispatch({type:"SET_ROUTE", route:"create", createPrefill:{resumeDraft:it.id}})}/>}
+      {form.draftId && <div style={{display:"flex", alignItems:"center", gap:10, padding:"9px 12px", borderRadius:11, background:"var(--accent-soft)", border:"1px solid var(--accent)", marginBottom:16, fontSize:12.5, flexWrap:"wrap"}}>
+        <span style={{color:"var(--accent)", display:"inline-flex"}}><Icon name="edit" size={15}/></span>
+        <span style={{flex:"1 1 200px"}}><b>Continuing your draft</b>{form.title? " “"+form.title+"”" : ""}. <span style={{color:"var(--ink-soft)"}}>Save as Draft updates it; Submit sends it for approval.</span></span>
+        <button onClick={()=>dispatch({type:"SET_ROUTE", route:"create"})} style={{border:"none", background:"none", color:"var(--ink-soft)", fontSize:12.5, fontWeight:600, cursor:"pointer", textDecoration:"underline", padding:0}}>Start a new post instead</button>
+      </div>}
       {/* Phones get a one-line "Step 2 of 5 · Master Media" with a progress bar instead of five labels. */}
       <div className="cf-wiz-mini" style={{display:"none", marginBottom:16}}>
         <div style={{display:"flex", alignItems:"center", gap:8, fontSize:13, fontWeight:700, marginBottom:8}}>

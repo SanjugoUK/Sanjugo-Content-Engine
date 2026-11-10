@@ -8511,6 +8511,21 @@ function BotAvatar({size=32}){
 // Workload and turnaround per person — shown to admins in Settings (it used to be its own Team page).
 function TeamWorkload(){
   const {state} = useApp();
+  // Phone & desktop alerts per person (from the devices that switched them on).
+  const [alerts, setAlerts] = useState(null);
+  useEffect(()=>{ fetch("/api/push/status", {cache:"no-store"}).then(r=>r.ok? r.json() : null).then(d=>setAlerts(d? d.users || {} : false)).catch(()=>setAlerts(false)); }, []);
+  const ago = iso=>{ const m = Math.round((Date.now()-new Date(iso))/60000); return m<60? m+" min ago" : m<1440? Math.round(m/60)+" h ago" : Math.round(m/1440)+" d ago"; };
+  const alertCell = u=>{
+    if(alerts===null) return <Skeleton h={14} w={50}/>;
+    if(alerts===false) return <span style={{color:"var(--ink-mute)"}}>—</span>;
+    const ds = alerts[u.id] || [];
+    if(!ds.length) return <span title="No phone or computer has alerts switched on for this person" style={{display:"inline-flex", alignItems:"center", gap:6, color:"var(--ink-mute)", fontWeight:600}}><span style={{width:8, height:8, borderRadius:99, background:"var(--border)"}}/>Off</span>;
+    const last = ds.map(d=>d.lastOk).filter(Boolean).sort().pop();
+    return <div title={ds.map(d=>(d.device||"Device")+" — on since "+fmtDate(d.since)+(d.lastOk? ", last alert delivered "+ago(d.lastOk) : ", no alert delivered yet")).join("\n")}>
+      <span style={{display:"inline-flex", alignItems:"center", gap:6, color:"var(--green)", fontWeight:700}}><span style={{width:8, height:8, borderRadius:99, background:"var(--green)"}}/>On</span>
+      <div style={{fontSize:11, color:"var(--ink-mute)"}}>{ds.length} device{ds.length>1?"s":""}{last? " · last "+ago(last) : ""}</div>
+    </div>;
+  };
   return (
     <div>
       <SectionTitle>Team workload</SectionTitle>
@@ -8518,7 +8533,7 @@ function TeamWorkload(){
         <style>{`@media (max-width:600px){ .cf-team-table th, .cf-team-table td{ padding:9px 6px !important; } .cf-team-table th{ font-size:10.5px !important; } }`}</style>
         <table className="cf-team-table" style={{width:"100%", borderCollapse:"collapse", fontSize:13}}>
           <thead><tr style={{textAlign:"left", borderBottom:"1px solid var(--border)"}}>
-            {["Person","Posts","Waiting","Speed"].map(h=><th key={h} style={{padding:"10px 12px", fontSize:11.5, color:"var(--ink-mute)", fontWeight:700, textTransform:"uppercase"}}>{h}</th>)}
+            {["Person","Posts","Waiting","Speed","Alerts"].map(h=><th key={h} style={{padding:"10px 12px", fontSize:11.5, color:"var(--ink-mute)", fontWeight:700, textTransform:"uppercase"}}>{h}</th>)}
           </tr></thead>
           <tbody>
             {activeUsers().map(u=>{
@@ -8531,6 +8546,7 @@ function TeamWorkload(){
                   <td className="num" style={{padding:"10px 12px", fontWeight:700}}>{created}</td>
                   <td className="num" style={{padding:"10px 12px"}}>{pending}</td>
                   <td className="num" style={{padding:"10px 12px"}}>{turnaround}</td>
+                  <td style={{padding:"10px 12px", whiteSpace:"nowrap"}}>{alertCell(u)}</td>
                 </tr>
               );
             })}

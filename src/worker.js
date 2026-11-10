@@ -1672,6 +1672,14 @@ async function pushRoute(request, env, url, viewer) {
   if (url.pathname === "/api/push/key" && request.method === "GET") {
     return json({ publicKey: (await vapidKeys(env)).publicKey });
   }
+  if (url.pathname === "/api/push/status" && request.method === "GET") { // admins: who has alerts switched on, on how many devices
+    if (viewer.accessEnabled && !(viewer.member && viewer.member.role === "admin")) return json({ error: "Admins only" }, 403);
+    await ensurePushTable(env);
+    const { results } = await env.DB.prepare("SELECT user_id, device, created_at, last_ok FROM push_subs ORDER BY created_at").all();
+    const users = {};
+    for (const r of results || []) (users[r.user_id] = users[r.user_id] || []).push({ device: r.device || "", since: r.created_at, lastOk: r.last_ok || null });
+    return json({ users });
+  }
   if (url.pathname === "/api/push/digest" && request.method === "GET") { // admins: see tonight's / tomorrow morning's messages without sending
     if (viewer.accessEnabled && !(viewer.member && viewer.member.role === "admin")) return json({ error: "Admins only" }, 403);
     const night = await dailyDigest(env, "preview");

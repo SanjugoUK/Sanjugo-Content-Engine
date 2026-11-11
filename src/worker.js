@@ -1851,8 +1851,11 @@ async function sendPublishJobs(env, { item, platforms, origin, userId, trigger }
   const results = [];
   const mediaUrl = absoluteMediaUrl(item.media && item.media.fileUrl, origin);
   // Multi-photo (carousel) post: every photo, in order. Instagram and Facebook post them together; Google Business gets the first.
-  const photos = Array.isArray(item.media && item.media.gallery) && item.media.gallery.length > 1
-    ? item.media.gallery.map((g) => absoluteMediaUrl(g && g.fileUrl, origin)).filter(Boolean).slice(0, 10) : null;
+  // Carousel items can be videos too (Instagram takes them; Make's Facebook photo-post module can't).
+  const galleryItems = Array.isArray(item.media && item.media.gallery) && item.media.gallery.length > 1
+    ? item.media.gallery.filter((g) => g && g.fileUrl).slice(0, 10).map((g) => ({ url: absoluteMediaUrl(g.fileUrl, origin), video: g.type === "video" })) : null;
+  const photos = galleryItems ? galleryItems.map((g) => g.url) : null;
+  const hasVideos = !!(galleryItems && galleryItems.some((g) => g.video));
   for (const platform of platforms) {
     const v = (item.variants || {})[platform];
     const hook = publishHookFor(cfg, platform);
@@ -1866,7 +1869,8 @@ async function sendPublishJobs(env, { item, platforms, origin, userId, trigger }
       for (const [n, g] of item.media.gallery.entries()) { const k = mediaKeyOf(g && g.fileUrl); if (k && !(await env.MEDIA.head(k))) missing.push(n + 1); }
       if (missing.length) { results.push({ platform, skipped: "Photo " + missing.join(", ") + " of this post is no longer in Creator Studio — open the post, Edit & resubmit, and add the photos again." }); continue; }
     }
-    if (photos && platform === "youtube") { results.push({ platform, skipped: "YouTube can't post photos — this is a multi-photo post." }); continue; }
+    if (photos && platform === "youtube") { results.push({ platform, skipped: "YouTube can't post a carousel." }); continue; }
+    if (hasVideos && platform === "facebook") { results.push({ platform, skipped: "Facebook can't auto-post a carousel with videos — post it from the Facebook app, then mark it as published." }); continue; }
     if (isStory(item, v)) { results.push({ platform, skipped: "Stories can't be posted through Make — post it from the " + PLATFORM_NAMES[platform] + " app, then mark it as published." }); continue; }
     if (musicByPhone(item, platform)) { results.push({ platform, skipped: "This post has a song (" + item.music.title + "). Apps can't add Instagram music — post it from the " + PLATFORM_NAMES[platform] + " app with the song, then mark it as published." }); continue; }
     if (!mediaUrl) { results.push({ platform, skipped: "The video or photo hasn't finished uploading to Creator Studio." }); continue; }
@@ -1874,7 +1878,7 @@ async function sendPublishJobs(env, { item, platforms, origin, userId, trigger }
     const gbpGallery = platform === "gbp" && v.gbpType === "photo";
     let gallery = null;
     if (gbpGallery) {
-      const srcs = (photos ? item.media.gallery.map((g) => g && g.fileUrl) : item.media.type === "image" ? [item.media.fileUrl] : []).filter(Boolean);
+      const srcs = (photos ? item.media.gallery.filter((g) => g && g.type !== "video").map((g) => g.fileUrl) : item.media.type === "image" ? [item.media.fileUrl] : []).filter(Boolean);
       if (!srcs.length) { results.push({ platform, skipped: "Google gallery photos need a photo — this post is a video." }); continue; }
       const category = GBP_PHOTO_CATEGORIES.includes(v.category) ? v.category : "FOOD_AND_DRINK";
       const use = category === "COVER" ? srcs.slice(0, 1) : srcs;
@@ -1913,7 +1917,7 @@ async function sendPublishJobs(env, { item, platforms, origin, userId, trigger }
       token: job.token, jobId: job.id, contentId: item.id, platform,
       kind: gallery ? "gallery" : carousel ? "carousel" : isPhoto ? "photo" : platform === "youtube" ? "short" : platform === "gbp" ? "update" : "reel",
       // Ready-made lists for Make's "Create a carousel post" (Instagram) and "Create a Post with Photos" (Facebook).
-      ...(carousel ? { photoCount: photos.length, igFiles: photos.map((u) => ({ media_type: "IMAGE", image_url: u })), fbPhotos: photos.map((u) => ({ type: "url", url: u })) } : {}),
+      ...(carousel ? { photoCount: photos.length, igFiles: galleryItems.map((g) => (g.video ? { media_type: "VIDEO", video_url: g.url } : { media_type: "IMAGE", image_url: g.url })), fbPhotos: galleryItems.filter((g) => !g.video).map((g) => ({ type: "url", url: g.url })) } : {}),
       title: String(v.title || item.title || "Sanjugo").replace(/[<>]/g, "").slice(0, 100),
       caption: platform === "youtube" ? String(v.description || caption).replace(/[<>]/g, "") : platform === "gbp" ? caption.slice(0, 1500) : caption,
       mediaUrl: gbpImage || mediaUrl, fileName: key || (isPhoto ? "photo.jpg" : "video.mp4"), privacy: "public",
@@ -2361,7 +2365,7 @@ What Creator Studio can do (use this to explain how things work):
 - Dashboard ("Sanjugo Dashboard", top of the menu): a greeting and "Waiting on you" — everything that needs this person, most urgent first (failed posts, posts to approve, Workspace cuts to approve, file names to confirm, ideas to vote on, posts sent back, and reminders for coming-up occasions with Plan / Done / Not for us); Last 7 days vs the week before (views, engagement, posts out vs the weekly goal, saves + shares); private sticky notes ("My notes", only that person sees them); This week (Mon–Sun, empty days in orange with "+ add"); a slim row with the best post ("make another" starts a Workspace project), Workspace stage counts and finished videos not posted yet.
 - Approvers per post (chosen in Create Content): "Cyrus and Yan Yan (both must approve)" — the default — "Cyrus or Yan Yan (either one can approve)" — both see it and whoever approves first makes it Approved — or "Cyrus only" / "Yan Yan only". With both: every post needs BOTH Cyrus and Yan Yan to approve. The first approval is recorded ("Yan Yan ✓ · waiting for Cyrus") and the post stays in "To review" for the other approver; only the second approval makes it Approved and schedules it. Either approver can Reject or Request Edits on their own, which clears approvals; resubmitting starts approvals again.
 - Approval reminders: if a post, reel or story is still waiting for approval 1 hour before its publish time, Creator Studio @mentions the assigned approver(s) in Team Chat and sends a phone/desktop alert — once per publish time. Approved, sent-back or rejected posts aren't reminded.
-- Multi-photo (carousel) posts: in Create Content pick several photos at once (up to 10), or tap "Add photo" / pick more from the library under "Photos in this post"; reorder with ‹ and remove with ✕. Photos are re-saved as JPEG and trimmed to Instagram's 4:5–1.91:1 shape. Make posts them as an Instagram carousel and a Facebook multi-photo post; Google Business gets the first photo; YouTube can't post photos; TikTok photo posts go up from the TikTok app.
+- Carousel posts: in Create Content pick several photos and/or videos at once (up to 10), or tap "Add photo / video" / pick more from the library under "Photos & videos in this post"; reorder with ‹ and remove with ✕. Photos are re-saved as JPEG and trimmed to Instagram's 4:5–1.91:1 shape; videos are fitted in the browser (4:5 to 16:9 — taller videos cropped to 4:5 — max 60s, 1080 wide). Make posts them as an Instagram carousel. Facebook gets a multi-photo post when it's photos only; a carousel with videos is posted from the Facebook app. Google Business gets the photos only; YouTube can't post carousels; TikTok photo posts go up from the TikTok app.
 - Create Content: first pick the content style — "Post / Reel" or "Story" (full-screen 9:16, Instagram/Facebook/TikTok only, with an optional link sticker and posting notes instead of a caption; approvers see it as a real story; Make can't post stories, so after approval someone posts it from the phone app and uses "Mark as published"). Then upload a video/photo, or pick one from the Content Library by barcode (e.g. G219). Choose platforms, write a caption per platform, pick a campaign (or "No campaign"), priority, and the approvers — every post needs both Cyrus and Yan Yan to approve. Then submit for approval, or "Save as Draft" (drafts show in the Content Calendar and can be opened, finished and submitted later). To delete a post: open it (tap it in the Calendar, Approval Queue or Dashboard) and tap "Delete draft" / "Delete post" at the top, then confirm. Creators can delete their own post while it is a draft, sent back for changes, or rejected; admins (Cyrus, Yan Yan) can delete any post that is not published. Published posts can\'t be deleted in Creator Studio (delete them in the social app itself).
 - Content Library: the Google Drive folder "Sanjugo Marketing Contents Final" (about 1,600 files) plus finished Workspace videos. Files posted outside Creator Studio can be marked used: open the file → "Mark as already used" (where, when, note; Undo to clear). File names end with a barcode like G219; search by barcode, dish or stage, watch videos, see where a file has already been used (post, platform, date), and start a post from it.
 - Approval Queue: tabs To review / Needs changes / Rejected. Posts are previewed exactly as they'll look on each app (Reels, TikTok, Shorts, Facebook, Google Business), with full-screen playback. Decide with the two buttons under each post: ✓ Approve (one tap — "Undo" at the top takes it back) or "Needs changes" (pick feedback tags or write what to fix, optional fix-by date, then "Send back"). To refuse a post completely, tap Needs changes → "Reject it instead". "Full package" reviews the whole post; "Per platform" reviews each platform separately. Undo Last Decision exists. Creators fix posts from Needs changes / Rejected and resubmit, optionally telling the approver in chat. Approved posts are auto-placed into the next free slot of the recurring calendar template (Settings) if they have no time.

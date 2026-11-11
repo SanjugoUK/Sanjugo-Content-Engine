@@ -886,40 +886,111 @@ async function carouselReadyPhoto(src, name){
 /* A video for a carousel, fitted to Instagram's carousel rules in the browser: 4:5 to 16:9 (taller videos are
    cropped to 4:5 from the middle), 3–60 seconds, max 1080 wide, H.264 under 5 Mbps, AAC sound, 30 fps. */
 const isVideoSrc = (src, name) => (src && src.type && String(src.type).startsWith("video/")) || (src && src.video) || /\.(mp4|mov|m4v|webm)$/i.test(String(name||""));
+/* Re-draws the video, cropped and scaled, into a canvas while it plays (muted) and records that with MediaRecorder.
+   The browser's own decoder does the heavy lifting (hardware, real time), so 4K iPhone HEVC clips are fine. */
+function recordFittedVideo(blob, {sx, sy, cw, ch, W, H, limit}, say, label){
+  return new Promise((resolve, reject)=>{
+    if(typeof MediaRecorder==="undefined" || !HTMLCanvasElement.prototype.captureStream) return reject(new Error("no-recorder"));
+    const types = ["video/mp4;codecs=avc1.640028", "video/mp4;codecs=avc1", "video/mp4", "video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"];
+    const mime = types.find(t=>{ try{ return MediaRecorder.isTypeSupported(t); }catch(e){ return false; } });
+    if(!mime) return reject(new Error("no-recorder"));
+    const url = URL.createObjectURL(blob);
+    // The player has to be on the page (invisible) or browsers stop moving its picture forward.
+    const v = document.createElement("video"); v.muted = true; v.playsInline = true; v.preload = "auto"; v.setAttribute("playsinline", ""); v.src = url;
+    v.style.cssText = "position:fixed;left:0;top:0;width:4px;height:4px;opacity:0.01;pointer-events:none;z-index:-1";
+    document.body.appendChild(v);
+    const c = document.createElement("canvas"); c.width = W; c.height = H; const g = c.getContext("2d");
+    let rec = null, done = false, lastT = -1, lastMove = Date.now(), timer = null, ticker = null, cover = null, coverAsked = false;
+    const chunks = [];
+    const finish = err => { if(done) return; done = true; clearInterval(timer); clearInterval(ticker); try{ v.pause(); v.remove(); }catch(e){}
+      if(err){ try{ rec && rec.state!=="inactive" && rec.stop(); }catch(e){} URL.revokeObjectURL(url); reject(err); return; }
+      rec.onstop = async ()=>{ URL.revokeObjectURL(url); if(!cover) cover = await new Promise(r=>c.toBlob(r, "image/jpeg", 0.85)).catch(()=>null);
+        resolve({blob: new Blob(chunks, {type: mime.split(";")[0]}), mp4: mime.startsWith("video/mp4"), cover}); };
+      try{ rec.stop(); }catch(e){ URL.revokeObjectURL(url); reject(e); } };
+    const draw = ()=>{ try{ g.drawImage(v, sx, sy, cw, ch, 0, 0, W, H); }catch(e){} };
+    const loop = ()=>{ if(done) return; draw(); if(v.requestVideoFrameCallback) v.requestVideoFrameCallback(loop); else requestAnimationFrame(loop); };
+    v.onerror = ()=>finish(new Error("no-decode"));
+    v.onended = ()=>finish();
+    v.onloadeddata = async ()=>{
+      try{
+        draw();
+        rec = new MediaRecorder(c.captureStream(30), {mimeType: mime, videoBitsPerSecond: 4000000});
+        rec.ondataavailable = e=>{ if(e.data && e.data.size) chunks.push(e.data); };
+        rec.start(1000);
+        await v.play();
+        loop(); ticker = setInterval(draw, 1000/30);
+        timer = setInterval(()=>{
+          const t = v.currentTime;
+          if(t !== lastT){ lastT = t; lastMove = Date.now(); }
+          // Cover image: the cropped frame about 1 second in.
+          if(!coverAsked && t >= Math.min(1, limit/3)){ coverAsked = true; c.toBlob(b=>{ cover = b; }, "image/jpeg", 0.85); }
+          say("Fitting "+label+" for Instagram… "+Math.min(99, Math.round(t/limit*100))+"% (keep this page open)");
+          if(t >= limit) finish();
+          else if(Date.now()-lastMove > 15000) finish(new Error("The video stopped playing while preparing — keep this page open and try again"));
+        }, 250);
+      }catch(e){ finish(e && e.name==="NotAllowedError" ? new Error("no-recorder") : e); }
+    };
+    setTimeout(()=>{ if(!rec && !done) finish(new Error("no-decode")); }, 20000);
+  });
+}
+/* A video for a carousel, fitted to Instagram's carousel rules: 4:5 to 16:9 (taller videos are cropped to 4:5 from
+   the middle), 3–60 seconds, max 1080 wide, H.264 under 5 Mbps, AAC sound, with a cover frame. */
 async function carouselReadyVideo(src, name, onStatus){
   const say = t => onStatus && onStatus(t);
-  say("Loading "+(name||"the video")+"…");
-  const blob = src instanceof Blob ? src : await fetch(src.url || src).then(r=>{ if(!r.ok) throw new Error("Couldn't load "+(name||"the video")); return r.blob(); });
+  const label = name || "the video";
+  say("Loading "+label+"…");
+  const blob = src instanceof Blob ? src : await fetch(src.url || src).then(r=>{ if(!r.ok) throw new Error("Couldn't load "+label); return r.blob(); });
   const info = await readMediaInfo(blob, true);
-  if(!info || !info.w) throw new Error("Couldn't open "+(name||"the video")+" — export it as MP4");
-  if(info.duration && info.duration < 3) throw new Error((name||"A video")+" is under 3 seconds — Instagram carousel videos need at least 3");
+  if(!info || !info.w) throw new Error("This browser can't open "+label+". Export it as MP4 (H.264) and try again.");
+  if(info.duration && info.duration < 3) throw new Error(label+" is under 3 seconds — Instagram carousel videos need at least 3");
   let cw = info.w, ch = info.h; const r = cw/ch;
   if(r < 4/5) ch = Math.round(cw/(4/5)); else if(r > 16/9) cw = Math.round(ch*16/9);
   cw -= cw%2; ch -= ch%2;
+  const sx = Math.round((info.w-cw)/2), sy = Math.round((info.h-ch)/2);
   const W = Math.min(1080, cw) - (Math.min(1080, cw)%2), H = Math.round(W*ch/cw/2)*2;
+  const limit = Math.min(60, info.duration || 60);
+  // 1. Picture: recorded from the browser's own player (fast). If the browser can't record, ffmpeg does it all (slow).
+  let recorded = null;
+  try{ recorded = await recordFittedVideo(blob, {sx, sy, cw, ch, W, H, limit}, say, label); }
+  catch(e){ if(!/^no-(recorder|decode)$/.test(e && e.message)) throw e; }
   const ff = await loadFFmpeg(say);
-  await ff.writeFile("cin", new Uint8Array(await blob.arrayBuffer()));
-  const onProg = ({progress})=> progress>0 && progress<=1 && say("Fitting "+(name||"the video")+" for Instagram… "+Math.round(progress*100)+"%");
+  const enc = ["-c:v", "libx264", "-preset", "ultrafast", "-b:v", "3500k", "-maxrate", "4500k", "-bufsize", "9000k", "-g", "60", "-pix_fmt", "yuv420p", "-r", "30"];
+  const aud = ["-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2", "-t", limit.toFixed(2), "-avoid_negative_ts", "make_zero", "-use_editlist", "0", "-movflags", "+faststart", "cout.mp4"];
+  try{ await ff.createDir("/src"); }catch(e){}
+  try{ await ff.unmount("/src"); }catch(e){}
+  await ff.mount("WORKERFS", {blobs:[{name:"orig", data: blob}]}, "/src");
+  const onProg = ({progress})=> progress>0 && progress<=1 && say("Finishing "+label+"… "+Math.round(progress*100)+"%");
   ff.on("progress", onProg);
+  const run = async (args, ms) => { try{ await ff.deleteFile("cout.mp4"); }catch(e){} return ffRun(ff, args, ms); };
   try{
-    say("Fitting "+(name||"the video")+" for Instagram…");
-    const code = await ff.exec(["-i", "cin", "-t", "60", "-map", "0:v:0", "-map", "0:a:0?", "-vf", `crop=${cw}:${ch},scale=${W}:${H},fps=30`,
-      "-c:v", "libx264", "-preset", "ultrafast", "-b:v", "3500k", "-maxrate", "4500k", "-bufsize", "9000k", "-g", "60", "-pix_fmt", "yuv420p",
-      "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2", "-movflags", "+faststart", "cout.mp4"]);
-    if(code!==0) throw new Error("Couldn't prepare "+(name||"the video")+" — export it as MP4 (H.264) and try again");
+    let code;
+    if(recorded){
+      // 2. Sound: the original track, added back to the recorded picture.
+      say("Adding the sound to "+label+"…");
+      await ff.writeFile("rec", new Uint8Array(await recorded.blob.arrayBuffer()));
+      const io = ["-i", "rec", "-i", "/src/orig", "-map", "0:v:0", "-map", "1:a:0?"];
+      code = recorded.mp4 ? await run([...io, "-c:v", "copy", ...aud], 90000) : -1;
+      if(code!==0) code = await run([...io, ...enc, ...aud], Math.max(180000, limit*8000));
+    } else {
+      say("Fitting "+label+" for Instagram (this browser is slower — big 4K videos can take a few minutes)…");
+      code = await run(["-i", "/src/orig", "-map", "0:v:0", "-map", "0:a:0?", "-vf", `crop=${cw}:${ch},scale=${W}:${H},fps=30`, ...enc, ...aud], 15*60000);
+    }
+    if(code!==0) throw new Error("Couldn't prepare "+label+" — export it as MP4 (H.264) and try again");
     const out = new Blob([(await ff.readFile("cout.mp4")).buffer], {type:"video/mp4"});
-    // Cover image: a frame 1 second in (the first frame is often black).
-    let cover = null;
-    try{ if(await ff.exec(["-ss", String(Math.min(1, (info.duration||2)/3)), "-i", "cout.mp4", "-frames:v", "1", "-q:v", "3", "cover.jpg"])===0) cover = new Blob([(await ff.readFile("cover.jpg")).buffer], {type:"image/jpeg"}); }catch(e){}
-    say("Uploading "+(name||"the video")+"…");
+    // Cover image: a frame about 1 second in (the first frame is often black).
+    let cover = recorded && recorded.cover || null;
+    if(!cover) try{ if(await ffRun(ff, ["-ss", String(Math.min(1, limit/3)), "-i", "cout.mp4", "-frames:v", "1", "cover.jpg"], 30000)===0) cover = new Blob([(await ff.readFile("cover.jpg")).buffer], {type:"image/jpeg"}); }catch(e){}
+    say("Uploading "+label+"…");
     const base = String(name||"video").replace(/\.[^.]+$/, "");
     const [up, poster] = await Promise.all([uploadMediaFile(new File([out], base+".mp4", {type:"video/mp4"})),
       cover ? uploadMediaFile(new File([cover], base+"-cover.jpg", {type:"image/jpeg"})).catch(()=>null) : null]);
-    return {type:"video", fileUrl: up.url, previewUrl: poster ? poster.url : null, w:W, h:H, duration: Math.round(Math.min(60, info.duration||60)),
+    return {type:"video", fileUrl: up.url, previewUrl: poster ? poster.url : null, w:W, h:H, duration: Math.round(limit),
       trimmed: cw!==info.w || ch!==info.h || (info.duration||0) > 60};
+  } catch(e){
+    throw (e instanceof Error) ? e : new Error("Couldn't prepare "+label+": "+String(e));
   } finally {
     ff.off("progress", onProg);
-    for(const f of ["cin", "cout.mp4", "cover.jpg"]){ try{ await ff.deleteFile(f); }catch(e){} }
+    await releaseFFmpeg();
   }
 }
 const carouselReadyItem = (src, name, onStatus) => isVideoSrc(src, name) ? carouselReadyVideo(src, name, onStatus) : carouselReadyPhoto(src.url || src, name);
@@ -2843,7 +2914,7 @@ let FF_LOADING = null;
 function loadFFmpeg(onStatus){
   if(!FF_LOADING) FF_LOADING = (async ()=>{
     const mod = await (new Function("u", "return import(u)"))(location.origin+"/vendor/ffmpeg/index.js");
-    onStatus && onStatus("Getting the editor ready (one-time download, about 30 MB)…");
+    onStatus && onStatus("Getting the editor ready…");
     const parts = await Promise.all(["/vendor/ffmpeg-core/core-1.bin", "/vendor/ffmpeg-core/core-2.bin"].map(u=>fetch(u).then(r=>{ if(!r.ok) throw new Error("Couldn't load the editor ("+r.status+")"); return r.arrayBuffer(); })));
     const ff = new mod.FFmpeg();
     await ff.load({coreURL: location.origin+"/vendor/ffmpeg-core/ffmpeg-core.js", wasmURL: URL.createObjectURL(new Blob(parts, {type:"application/wasm"}))});
@@ -2851,6 +2922,16 @@ function loadFFmpeg(onStatus){
   })().catch(e=>{ FF_LOADING = null; throw e; });
   return FF_LOADING;
 }
+/* ffmpeg.wasm can corrupt its memory when one instance runs several big jobs ("memory access out of bounds"),
+   so each job closes it afterwards; the next one starts fresh (the engine files are cached, so that's quick). */
+// Runs one ffmpeg command with a time limit; if it hangs, the engine is shut down so the next job starts clean.
+async function ffRun(ff, args, ms){
+  let t; const timeout = new Promise((_, rej)=>{ t = setTimeout(()=>rej(new Error("ff-timeout")), ms); });
+  try{ return await Promise.race([ff.exec(args), timeout]); }
+  catch(e){ if(e && e.message==="ff-timeout"){ await releaseFFmpeg(); throw new Error("Preparing the video took too long — keep this page open and on screen, and try again"); } throw e; }
+  finally{ clearTimeout(t); }
+}
+async function releaseFFmpeg(){ const p = FF_LOADING; FF_LOADING = null; if(!p) return; try{ (await p).terminate(); }catch(e){} }
 async function mixMusicIntoVideo({videoUrl, track, start, musicVol, origVol, fade, duration, onStatus}){
   const ff = await loadFFmpeg(onStatus);
   onStatus && onStatus("Loading the video and the song…");
@@ -2875,7 +2956,7 @@ async function mixMusicIntoVideo({videoUrl, track, start, musicVol, origVol, fad
     return new Blob([data.buffer], {type:"video/mp4"});
   } finally {
     ff.off("progress", onProg);
-    for(const f of ["in.mp4", "song.mp3", "out.mp4"]){ try{ await ff.deleteFile(f); }catch(e){} }
+    await releaseFFmpeg();
   }
 }
 /* A single photo turned into a short silent video (so a song can be mixed in like any reel).
@@ -2912,7 +2993,7 @@ async function photoToVideo({imageUrl, seconds=12, zoom=true, fill=true, onStatu
     return {url: URL.createObjectURL(new Blob([data.buffer], {type:"video/mp4"})), seconds:S, aspectRatio: fill ? "9:16" : (nearestAspect(W, H) || "4:5")};
   } finally {
     ff.off("progress", onProg);
-    for(const f of ["photo.jpg", "photo.mp4"]){ try{ await ff.deleteFile(f); }catch(e){} }
+    await releaseFFmpeg();
   }
 }
 const MUSIC_MOODS = ["Upbeat", "Chill", "Happy", "Jazz", "Acoustic", "Lofi", "Piano", "Cinematic", "Electronic", "Funk", "Latin", "Summer"];
@@ -5761,7 +5842,7 @@ function CreateContentPage(){
         fileName: g.length>1? galleryLabel(g) : f.fileName}));
     }catch(e){
       setForm(f=>({...f, galleryStatus:"", ...(f.uploadStatus==="uploading" && !f.gallery.length? {uploadStatus:"failed", uploadError:e.message} : {})}));
-      dispatch({type:"ADD_TOAST", message:e.message || "Couldn't add that photo", variant:"danger"});
+      dispatch({type:"ADD_TOAST", message:(e && e.message) || (e ? "Couldn't add that file: "+String(e) : "Couldn't add that file"), variant:"danger"});
     }
   }
   function removePhoto(i){

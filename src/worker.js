@@ -2166,6 +2166,15 @@ async function digestTasks(env) {
   const byProject = new Map();
   for (const r of itemRows || []) { const it = JSON.parse(r.data); if (it.deleted) continue; if (!byProject.has(it.projectId)) byProject.set(it.projectId, []); byProject.get(it.projectId).push(it); }
   const projects = (rows || []).map((r) => JSON.parse(r.data)).filter((p) => !p.deleted);
+  // Campaign tasks (Campaigns → a campaign → Plan and tasks) due by tomorrow, for whoever they're assigned to.
+  let campTasks = [];
+  try {
+    await ensureCampTable(env);
+    const { results: cr } = await env.DB.prepare("SELECT data FROM camp_docs WHERE kind = 'campaign'").all();
+    const tomorrow = new Date(Date.now() + 36 * 3600e3).toISOString().slice(0, 10);
+    for (const r of cr || []) { const c = JSON.parse(r.data);
+      for (const t of c.tasks || []) if (t && t.who && !t.done && t.due && t.due <= tomorrow && t.text) campTasks.push({ who: t.who, title: t.text + " (" + c.name + ")", urgent: t.due < tomorrow }); }
+  } catch (e) {}
   const items = state.contentItems || [];
   const active = members.filter((m) => m.active !== false);
   const reviewerIds = active.filter((m) => m.role === "approver" || m.role === "admin").map((m) => m.id);
@@ -2191,13 +2200,14 @@ async function digestTasks(env) {
       if (sum.status === "approved" && p.submitted && p.submitted.by === m.id) t.push({ kind: "name", title: p.title });
       if (sum.counts.toVote > 0) t.push({ kind: "vote", title: p.title, n: sum.counts.toVote });
     }
+    for (const ct of campTasks) if (ct.who === m.id) t.push({ kind: "camp", title: ct.title, urgent: ct.urgent });
     out.push({ member: m, tasks: t });
   }
   return out;
 }
 const DIGEST_WORDS = { failed: ["failed post", "failed posts"], approve: ["post to approve", "posts to approve"], changes: ["post to fix", "posts to fix"],
-  draft: ["draft to watch", "drafts to watch"], name: ["file to name", "files to name"], vote: ["project to vote on", "projects to vote on"] };
-const DIGEST_ICON = { failed: "🔴", approve: "✅", changes: "✏️", draft: "🎬", name: "📁", vote: "👍" };
+  draft: ["draft to watch", "drafts to watch"], name: ["file to name", "files to name"], vote: ["project to vote on", "projects to vote on"], camp: ["campaign task", "campaign tasks"] };
+const DIGEST_ICON = { failed: "🔴", approve: "✅", changes: "✏️", draft: "🎬", name: "📁", vote: "👍", camp: "📣" };
 const DIGEST_NIGHTS = ["Rest well, tomorrow's a fresh start. 🌙", "Thanks for today — sleep well. 😴", "Switch off and recharge. Good night! ✨", "Great work today. Sweet dreams. 🌙", "Enjoy your evening — it'll keep till tomorrow. 💛"];
 const DIGEST_MORNINGS = ["Start your day — you've got this! 💪", "Let's make it a great one. ☀️", "Coffee first, then let's go! ☕", "Have a brilliant day! ✨"];
 const DIGEST_MORNING_CLEAR = ["Nothing is waiting on you — have a great day! ☀️", "All clear this morning. Enjoy your day! ✨", "You're all caught up. Have a lovely day! 💛"];
@@ -2208,7 +2218,7 @@ function digestMessage(m, tasks, slot, day) {
   const urgent = tasks.filter((x) => x.urgent).length;
   const counts = {};
   for (const x of tasks) counts[x.kind] = (counts[x.kind] || 0) + 1;
-  const order = ["failed", "approve", "changes", "draft", "name", "vote"].filter((k) => counts[k]);
+  const order = ["failed", "approve", "changes", "draft", "name", "vote", "camp"].filter((k) => counts[k]);
   const list = order.map((k) => `${DIGEST_ICON[k]} ${counts[k]} ${DIGEST_WORDS[k][counts[k] > 1 ? 1 : 0]}`).join(" · ");
   const n = tasks.length;
   const things = n + (n > 1 ? " things" : " thing");
@@ -3282,6 +3292,11 @@ async function ensureCampTable(env) {
 const CAMP_REPORT_SYSTEM = `You read monthly reports for SANJUGO, a Japanese restaurant group in London (branches: Shoreditch, Angel, Victoria). The text comes from a file exported from a POS system, Deliveroo, Uber Eats or SevenRooms (email marketing). Reply with ONLY one JSON object, no other text, in this shape (leave out anything the report doesn't contain; numbers as plain numbers, money in pounds):
 {"month":"YYYY-MM","totalSales":0,"orders":0,"items":[{"name":"","qty":0,"sales":0}],"codes":[{"code":"","count":0,"discount":0}],"branches":[{"name":"","sales":0,"orders":0}],"emails":[{"name":"","date":"YYYY-MM-DD","sent":0,"opens":0,"openRate":0,"clicks":0,"clickRate":0,"bookings":0,"revenue":0}],"notes":""}
 Rates are percentages (41.2 means 41.2%). List at most 40 items (best sellers first) and every promo code and email you can find. Never invent numbers that aren't in the text.`;
+const CAMP_REVIEW_SYSTEM = `You are the marketing analyst for SANJUGO, a modern Japanese restaurant group in London (Shoreditch, Angel, Victoria). You get one campaign's facts: dates, budget and spend, what it sold (from monthly POS / delivery reports, before vs during vs after), influencer views and costs, email results, social post numbers and the team's own notes. Write a short review in plain words for the team. Use exactly these three headings, each followed by 2-4 bullet points starting with "- ":
+What worked
+What didn't
+Next time
+Be specific and use the numbers. Point out costs per result. Never invent numbers that aren't in the facts; if something is missing, say what to track next time.`;
 async function aiText(env, system, user, maxTokens) {
   if (env.ANTHROPIC_API_KEY) {
     const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
@@ -3318,6 +3333,13 @@ async function campRoute(request, env, url, viewer) {
   if (path === "delete") {
     await env.DB.prepare("DELETE FROM camp_docs WHERE id = ?1").bind(String(body.id || "")).run();
     return json({ ok: true });
+  }
+  if (path === "summary") { // AI review of a finished campaign, from the numbers the page already has
+    const facts = String(body.facts || "").slice(0, 8000);
+    if (facts.length < 20) throw new HttpError(400, "Not enough numbers to review yet.");
+    const text = tidyBotText(String(await aiText(env, CAMP_REVIEW_SYSTEM, facts, 700)).trim()).slice(0, 2500);
+    if (!text) throw new HttpError(502, "Couldn't get a review — try again.");
+    return json({ text });
   }
   if (path === "read-report") { // AI turns the report's text into numbers; the admin checks them before saving
     const source = ["pos", "deliveroo", "ubereats", "sevenrooms"].includes(body.source) ? body.source : "pos";

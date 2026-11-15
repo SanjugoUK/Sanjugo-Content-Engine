@@ -21,6 +21,7 @@
     --accent:#D9582A; --accent-ink:#FFFFFF; --accent-soft:#FDF1EA; --accent-dark:#B8481A;
     --green:#12B76A; --green-soft:#ECFDF3; --red:#E5484D; --red-soft:#FEF3F2; --amber:#DC8A0E; --amber-soft:#FFF8EB;
     --blue:#2E6BE6; --blue-soft:#EEF4FF; --violet:#7A5AF8; --violet-soft:#F4F3FF; --cyan:#0E9384; --cyan-soft:#F0FDF9; --emerald:#079455; --emerald-soft:#ECFDF3;
+    --viz-1:#2a78d6; --viz-2:#eb6834; --viz-3:#1baf7a; --viz-4:#eda100; --viz-5:#e87ba4; --viz-6:#008300; --viz-7:#6250d6; --viz-8:#e34948; --viz-prev:#c9c7bf;
     --shadow-sm: 0 1px 2px rgba(16,24,40,.04);
     --shadow-md: 0 4px 12px -2px rgba(16,24,40,.08);
     --shadow-lg: 0 16px 36px -10px rgba(16,24,40,.22);
@@ -34,6 +35,7 @@
       --ink:#F5F5F6; --ink-soft:#CECFD2; --ink-mute:#94969C;
       --sidebar:#161B26; --sidebar-2:#1F242F; --sidebar-line:#2A303C; --sidebar-text:#CECFD2; --sidebar-text-dim:#85888E; --sidebar-title:#F5F5F6;
       --nav-active-bg:#2B2019; --nav-active-ink:#F4A47A;
+      --viz-1:#3987e5; --viz-2:#d95926; --viz-3:#199e70; --viz-4:#c98500; --viz-5:#d55181; --viz-6:#008300; --viz-7:#9085e9; --viz-8:#e66767; --viz-prev:#5f5e5a;
       --accent:#EA6A3B; --accent-soft:#2B2019; --accent-dark:#F4A47A;
       --green-soft:#0C2A1C; --red-soft:#2E1517; --amber-soft:#2E2210; --blue-soft:#14213D; --violet-soft:#221C3D; --cyan-soft:#0A2724; --emerald-soft:#0C2A1C;
       color-scheme: dark;
@@ -44,6 +46,7 @@
     --ink:#F5F5F6; --ink-soft:#CECFD2; --ink-mute:#94969C;
     --sidebar:#161B26; --sidebar-2:#1F242F; --sidebar-line:#2A303C; --sidebar-text:#CECFD2; --sidebar-text-dim:#85888E; --sidebar-title:#F5F5F6;
     --nav-active-bg:#2B2019; --nav-active-ink:#F4A47A;
+    --viz-1:#3987e5; --viz-2:#d95926; --viz-3:#199e70; --viz-4:#c98500; --viz-5:#d55181; --viz-6:#008300; --viz-7:#9085e9; --viz-8:#e66767; --viz-prev:#5f5e5a;
     --accent:#EA6A3B; --accent-soft:#2B2019; --accent-dark:#F4A47A;
     --green-soft:#0C2A1C; --red-soft:#2E1517; --amber-soft:#2E2210; --blue-soft:#14213D; --violet-soft:#221C3D; --cyan-soft:#0A2724; --emerald-soft:#0C2A1C;
     color-scheme: dark;
@@ -4236,7 +4239,7 @@ function CampaignsPage(){
   const me = USERS.find(u=>u.id===state.currentUserId) || {};
   const admin = me.role==="admin";
   const data = useCampData();
-  const [tab, setTab] = useState("plan");
+  const [tab, setTab] = useState("overview");
   const [year, setYear] = useState(new Date().getFullYear() + (new Date().getMonth()>=9 ? 1 : 0));
   const [openId, setOpenId] = useState(null);
   const [busy, setBusy] = useState("");
@@ -4259,7 +4262,7 @@ function CampaignsPage(){
     });
   }
   const open = camps.find(c=>c.id===openId);
-  const tabs = [["plan","Plan"],["budget","Budget"],["reports","Sales reports"],["email","Email marketing"],["influencers","Influencers"]];
+  const tabs = [["overview","Overview"],["plan","Plan"],["budget","Budget"],["reports","Sales reports"],["email","Email marketing"],["influencers","Influencers"]];
   if(data.docs===null) return <div><PageHeader title="Campaigns" subtitle="Loading…"/><Skeleton h={220}/></div>;
   return (
     <div>
@@ -4274,6 +4277,7 @@ function CampaignsPage(){
         <div style={{display:"flex", gap:6, flexWrap:"wrap", marginBottom:14}}>
           {tabs.map(([k,l])=><button key={k} onClick={()=>setTab(k)} style={{padding:"7px 13px", borderRadius:99, border:"1px solid "+(tab===k? "var(--accent)" : "var(--border)"), background: tab===k? "var(--accent-soft)" : "var(--surface)", color: tab===k? "var(--accent)" : "var(--ink-soft)", fontWeight:700, fontSize:13, cursor:"pointer"}}>{l}</button>)}
         </div>
+        {tab==="overview" && <CampOverview year={year} camps={camps} data={data} onOpen={c=>setOpenId(c.id)} run={run}/>}
         {tab==="plan" && <CampPlan year={year} setYear={setYear} camps={camps} data={data} admin={admin} onOpen={c=>setOpenId(c.id)} onNew={newCamp} run={run}/>}
         {tab==="budget" && <CampBudget year={year} camps={camps} data={data} admin={admin} run={run} toast={toast}/>}
         {tab==="reports" && <CampReports data={data} admin={admin} toast={toast}/>}
@@ -4442,6 +4446,8 @@ function CampaignDetail({camp, camps, data, admin, onBack, saveCamp, toast}){
   const ps = postStats.reduce((a,p)=>({views:a.views+p.views, likes:a.likes+p.likes, comments:a.comments+p.comments, shares:a.shares+p.shares, saves:a.saves+p.saves}), {views:0, likes:0, comments:0, shares:0, saves:0});
   const psEng = ps.views ? (ps.likes+ps.comments+ps.shares+ps.saves)/ps.views*100 : 0;
   const res = campResults(c, data.docs);
+  const M = campMetrics(c, data.docs, data.study, postStats);
+  const L = M.L;
   const views = (c.collabs||[]).reduce((a,col)=>a+collabViews(col, data.study).n, 0);
   const extra = +(c.results && c.results.extraSales) || 0;
   const salesForReturn = extra || res.sales;
@@ -4480,6 +4486,7 @@ function CampaignDetail({camp, camps, data, admin, onBack, saveCamp, toast}){
         {heading:"Emails", lines: res.mail.map(e=>e.name+": "+(e.openRate!=null? e.openRate+"% opened" : "")+(e.clickRate!=null? " · "+e.clickRate+"% clicked" : "")+(e.bookings? " · "+e.bookings+" bookings" : ""))},
         {heading:"Influencers", lines:(c.collabs||[]).map(col=>col.handle+" — "+(col.status||"")+" · "+collabViews(col, data.study).n.toLocaleString("en-GB")+" views · "+money(col.cost))},
         {heading:"Notes", lines:String((c.results && c.results.notes) || "").split("\n").filter(Boolean)},
+        {heading:"Review", lines:[c.review && c.review.worked ? "What worked: "+c.review.worked : "", c.review && c.review.didnt ? "What didn't: "+c.review.didnt : "", c.review && c.review.again ? "Do it again? "+c.review.again : "", ...String((c.review && c.review.ai) || "").split("\n")].filter(Boolean)},
       ]});
       await savePdf(blob, "Results - "+c.name+".pdf", shareIt);
     }catch(e){ toast(e.message, "danger"); }
@@ -4519,6 +4526,8 @@ function CampaignDetail({camp, camps, data, admin, onBack, saveCamp, toast}){
         <Stat label="Sold (reports)" value={res.qty? res.qty.toLocaleString("en-GB") : "—"} sub={res.sales? money(res.sales) : res.reportsFound? "no tracked items found" : "no reports for these months"}/>
         <Stat label="Extra sales" value={extra? money(extra) : "—"} sub="typed in below"/>
         <Stat label="Return" value={salesForReturn && spent ? (salesForReturn/spent).toFixed(1)+"×" : "—"} sub="sales ÷ spend"/>
+        <Stat label="Lift" value={M.lift==null? (L && L.isNew ? "New" : "—") : (M.lift>0? "+" : "")+M.lift.toFixed(0)+"%"} sub={L && L.isNew ? "not sold the month before" : "vs the month before"} tone={M.lift==null? null : M.lift>=0? "pos" : "neg"}/>
+        <Stat label="Cost per item sold" value={M.perItem!=null? "£"+M.perItem.toFixed(2) : "—"} sub={M.per1k!=null? "£"+M.per1k.toFixed(2)+" per 1k views" : "spend ÷ items"}/>
         <Stat label="Influencer views" value={views? views.toLocaleString("en-GB") : "—"} sub={(c.collabs||[]).length+" collab"+((c.collabs||[]).length===1?"":"s")}/>
         <Stat label="Our posts" value={posts.length||"—"} sub={postStats.length? postStats.length+" live · "+ps.views.toLocaleString("en-GB")+" views" : "linked in Create"}/>
         {postStats.length>0 && <Stat label="Engagement" value={psEng.toFixed(1)+"%"} sub={(ps.likes+ps.comments+ps.shares+ps.saves).toLocaleString("en-GB")+" likes, comments, shares, saves"}/>}
@@ -4574,6 +4583,16 @@ function CampaignDetail({camp, camps, data, admin, onBack, saveCamp, toast}){
           </div>}
           {res.lines.length ? res.lines.map((l,i)=><div key={i} style={{fontSize:12.5, padding:"3px 0"}}><b>{REPORT_SOURCES[l.source]}</b> {l.month}: {l.qty.toLocaleString("en-GB")} sold · {money(l.sales)}{l.codes.length? " · "+l.codes.map(x=>x.code+" ×"+x.count).join(", ") : ""}</div>)
             : <div style={{fontSize:12.5, color:"var(--ink-mute)"}}>{!c.start ? "Set the dates first." : res.reportsFound ? "Reports found for "+res.months.join(", ")+", but none of the tracked items or codes." : "No sales reports uploaded for "+(res.months.join(", ")||"these months")+" yet (Sales & email reports tab)."}</div>}
+          {L && L.anyData && <div style={{margin:"10px 0", padding:"10px 12px", borderRadius:10, background:"var(--surface-2)"}}>
+            <div style={{fontSize:12, fontWeight:700, marginBottom:6}}>Before · during · after <span style={{fontWeight:400, color:"var(--ink-mute)"}}>(tracked items sold)</span></div>
+            <div style={{display:"grid", gridTemplateColumns:"repeat(3, 1fr)", gap:8, textAlign:"center"}}>
+              {[["Before", monthLabel(L.before), L.b.has? L.b.qty : null], ["During (avg / month)", L.during.length>1? monthLabel(L.during[0])+" – "+monthLabel(L.during[L.during.length-1]) : monthLabel(L.during[0]), L.dAvg.qty], ["After", monthLabel(L.after), L.a.has? L.a.qty : null]].map(([l, m, v], i)=>{
+                const max = Math.max(1, L.b.qty||0, L.dAvg.qty||0, L.a.qty||0);
+                return <div key={l}><div style={{height:70, display:"flex", alignItems:"flex-end", justifyContent:"center"}}><span style={{width:24, height: v? Math.max(3, v/max*66) : 0, borderRadius:"4px 4px 0 0", background: i===1? "var(--viz-1)" : "var(--viz-prev)"}}/></div>
+                  <div style={{fontSize:14, fontWeight:700}}>{v==null? "—" : Math.round(v).toLocaleString("en-GB")}</div><div style={{fontSize:11, color:"var(--ink-mute)"}}>{l}<br/>{m}{v==null? " · no report" : ""}</div></div>; })}
+            </div>
+            {M.lift!=null && <div style={{fontSize:12, marginTop:6, textAlign:"center", fontWeight:700, color: M.lift>=0? "var(--green)" : "var(--red)"}}>{M.lift>=0? "▲" : "▼"} {Math.abs(M.lift).toFixed(0)}% a month while it ran{L.a.has && L.dAvg.qty ? " · after: "+(L.a.qty>=L.b.qty? "stayed up" : "dropped back") : ""}</div>}
+          </div>}
           {res.mail.map((e,i)=><div key={"m"+i} style={{fontSize:12.5, padding:"3px 0"}}>✉ <b>{e.name}</b>: {e.openRate!=null? e.openRate+"% opened" : ""}{e.clickRate!=null? " · "+e.clickRate+"% clicked" : ""}{e.bookings? " · "+e.bookings+" bookings" : ""}</div>)}
           {res.months.length>0 && res.lines.length>0 && <div style={{fontSize:11, color:"var(--ink-mute)", marginTop:4}}>Reports are monthly, so a campaign that runs part of a month counts that whole month.</div>}
           {ro ? <>{c.results.sold && <div style={{fontSize:12.5, marginTop:8}}><b>Sold:</b> {c.results.sold}</div>}{c.results.notes && <div style={{fontSize:12.5, marginTop:4, whiteSpace:"pre-wrap"}}>{c.results.notes}</div>}</> :
@@ -4591,6 +4610,7 @@ function CampaignDetail({camp, camps, data, admin, onBack, saveCamp, toast}){
                 {(()=>{ const st = postStats.filter(x=>x.contentId===p.id); return st.length ? <span style={{display:"block", fontSize:11, color:"var(--ink-mute)"}}>{st.map(x=>PLATFORM_META[x.platform].label+" "+x.views.toLocaleString("en-GB")+" views · "+x.engagementRate.toFixed(1)+"%").join(" · ")}</span> : null; })()}</span><StatusBadge status={p.status}/></button>)}
         </CampSection>
       </div>
+      <CampReview c={c} set={set} setIn={setIn} ro={ro} M={M} res={res} posts={postStats} data={data} toast={toast} dirty={dirty} save={save}/>
       {admin && <div style={{display:"flex", justifyContent:"flex-end"}}><ConfirmButton confirmLabel="Yes, delete this campaign" onConfirm={remove}>Delete campaign</ConfirmButton></div>}
       {collabOpen && <CollabModal col={collabOpen} camp={c} data={data} toast={toast} onClose={()=>setCollabOpen(null)} onSave={col=>{ const i = col.index; delete col.index;
         set({collabs: i!=null ? (c.collabs||[]).map((x,j)=>j===i? col : x) : [...(c.collabs||[]), col]}); setCollabOpen(null); toast("Added — tap “Save changes” to keep it"); }}
@@ -4598,6 +4618,42 @@ function CampaignDetail({camp, camps, data, admin, onBack, saveCamp, toast}){
       {costOpen && <CostModal camps={camps} data={data} toast={toast} preset={{campaignId:c.id}} onClose={()=>setCostOpen(false)}/>}
     </div>
   );
+}
+/* After the campaign: the team's own review, plus an AI review written from every number on the page. */
+function CampReview({c, set, setIn, ro, M, res, posts, data, toast, dirty, save}){
+  const [busy, setBusy] = useState(false);
+  const r = c.review || {};
+  const facts = ()=>[
+    "Campaign: "+c.name+" ("+(CAMP_TYPES[c.type]||CAMP_TYPES.other).label+"), "+campRange(c)+", branches: "+(c.branches||[]).join(", "),
+    c.details ? "What it is: "+c.details : "",
+    "Budget "+money(M.budget)+", spent "+money(M.spent)+".",
+    M.L && M.L.anyData ? "Tracked items sold: month before "+(M.L.b.has? M.L.b.qty : "no report")+", average per month during "+Math.round(M.L.dAvg.qty)+", month after "+(M.L.a.has? M.L.a.qty : "no report")+". Total during: "+M.qty+" items, "+money(M.sales)+(M.L.dTotal.uses? ", promo code used "+M.L.dTotal.uses+" times" : "")+"." : "No sales reports for the campaign months.",
+    M.extra ? "Extra sales typed in by the team: "+money(M.extra)+"." : "",
+    M.ret!=null ? "Return (sales ÷ spend): "+M.ret.toFixed(1)+"x." : "", M.perItem!=null ? "Cost per item sold: £"+M.perItem.toFixed(2)+"." : "", M.per1k!=null ? "Cost per 1,000 views: £"+M.per1k.toFixed(2)+"." : "",
+    (c.collabs||[]).length ? "Influencers: "+(c.collabs||[]).map(col=>col.handle+" ("+(col.status||"")+", "+collabViews(col, data.study).n+" views, "+money(col.cost)+")").join("; ")+"." : "No influencers.",
+    res.mail.length ? "Emails: "+res.mail.map(e=>e.name+" ("+(e.openRate!=null? e.openRate+"% opened" : "")+(e.clickRate!=null? ", "+e.clickRate+"% clicked" : "")+(e.bookings? ", "+e.bookings+" bookings" : "")+")").join("; ")+"." : "",
+    posts.filter(p=>p.campaign===c.id).length ? "Our social posts: "+posts.filter(p=>p.campaign===c.id).map(p=>p.platform+" "+p.views+" views, "+p.engagementRate.toFixed(1)+"% engagement").join("; ")+"." : "",
+    c.results && c.results.sold ? "Sold (typed in): "+c.results.sold : "", c.results && c.results.notes ? "Team notes: "+c.results.notes : "",
+    r.worked ? "Team says worked: "+r.worked : "", r.didnt ? "Team says didn't work: "+r.didnt : "",
+  ].filter(Boolean).join("\n");
+  async function ai(){
+    setBusy(true);
+    try{ const res = await fetch("/api/camp/summary", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({facts: facts()})}); const d = await res.json().catch(()=>({}));
+      if(!res.ok) throw new Error(d.error || "Couldn't get a review"); setIn("review", {ai:d.text, aiAt:new Date().toISOString()}); toast("Review written — tap “Save changes” to keep it"); }
+    catch(e){ toast(e.message, "danger"); }
+    setBusy(false);
+  }
+  const box = (k, label, ph) => ro ? (r[k] ? <div style={{fontSize:12.5, marginBottom:8}}><b>{label}</b><div style={{whiteSpace:"pre-wrap"}}>{r[k]}</div></div> : null)
+    : <Field label={label} style={{marginBottom:8}}><textarea value={r[k]||""} onChange={e=>setIn("review", {[k]:e.target.value})} rows={2} placeholder={ph} style={{...campInput, resize:"vertical"}}/></Field>;
+  return <CampSection title="Review" icon="bulb" action={!ro && <Button size="sm" icon="zap" onClick={ai} disabled={busy}>{busy? "Writing…" : r.ai? "Write again" : "AI review"}</Button>}>
+    <div style={{fontSize:11.5, color:"var(--ink-mute)", marginBottom:10}}>Fill this in when the campaign ends, so next year's plan learns from it.</div>
+    <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(220px, 1fr))", gap:10}}>
+      <div>{box("worked", "What worked", "Queues on launch day, the reel with the chef…")}{box("didnt", "What didn't", "Delivery codes hardly used…")}</div>
+      <div>{ro ? (r.again && <div style={{fontSize:12.5}}><b>Do it again?</b> {r.again}</div>) : <Field label="Do it again?"><Select value={r.again||""} onChange={v=>setIn("review", {again:v})} placeholder="Not decided" options={["Yes, same again","Yes, with changes","No"].map(x=>({value:x, label:x}))}/></Field>}
+        {r.ai && <div style={{marginTop:10, padding:"10px 12px", borderRadius:10, background:"var(--violet-soft)", fontSize:12.5, lineHeight:1.55, whiteSpace:"pre-wrap"}}><div style={{fontWeight:700, color:"var(--violet)", marginBottom:4}}>AI review{r.aiAt? " · "+fmtDate(r.aiAt) : ""}</div>{r.ai}</div>}
+        {!r.ai && !ro && <div style={{fontSize:12, color:"var(--ink-mute)", marginTop:10}}>“AI review” reads every number on this page (sales before/during/after, spend, influencers, emails, posts) and writes what worked, what didn't and what to do next time.</div>}</div>
+    </div>
+  </CampSection>;
 }
 function CostLine({x, admin, data, toast, camps}){
   const camp = camps && camps.find(c=>c.id===x.campaignId);
@@ -4681,6 +4737,245 @@ function CollabModal({col, camp, data, toast, onClose, onSave, onDelete}){
     </div>
     <div style={{display:"flex", gap:8, marginTop:16, alignItems:"center"}}>{onDelete && <Button variant="subtle" onClick={onDelete}>Remove</Button>}<span style={{flex:1}}/><Button onClick={onClose}>Cancel</Button><Button variant="primary" onClick={save} disabled={busy}>{busy? "Saving…" : "Done"}</Button></div>
   </div></Modal>;
+}
+
+/* ---------- Numbers for the Overview and the campaign pages ---------- */
+const SALES_SOURCES = ["pos", "deliveroo", "ubereats"];
+const VIZ = ["var(--viz-1)","var(--viz-2)","var(--viz-3)","var(--viz-4)","var(--viz-5)","var(--viz-6)","var(--viz-7)","var(--viz-8)"];
+const CHANNEL_COLOR = {pos:"var(--viz-1)", deliveroo:"var(--viz-2)", ubereats:"var(--viz-3)"};
+const monthAdd = (key, n) => { let y = +key.slice(0,4), m = +key.slice(5,7) - 1 + n; y += Math.floor(m/12); m = ((m%12)+12)%12; return y+"-"+String(m+1).padStart(2,"0"); };
+const monthLabel = (key, long) => fmtDate(key+"-15", long? {month:"long", year:"numeric"} : {month:"short", year:"2-digit"});
+/* One month of sales from the uploaded reports: totals per channel, items, codes and branches. */
+function salesMonth(docs, key){
+  const reps = (docs||[]).filter(d=>d.kind==="report" && d.month===key && SALES_SOURCES.includes(d.source));
+  const out = {key, sales:0, orders:0, channels:{}, items:{}, codes:{}, branches:{}, has: reps.length>0};
+  for(const r of reps){ const s = r.summary || {};
+    out.sales += +s.totalSales || 0; out.orders += +s.orders || 0; out.channels[r.source] = {sales:+s.totalSales||0, orders:+s.orders||0};
+    for(const it of s.items||[]){ const k = String(it.name||"").trim(); if(!k) continue; const x = out.items[k] || (out.items[k] = {qty:0, sales:0}); x.qty += +it.qty||0; x.sales += +it.sales||0; }
+    for(const cd of s.codes||[]){ const k = String(cd.code||"").trim().toUpperCase(); if(!k) continue; const x = out.codes[k] || (out.codes[k] = {count:0, discount:0}); x.count += +cd.count||0; x.discount += +cd.discount||0; }
+    for(const b of s.branches||[]){ const k = CAMP_BRANCHES.find(n=>String(b.name||"").toLowerCase().includes(n.toLowerCase())) || String(b.name||"Other"); const x = out.branches[k] || (out.branches[k] = {sales:0, orders:0}); x.sales += +b.sales||0; x.orders += +b.orders||0; }
+  }
+  return out;
+}
+function emailMonth(docs, key){
+  const es = (docs||[]).filter(d=>d.kind==="report" && d.source==="sevenrooms" && d.month===key).flatMap(r=>(r.summary||{}).emails||[]);
+  const rates = k => { const v = es.map(e=>e[k]).filter(x=>x!=null && x!=="").map(Number); return v.length ? v.reduce((a,b)=>a+b, 0)/v.length : null; };
+  return {count:es.length, openRate:rates("openRate"), clickRate:rates("clickRate"), bookings: es.reduce((a,e)=>a+(+e.bookings||0), 0), has: es.length>0};
+}
+/* What a campaign's tracked items / codes sold in one month (from the reports). */
+function trackedMonth(c, docs, key){
+  const words = splitList(c.track && c.track.items), codes = splitList(c.track && c.track.codes);
+  const m = salesMonth(docs, key); let qty = 0, sales = 0, uses = 0;
+  if(words.length) for(const [n, x] of Object.entries(m.items)) if(words.some(w=>n.toLowerCase().includes(w))){ qty += x.qty; sales += x.sales; }
+  if(codes.length) for(const [n, x] of Object.entries(m.codes)) if(codes.some(w=>n.toLowerCase().includes(w))) uses += x.count;
+  return {qty, sales, uses, has: m.has};
+}
+/* Before vs during vs after: the month before it starts, the months it runs (average per month) and the month after. */
+function campLift(c, docs){
+  if(!c.start) return null;
+  const during = monthsBetween(c.start, c.end || c.start), before = monthAdd(during[0], -1), after = monthAdd(during[during.length-1], 1);
+  const d = during.map(k=>trackedMonth(c, docs, k)), b = trackedMonth(c, docs, before), a = trackedMonth(c, docs, after);
+  const dAvg = {qty: d.reduce((s,x)=>s+x.qty, 0)/d.length, sales: d.reduce((s,x)=>s+x.sales, 0)/d.length};
+  const lift = b.has && b.qty ? (dAvg.qty - b.qty)/b.qty*100 : null;
+  const isNew = b.has && !b.qty && dAvg.qty > 0;
+  return {before, after, during, b, a, dAvg, dTotal:{qty:d.reduce((s,x)=>s+x.qty, 0), sales:d.reduce((s,x)=>s+x.sales, 0), uses:d.reduce((s,x)=>s+x.uses, 0)}, lift, isNew, anyData: b.has || a.has || d.some(x=>x.has)};
+}
+/* Everything we know about one campaign, as numbers — used by the comparison table, the year report and the AI review. */
+function campMetrics(c, docs, study, postStats){
+  const spent = (docs||[]).filter(d=>d.kind==="cost" && d.campaignId===c.id).reduce((a,x)=>a+(+x.amount||0), 0);
+  const L = campLift(c, docs);
+  const inflViews = (c.collabs||[]).reduce((a,col)=>a+collabViews(col, study).n, 0);
+  const posts = (postStats||[]).filter(p=>p.campaign===c.id), postViews = posts.reduce((a,p)=>a+p.views, 0);
+  const extra = +(c.results && c.results.extraSales) || 0;
+  const qty = L ? L.dTotal.qty : 0, sales = L ? L.dTotal.sales : 0, views = inflViews + postViews;
+  const ret = spent ? (extra || sales)/spent : null;
+  return {c, spent, budget:+c.budget||0, qty, sales, extra, lift: L && L.lift, L, inflViews, postViews, views, posts: posts.length,
+    perItem: spent && qty ? spent/qty : null, per1k: spent && views ? spent/views*1000 : null, ret};
+}
+const campPct = (a, b) => (b==null || !isFinite(b) || b===0 || a==null) ? null : (a-b)/Math.abs(b)*100;
+
+/* ---------- Small charts (plain SVG / HTML; colours from the --viz tokens) ---------- */
+function CampDelta({now, prev, invert, suffix}){
+  const p = campPct(now, prev);
+  if(p==null) return <span style={{fontSize:11.5, color:"var(--ink-mute)"}}>no data to compare</span>;
+  const good = invert ? p<0 : p>0, flat = Math.abs(p)<0.5;
+  return <span style={{fontSize:11.5, fontWeight:700, color: flat? "var(--ink-mute)" : good? "var(--green)" : "var(--red)"}}>{flat? "→" : p>0? "▲" : "▼"} {Math.abs(p).toFixed(Math.abs(p)<10? 1 : 0)}%<span style={{fontWeight:400, color:"var(--ink-mute)"}}> {suffix}</span></span>;
+}
+function KpiTile({label, value, now, prev, invert, suffix, sub}){
+  return <div style={{background:"var(--surface)", border:"1px solid var(--border)", borderRadius:12, padding:"11px 13px", minWidth:0}}>
+    <div style={{fontSize:11.5, color:"var(--ink-mute)", fontWeight:600}}>{label}</div>
+    <div style={{fontSize:21, fontWeight:700, margin:"2px 0"}}>{value}</div>
+    {now!==undefined ? <CampDelta now={now} prev={prev} invert={invert} suffix={suffix}/> : null}
+    {sub && <div style={{fontSize:11, color:"var(--ink-mute)", marginTop:2}}>{sub}</div>}
+  </div>;
+}
+function ChartLegend({items}){ return <div style={{display:"flex", gap:12, flexWrap:"wrap", fontSize:12, color:"var(--ink-soft)", marginBottom:8}}>{items.map(([l,c])=><span key={l} style={{display:"inline-flex", alignItems:"center", gap:5}}><span style={{width:10, height:10, borderRadius:3, background:c}}/>{l}</span>)}</div>; }
+/* Columns per month, this year next to the same month last year. Hover a month for the numbers. */
+function MonthBars({rows, fmt, aLabel, bLabel, onPick, picked}){
+  const [hover, setHover] = useState(null);
+  const max = Math.max(1, ...rows.flatMap(r=>[r.a||0, r.b||0]));
+  const h = hover!=null ? rows[hover] : null;
+  return <div>
+    <ChartLegend items={[[aLabel, "var(--viz-1)"], [bLabel, "var(--viz-prev)"]]}/>
+    <div style={{height:20, fontSize:12, color:"var(--ink-soft)"}}>{h ? <span><b style={{color:"var(--ink)"}}>{h.label}</b> · {aLabel}: <b style={{color:"var(--ink)"}}>{h.a!=null? fmt(h.a) : "no report"}</b> · {bLabel}: {h.b!=null? fmt(h.b) : "no report"}{h.a!=null && h.b ? " · "+(h.a>=h.b? "▲ " : "▼ ")+Math.abs(campPct(h.a, h.b)).toFixed(0)+"%" : ""}</span> : <span style={{color:"var(--ink-mute)"}}>Hover or tap a month for the numbers</span>}</div>
+    <div style={{position:"relative", height:170, display:"flex", alignItems:"flex-end", gap:4, borderBottom:"1px solid var(--border)", marginTop:6, marginLeft:44}}>
+      {[0.5, 1].map(f=><span key={f} style={{position:"absolute", left:0, right:0, bottom: f*150, borderTop:"1px dashed var(--border)", pointerEvents:"none"}}><span style={{position:"absolute", left:-44, width:40, textAlign:"right", top:-7, fontSize:10, color:"var(--ink-mute)"}}>{fmt(max*f)}</span></span>)}
+      {rows.map((r,i)=><div key={r.key} onMouseEnter={()=>setHover(i)} onMouseLeave={()=>setHover(null)} onClick={()=>{ setHover(i); onPick && onPick(r.key); }}
+        style={{flex:1, height:"100%", display:"flex", alignItems:"flex-end", justifyContent:"center", gap:2, cursor:"pointer", background: hover===i || picked===r.key ? "var(--surface-2)" : "transparent", borderRadius:"6px 6px 0 0"}}>
+        <span style={{width:"38%", maxWidth:18, height: r.b? Math.max(2, r.b/max*150) : 0, background:"var(--viz-prev)", borderRadius:"4px 4px 0 0"}}/>
+        <span style={{width:"38%", maxWidth:18, height: r.a? Math.max(2, r.a/max*150) : 0, background:"var(--viz-1)", borderRadius:"4px 4px 0 0"}}/>
+      </div>)}
+    </div>
+    <div style={{display:"flex", gap:4, marginTop:4, marginLeft:44}}>{rows.map(r=><span key={r.key} style={{flex:1, textAlign:"center", fontSize:10.5, color: picked===r.key? "var(--accent)" : "var(--ink-mute)", fontWeight: picked===r.key? 700 : 400}}>{r.label}</span>)}</div>
+  </div>;
+}
+/* Parts of a whole (few parts): a ring with a 2px gap between slices, legend with amounts and shares. */
+function Donut({parts, fmt, center}){
+  const [hover, setHover] = useState(null);
+  const total = parts.reduce((a,p)=>a+p.value, 0);
+  if(!total) return <div style={{fontSize:12.5, color:"var(--ink-mute)", padding:"20px 0"}}>No numbers yet.</div>;
+  const R = 52, C = 2*Math.PI*R; let acc = 0;
+  return <div style={{display:"flex", alignItems:"center", gap:16, flexWrap:"wrap"}}>
+    <svg viewBox="0 0 140 140" width="140" height="140" role="img" aria-label={parts.map(p=>p.label+" "+fmt(p.value)).join(", ")}>
+      <g transform="rotate(-90 70 70)">{parts.filter(p=>p.value>0).map((p,i)=>{ const len = p.value/total*C, gap = parts.filter(x=>x.value>0).length>1 ? 2 : 0;
+        const el = <circle key={p.label} cx="70" cy="70" r={R} fill="none" stroke={p.color} strokeWidth={hover===p.label? 22 : 18} strokeDasharray={Math.max(0.5, len-gap)+" "+(C-Math.max(0.5, len-gap))} strokeDashoffset={-acc}
+          onMouseEnter={()=>setHover(p.label)} onMouseLeave={()=>setHover(null)} style={{cursor:"pointer", transition:"stroke-width .15s"}}><title>{p.label}: {fmt(p.value)} ({(p.value/total*100).toFixed(0)}%)</title></circle>;
+        acc += len; return el; })}</g>
+      <text x="70" y="66" textAnchor="middle" style={{fontSize:11, fill:"var(--ink-mute)"}}>{hover || center || "Total"}</text>
+      <text x="70" y="84" textAnchor="middle" style={{fontSize:15, fontWeight:700, fill:"var(--ink)"}}>{fmt(hover ? (parts.find(p=>p.label===hover)||{}).value : total)}</text>
+    </svg>
+    <div style={{display:"flex", flexDirection:"column", gap:6, flex:"1 1 140px", minWidth:0}}>
+      {parts.map(p=><div key={p.label} onMouseEnter={()=>setHover(p.label)} onMouseLeave={()=>setHover(null)} style={{display:"flex", alignItems:"center", gap:7, fontSize:12.5}}>
+        <span style={{width:10, height:10, borderRadius:3, background:p.color, flexShrink:0}}/><span style={{flex:1, minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>{p.label}</span>
+        <b>{fmt(p.value)}</b><span style={{color:"var(--ink-mute)", minWidth:34, textAlign:"right"}}>{(p.value/total*100).toFixed(0)}%</span></div>)}
+    </div>
+  </div>;
+}
+/* Two bars per row (this period vs the comparison), e.g. per branch. */
+function PairBars({rows, fmt, aLabel, bLabel}){
+  const max = Math.max(1, ...rows.flatMap(r=>[r.a||0, r.b||0]));
+  if(!rows.length) return <div style={{fontSize:12.5, color:"var(--ink-mute)"}}>No branch numbers in the reports for this month.</div>;
+  return <div>
+    <ChartLegend items={[[aLabel, "var(--viz-1)"], [bLabel, "var(--viz-prev)"]]}/>
+    {rows.map(r=><div key={r.label} style={{marginBottom:10}} title={r.label+": "+fmt(r.a||0)+" vs "+fmt(r.b||0)}>
+      <div style={{display:"flex", fontSize:12.5, marginBottom:3}}><b style={{flex:1}}>{r.label}</b><span>{fmt(r.a||0)}</span>{r.b ? <span style={{marginLeft:8}}><CampDelta now={r.a||0} prev={r.b}/></span> : null}</div>
+      <div style={{height:9, borderRadius:4, background:"var(--surface-2)", overflow:"hidden", marginBottom:2}}><span style={{display:"block", height:9, width:(r.a||0)/max*100+"%", background:"var(--viz-1)", borderRadius:4}}/></div>
+      <div style={{height:9, borderRadius:4, background:"var(--surface-2)", overflow:"hidden"}}><span style={{display:"block", height:9, width:(r.b||0)/max*100+"%", background:"var(--viz-prev)", borderRadius:4}}/></div>
+    </div>)}
+  </div>;
+}
+
+/* ---------- Overview ---------- */
+async function yearReportPdf(year, camps, data, postStats, share){
+  const months = Array.from({length:12}, (_,i)=>year+"-"+String(i+1).padStart(2,"0"));
+  const sm = months.map(k=>salesMonth(data.docs, k));
+  const costs = (data.docs||[]).filter(d=>d.kind==="cost" && String(d.date||"").startsWith(String(year)));
+  const spent = costs.reduce((a,x)=>a+(+x.amount||0), 0);
+  const cats = {}; costs.forEach(x=>{ cats[x.category||"Other"] = (cats[x.category||"Other"]||0) + (+x.amount||0); });
+  const list = camps.filter(c=>inYear(c, year)).map(c=>campMetrics(c, data.docs, data.study, postStats));
+  const best = [...list].filter(m=>m.ret!=null).sort((a,b)=>b.ret-a.ret)[0];
+  const budget = budgetOf(data.docs, year);
+  const blob = await makePdf({kicker:"SANJUGO · YEAR IN CAMPAIGNS", title:"Campaign report "+year, subtitle: list.length+" campaigns · marketing spend "+money(spent)+(budget.total? " of "+money(budget.total) : "")+" · sales in reports "+money(sm.reduce((a,m)=>a+m.sales, 0)), sections:[
+    {heading:"Highlights", lines:[best ? "Best return: "+best.c.name+" — "+best.ret.toFixed(1)+"x (sales ÷ spend)" : "", ...[...list].filter(m=>m.lift!=null).sort((a,b)=>b.lift-a.lift).slice(0,1).map(m=>"Biggest lift: "+m.c.name+" — "+(m.lift>0? "+" : "")+m.lift.toFixed(0)+"% vs the month before"),
+      ...[...list].filter(m=>m.per1k!=null).sort((a,b)=>a.per1k-b.per1k).slice(0,1).map(m=>"Cheapest reach: "+m.c.name+" — £"+m.per1k.toFixed(2)+" per 1,000 views")].filter(Boolean)},
+    {heading:"Campaigns", lines: list.sort((a,b)=>String(a.c.start).localeCompare(String(b.c.start))).map(m=>"• "+m.c.name+" ("+campRange(m.c)+"): spent "+money(m.spent)+(m.budget? " of "+money(m.budget) : "")+(m.qty? " · "+m.qty.toLocaleString("en-GB")+" sold, "+money(m.sales) : "")+(m.lift!=null? " · lift "+(m.lift>0?"+":"")+m.lift.toFixed(0)+"%" : "")+(m.ret!=null? " · return "+m.ret.toFixed(1)+"x" : "")+(m.views? " · "+m.views.toLocaleString("en-GB")+" views" : ""))},
+    {heading:"Spend by category", lines: Object.entries(cats).sort((a,b)=>b[1]-a[1]).map(([k,v])=>k+": "+money(v)+" ("+(spent? (v/spent*100).toFixed(0) : 0)+"%)")},
+    {heading:"Sales by month (from the uploaded reports)", lines: sm.filter(m=>m.has).map(m=>monthLabel(m.key, true)+": "+money(m.sales)+(m.orders? " · "+m.orders.toLocaleString("en-GB")+" orders" : "")+" · "+SALES_SOURCES.filter(s=>m.channels[s]).map(s=>REPORT_SOURCES[s]+" "+money(m.channels[s].sales)).join(", "))},
+  ]});
+  await savePdf(blob, "Sanjugo campaign report "+year+".pdf", share);
+}
+function CampOverview({year, camps, data, onOpen, run}){
+  const {state} = useApp();
+  const realData = useRealAnalytics();
+  const postStats = useMemo(()=>realAnalyticsPosts(realData, state.contentItems), [realData, state.contentItems]);
+  const reportMonths = [...new Set((data.docs||[]).filter(d=>d.kind==="report").map(d=>d.month))].sort();
+  const thisMonth = isoDay(new Date()).slice(0,7);
+  const [month, setMonth] = useState(()=> reportMonths.length ? reportMonths[reportMonths.length-1] : monthAdd(thisMonth, -1));
+  const [cmp, setCmp] = useState("prev");
+  const [sortBy, setSortBy] = useState("start");
+  const prevKey = cmp==="prev" ? monthAdd(month, -1) : monthAdd(month, -12);
+  const cmpLabel = cmp==="prev" ? "vs "+monthLabel(prevKey) : "vs "+monthLabel(prevKey);
+  const now = salesMonth(data.docs, month), prev = salesMonth(data.docs, prevKey);
+  const costsIn = key => (data.docs||[]).filter(d=>d.kind==="cost" && String(d.date||"").startsWith(key)).reduce((a,x)=>a+(+x.amount||0), 0);
+  const em = emailMonth(data.docs, month), emPrev = emailMonth(data.docs, prevKey);
+  const viewsIn = key => postStats.filter(p=>String(p.publishedAt||"").startsWith(key)).reduce((a,p)=>a+p.views, 0);
+  const aov = m => m.orders ? m.sales/m.orders : null;
+  const rows12 = Array.from({length:12}, (_,i)=>{ const k = monthAdd(month, i-11), a = salesMonth(data.docs, k), b = salesMonth(data.docs, monthAdd(k, -12)); return {key:k, label:fmtDate(k+"-15", {month:"short"}), a: a.has? a.sales : null, b: b.has? b.sales : null}; });
+  const channelParts = SALES_SOURCES.filter(s=>now.channels[s]).map(s=>({label:REPORT_SOURCES[s], value:now.channels[s].sales, color:CHANNEL_COLOR[s]}));
+  const yearCosts = (data.docs||[]).filter(d=>d.kind==="cost" && String(d.date||"").startsWith(String(year)));
+  const cats = {}; yearCosts.forEach(x=>{ const k = x.category || "Other"; cats[k] = (cats[k]||0) + (+x.amount||0); });
+  const catParts = COST_CATS.filter(k=>cats[k]).map((k)=>({label:k, value:cats[k], color:VIZ[COST_CATS.indexOf(k) % VIZ.length]}));
+  const branchRows = [...new Set([...Object.keys(now.branches), ...Object.keys(prev.branches)])].map(b=>({label:b, a:(now.branches[b]||{}).sales, b:(prev.branches[b]||{}).sales})).sort((x,y)=>(y.a||0)-(x.a||0));
+  const topItems = Object.entries(now.items).sort((a,b)=>b[1].qty-a[1].qty).slice(0, 8);
+  const codes = [...new Set([...Object.keys(now.codes), ...Object.keys(prev.codes)])].map(k=>({code:k, a:now.codes[k]||{count:0, discount:0}, b:prev.codes[k]||{count:0, discount:0}})).sort((x,y)=>y.a.count-x.a.count);
+  const metrics = camps.filter(c=>inYear(c, year)).map(c=>campMetrics(c, data.docs, data.study, postStats));
+  const sorted = [...metrics].sort((a,b)=>{ const v = m => sortBy==="start" ? m.c.start : sortBy==="perItem" || sortBy==="per1k" ? (m[sortBy]==null? 1e12 : m[sortBy]) : (m[sortBy]==null? -1e12 : -m[sortBy]); const x = v(a), y = v(b); return x<y? -1 : x>y? 1 : 0; });
+  const share = canShareFiles();
+  const noReports = !reportMonths.length;
+  const fmtK = v => v>=10000 ? "£"+(v/1000).toFixed(v>=100000? 0 : 1)+"k" : money(v);
+  const th = (k, l, hint) => <th title={hint} onClick={()=>setSortBy(k)} style={{padding:"7px 4px", cursor:"pointer", whiteSpace:"nowrap", color: sortBy===k? "var(--accent)" : undefined}}>{l}{sortBy===k? " ↓" : ""}</th>;
+  return (
+    <div style={{display:"flex", flexDirection:"column", gap:14}}>
+      <Card style={{padding:12}}>
+        <div style={{display:"flex", alignItems:"center", gap:8, flexWrap:"wrap"}}>
+          <Button size="sm" onClick={()=>setMonth(monthAdd(month, -1))}>‹</Button>
+          <input type="month" value={month} onChange={e=>e.target.value && setMonth(e.target.value)} style={{...campInput, width:160}}/>
+          <Button size="sm" onClick={()=>setMonth(monthAdd(month, 1))}>›</Button>
+          <span style={{fontSize:12.5, color:"var(--ink-mute)", marginLeft:4}}>compare with</span>
+          <div style={{display:"inline-flex", padding:3, borderRadius:9, background:"var(--surface-2)"}}>
+            {[["prev","Last month"],["year","Same month last year"]].map(([k,l])=><button key={k} onClick={()=>setCmp(k)} style={{padding:"5px 11px", border:"none", borderRadius:7, background: cmp===k? "var(--surface)" : "transparent", boxShadow: cmp===k? "var(--shadow-sm)" : "none", color: cmp===k? "var(--ink)" : "var(--ink-mute)", fontWeight:700, fontSize:12, cursor:"pointer"}}>{l}</button>)}
+          </div>
+          <span style={{flex:1}}/>
+          <Button size="sm" icon="download" onClick={()=>run("Making the year report…", ()=>yearReportPdf(year, camps, data, postStats, false))}>Year report {year}</Button>
+          {share && <Button size="sm" icon="share" onClick={()=>run("Making the year report…", ()=>yearReportPdf(year, camps, data, postStats, true))}>Share</Button>}
+        </div>
+        {noReports && <div style={{fontSize:12.5, color:"var(--amber)", marginTop:8}}>No sales reports uploaded yet — upload POS, Deliveroo and Uber Eats reports in “Sales reports” and the sales charts fill in.</div>}
+      </Card>
+      <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(150px, 1fr))", gap:8}}>
+        <KpiTile label={"Sales · "+monthLabel(month, true)} value={now.has? money(now.sales) : "—"} now={now.has? now.sales : null} prev={prev.has? prev.sales : null} suffix={cmpLabel}/>
+        <KpiTile label="Orders" value={now.orders? now.orders.toLocaleString("en-GB") : "—"} now={now.orders||null} prev={prev.orders||null} suffix={cmpLabel}/>
+        <KpiTile label="Average order" value={aov(now)!=null? "£"+aov(now).toFixed(2) : "—"} now={aov(now)} prev={aov(prev)} suffix={cmpLabel}/>
+        <KpiTile label="Marketing spend" value={money(costsIn(month))} now={costsIn(month)} prev={costsIn(prevKey)} invert suffix={cmpLabel}/>
+        <KpiTile label="Email open rate" value={em.openRate!=null? em.openRate.toFixed(1)+"%" : "—"} now={em.openRate} prev={emPrev.openRate} suffix={cmpLabel} sub={em.has? em.bookings+" bookings from "+em.count+" email"+(em.count===1?"":"s") : null}/>
+        <KpiTile label="Views on our posts" value={viewsIn(month)? viewsIn(month).toLocaleString("en-GB") : "—"} now={viewsIn(month)||null} prev={viewsIn(prevKey)||null} suffix={cmpLabel}/>
+      </div>
+      <Card style={{padding:14}}>
+        <div style={{fontWeight:700, fontSize:14, marginBottom:6}}>Sales by month <span style={{fontWeight:400, fontSize:12, color:"var(--ink-mute)"}}>· all channels, last 12 months vs the year before · tap a month to pick it</span></div>
+        <MonthBars rows={rows12} fmt={fmtK} aLabel="This year" bLabel="Year before" picked={month} onPick={setMonth}/>
+      </Card>
+      <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(300px, 1fr))", gap:14, alignItems:"start"}}>
+        <Card style={{padding:14}}><div style={{fontWeight:700, fontSize:14, marginBottom:10}}>Sales by channel · {monthLabel(month, true)}</div><Donut parts={channelParts} fmt={fmtK} center="Sales"/></Card>
+        <Card style={{padding:14}}><div style={{fontWeight:700, fontSize:14, marginBottom:10}}>Marketing spend by type · {year}</div><Donut parts={catParts} fmt={fmtK} center="Spent"/></Card>
+        <Card style={{padding:14}}><div style={{fontWeight:700, fontSize:14, marginBottom:10}}>Branches · {monthLabel(month, true)} {cmpLabel}</div><PairBars rows={branchRows} fmt={fmtK} aLabel={monthLabel(month)} bLabel={monthLabel(prevKey)}/></Card>
+        <Card style={{padding:14}}><div style={{fontWeight:700, fontSize:14, marginBottom:10}}>Best sellers · {monthLabel(month, true)}</div>
+          {!topItems.length ? <div style={{fontSize:12.5, color:"var(--ink-mute)"}}>No item numbers for this month.</div> : topItems.map(([n, x], i)=>{ const p = prev.items[n]; return <div key={n} style={{display:"flex", gap:8, alignItems:"center", padding:"5px 0", borderTop: i? "1px solid var(--border)" : "none", fontSize:12.5}}>
+            <span style={{color:"var(--ink-mute)", width:16}}>{i+1}</span><span style={{flex:1, minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>{n}</span><b>{x.qty.toLocaleString("en-GB")}</b>{p && p.qty ? <CampDelta now={x.qty} prev={p.qty}/> : <span style={{fontSize:11, color:"var(--ink-mute)"}}>new</span>}</div>; })}
+        </Card>
+      </div>
+      <Card style={{padding:14}}>
+        <div style={{fontWeight:700, fontSize:14, marginBottom:4}}>Compare campaigns · {year} <span style={{fontWeight:400, fontSize:12, color:"var(--ink-mute)"}}>· tap a heading to sort, a name to open</span></div>
+        <div style={{fontSize:11.5, color:"var(--ink-mute)", marginBottom:8}}>Sold and lift come from the items and codes each campaign tracks (Results), in the months it ran. Lift = average month during vs the month before.</div>
+        {!metrics.length ? <div style={{fontSize:12.5, color:"var(--ink-mute)"}}>No campaigns with dates in {year} yet.</div> :
+        <div style={{overflowX:"auto"}}><table style={{width:"100%", borderCollapse:"collapse", fontSize:12.5, minWidth:760}}>
+          <thead><tr style={{color:"var(--ink-mute)", textAlign:"left"}}>{th("start", "Campaign")}{th("spent", "Spent")}{th("qty", "Sold")}{th("sales", "Sales")}{th("lift", "Lift", "Average month during vs the month before")}{th("perItem", "£ per item", "Spend ÷ items sold")}{th("views", "Views")}{th("per1k", "£ per 1k views")}{th("ret", "Return", "Sales (or extra sales typed in) ÷ spend")}</tr></thead>
+          <tbody>{sorted.map(m=><tr key={m.c.id} style={{borderTop:"1px solid var(--border)"}}>
+            <td style={{padding:"7px 4px"}}><button onClick={()=>onOpen(m.c)} style={{border:"none", background:"none", padding:0, cursor:"pointer", textAlign:"left", color:"var(--ink)", fontWeight:700, fontSize:12.5}}><span style={{display:"inline-block", width:8, height:8, borderRadius:2, background:(CAMP_TYPES[m.c.type]||CAMP_TYPES.other).c, marginRight:6}}/>{m.c.name}</button><div style={{fontSize:11, color:"var(--ink-mute)"}}>{campRange(m.c)}</div></td>
+            <td style={{color: m.budget && m.spent>m.budget ? "var(--red)" : undefined}}>{money(m.spent)}{m.budget? <span style={{color:"var(--ink-mute)"}}> / {money(m.budget)}</span> : ""}</td>
+            <td>{m.qty? m.qty.toLocaleString("en-GB") : "—"}</td><td>{m.sales? money(m.sales) : "—"}</td>
+            <td style={{fontWeight:700, color: m.lift==null? "var(--ink-mute)" : m.lift>=0? "var(--green)" : "var(--red)"}}>{m.lift==null? (m.L && m.L.isNew ? "new item" : "—") : (m.lift>0? "+" : "")+m.lift.toFixed(0)+"%"}</td>
+            <td>{m.perItem!=null? "£"+m.perItem.toFixed(2) : "—"}</td><td>{m.views? m.views.toLocaleString("en-GB") : "—"}</td><td>{m.per1k!=null? "£"+m.per1k.toFixed(2) : "—"}</td>
+            <td style={{fontWeight:700}}>{m.ret!=null? m.ret.toFixed(1)+"×" : "—"}</td></tr>)}</tbody>
+        </table></div>}
+      </Card>
+      {codes.length>0 && <Card style={{padding:14}}>
+        <div style={{fontWeight:700, fontSize:14, marginBottom:8}}>Promo codes · {monthLabel(month, true)} {cmpLabel}</div>
+        <div style={{overflowX:"auto"}}><table style={{width:"100%", borderCollapse:"collapse", fontSize:12.5, minWidth:420}}>
+          <thead><tr style={{color:"var(--ink-mute)", textAlign:"left"}}><th style={{padding:"6px 4px"}}>Code</th><th>Used</th><th>Before</th><th>Change</th><th>Discount given</th></tr></thead>
+          <tbody>{codes.map(x=><tr key={x.code} style={{borderTop:"1px solid var(--border)"}}><td style={{padding:"6px 4px", fontWeight:700}}>{x.code}</td><td>{x.a.count}</td><td style={{color:"var(--ink-mute)"}}>{x.b.count||"—"}</td><td><CampDelta now={x.a.count} prev={x.b.count||null}/></td><td>{x.a.discount? money(x.a.discount) : "—"}</td></tr>)}</tbody>
+        </table></div>
+      </Card>}
+    </div>
+  );
 }
 
 /* ---------- Budget ---------- */

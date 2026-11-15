@@ -132,6 +132,10 @@ export default {
       try { return await studyRoute(request, env, url, viewer); } catch (e) { return json({ error: e.message || "Study error" }, e.status || 500); }
     }
 
+    if (url.pathname === "/api/camp" || url.pathname.startsWith("/api/camp/")) {
+      try { return await campRoute(request, env, url, viewer); } catch (e) { return json({ error: e.message || "Campaigns error" }, e.status || 500); }
+    }
+
     if (url.pathname === "/api/occasions" || url.pathname === "/api/occasions/status") {
       try { return await occasionsRoute(request, env, url, viewer); } catch (e) { return json({ error: e.message || "Occasions error" }, e.status || 500); }
     }
@@ -945,12 +949,20 @@ async function planCleanup(env, now = Date.now()) {
     const keys = new Set([...JSON.stringify(it).matchAll(/\/api\/media\/([^"?#\\]+)/g)].map((m) => { try { return decodeURIComponent(m[1]); } catch (e) { return m[1]; } }));
     for (const k of keys) { if (!users.has(k)) users.set(k, []); users.get(k).push(it); }
   }
+  // Receipts and sales reports saved in Campaigns are kept for good.
+  const pinned = new Set();
+  try {
+    await ensureCampTable(env);
+    const { results } = await env.DB.prepare("SELECT data FROM camp_docs").all();
+    for (const r of results || []) for (const m of String(r.data).matchAll(/\/api\/media\/([^"?#\\]+)/g)) { try { pinned.add(decodeURIComponent(m[1])); } catch (e) { pinned.add(m[1]); } }
+  } catch (e) { return { objects, actions: [] }; } // can't check campaign files right now: delete nothing tonight
   // Safety: with no shared post data to compare against, never treat files as unused.
   const canJudgeOrphans = items.length > 0;
   const actions = [];
   for (const o of objects) {
     const cat = storageCategory(o.key);
     if (cat !== "uploads" && cat !== "library") continue;
+    if (pinned.has(o.key)) continue;
     const us = users.get(o.key) || [];
     const base = { key: o.key, size: o.size, category: cat };
     if (!us.length) {
@@ -3254,6 +3266,66 @@ async function studyRoute(request, env, url, viewer) {
     return json({ ok: true });
   }
   if (path === "why") return json({ entry: await studyWhy(env, key, body.post || {}) });
+  throw new HttpError(404, "Unknown request");
+}
+
+// ---- Campaigns: plans, budget, costs, influencers and monthly sales / email reports ----
+// One small table of JSON documents. Everyone signed in can read; only admins can change anything.
+const CAMP_KINDS = ["campaign", "budget", "cost", "influencer", "report"];
+async function ensureCampTable(env) {
+  await env.DB.prepare("CREATE TABLE IF NOT EXISTS camp_docs (id TEXT PRIMARY KEY, kind TEXT NOT NULL, data TEXT NOT NULL, updated_at TEXT NOT NULL)").run();
+}
+const CAMP_REPORT_SYSTEM = `You read monthly reports for SANJUGO, a Japanese restaurant group in London (branches: Shoreditch, Angel, Victoria). The text comes from a file exported from a POS system, Deliveroo, Uber Eats or SevenRooms (email marketing). Reply with ONLY one JSON object, no other text, in this shape (leave out anything the report doesn't contain; numbers as plain numbers, money in pounds):
+{"month":"YYYY-MM","totalSales":0,"orders":0,"items":[{"name":"","qty":0,"sales":0}],"codes":[{"code":"","count":0,"discount":0}],"branches":[{"name":"","sales":0,"orders":0}],"emails":[{"name":"","date":"YYYY-MM-DD","sent":0,"opens":0,"openRate":0,"clicks":0,"clickRate":0,"bookings":0,"revenue":0}],"notes":""}
+Rates are percentages (41.2 means 41.2%). List at most 40 items (best sellers first) and every promo code and email you can find. Never invent numbers that aren't in the text.`;
+async function aiText(env, system, user, maxTokens) {
+  if (env.ANTHROPIC_API_KEY) {
+    const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
+    const msg = await client.messages.create({ model: "claude-opus-5", max_tokens: maxTokens, system, messages: [{ role: "user", content: wellFormed(user) }] });
+    return msg.content.filter((b) => b.type === "text").map((b) => b.text).join("");
+  }
+  const out = await env.AI.run(WORKERS_AI_MODEL, { messages: [{ role: "system", content: system }, { role: "user", content: wellFormed(user) }], max_tokens: maxTokens, temperature: 0.1 });
+  const r = out && (out.response ?? out.result?.response);
+  return typeof r === "string" ? r : JSON.stringify(r || "");
+}
+async function campRoute(request, env, url, viewer) {
+  await ensureCampTable(env);
+  const path = url.pathname.replace(/^\/api\/camp\/?/, "");
+  if (viewer.accessEnabled && !viewer.member) throw new HttpError(401, "Sign in first.");
+  if (request.method === "GET" && path === "") {
+    const { results } = await env.DB.prepare("SELECT data FROM camp_docs").all();
+    return json({ docs: (results || []).map((r) => JSON.parse(r.data)) });
+  }
+  if (request.method !== "POST") throw new HttpError(405, "Method not allowed");
+  if (viewer.accessEnabled && viewer.member.role !== "admin") throw new HttpError(403, "Only admins can change campaigns.");
+  const body = await request.json().catch(() => ({}));
+  const by = viewer.member ? viewer.member.id : String(body.userId || "").slice(0, 64) || null;
+  if (path === "save") {
+    const doc = body.doc || {};
+    if (!CAMP_KINDS.includes(doc.kind)) throw new HttpError(400, "Unknown kind");
+    const id = /^[\w-]{3,80}$/.test(String(doc.id || "")) ? String(doc.id) : doc.kind + "_" + crypto.randomUUID().slice(0, 12);
+    const out = { ...doc, id, updatedAt: new Date().toISOString(), updatedBy: by };
+    const data = JSON.stringify(out);
+    if (data.length > 400000) throw new HttpError(413, "That's too much to save in one go.");
+    await env.DB.prepare("INSERT INTO camp_docs (id, kind, data, updated_at) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(id) DO UPDATE SET kind = excluded.kind, data = excluded.data, updated_at = excluded.updated_at")
+      .bind(id, doc.kind, data, out.updatedAt).run();
+    return json({ doc: out });
+  }
+  if (path === "delete") {
+    await env.DB.prepare("DELETE FROM camp_docs WHERE id = ?1").bind(String(body.id || "")).run();
+    return json({ ok: true });
+  }
+  if (path === "read-report") { // AI turns the report's text into numbers; the admin checks them before saving
+    const source = ["pos", "deliveroo", "ubereats", "sevenrooms"].includes(body.source) ? body.source : "pos";
+    const text = String(body.text || "").slice(0, 24000);
+    if (text.trim().length < 20) throw new HttpError(400, "Couldn't find any text in that file.");
+    const raw = await aiText(env, CAMP_REPORT_SYSTEM, `Source: ${source}\nFile: ${String(body.fileName || "").slice(0, 120)}\nMonth picked by the user: ${String(body.month || "").slice(0, 7)}\n\n${text}`, 3000);
+    const m = String(raw).match(/\{[\s\S]*\}/);
+    let summary = null;
+    try { summary = m ? JSON.parse(m[0]) : null; } catch (e) {}
+    if (!summary) throw new HttpError(502, "Couldn't read numbers from that report — try the CSV or Excel version.");
+    return json({ summary });
+  }
   throw new HttpError(404, "Unknown request");
 }
 

@@ -518,6 +518,7 @@ function Icon({name, size=18, strokeWidth=1.8, style}){
     at: <><circle cx="12" cy="12" r="3.8" {...p}/><path d="M15.8 12v1.6a2.6 2.6 0 005.2 0V12a9 9 0 10-3.5 7.1" {...p}/></>,
     workspace: <><path d="M3 7.5A2.5 2.5 0 015.5 5h3.6l2 2.2h7.4A2.5 2.5 0 0121 9.7v7.8a2.5 2.5 0 01-2.5 2.5h-13A2.5 2.5 0 013 17.5z" {...p}/><path d="M9.5 13.5l2 2 3.5-4" {...p}/></>,
     folder: <><path d="M3 7.5A2.5 2.5 0 015.5 5h3.6l2 2.2h7.4A2.5 2.5 0 0121 9.7v7.8a2.5 2.5 0 01-2.5 2.5h-13A2.5 2.5 0 013 17.5z" {...p}/></>,
+    megaphone: <><path d="M3 10v4a1 1 0 001 1h2l5 4V5L6 9H4a1 1 0 00-1 1z" {...p}/><path d="M15 9a3.5 3.5 0 010 6M18 6.5a7 7 0 010 11" {...p}/></>,
     bulb: <><path d="M9 18h6M10 21h4" {...p}/><path d="M12 3a6 6 0 00-3.6 10.8c.7.6 1.1 1.4 1.1 2.2h5c0-.8.4-1.6 1.1-2.2A6 6 0 0012 3z" {...p}/></>,
     film: <><rect x="3" y="4" width="18" height="16" rx="2.5" {...p}/><path d="M7.5 4v16M16.5 4v16M3 9h4.5M3 15h4.5M16.5 9H21M16.5 15H21" {...p}/></>,
     maximize: <><path d="M14 4h6v6M10 20H4v-6M20 4l-6.5 6.5M4 20l6.5-6.5" {...p}/></>,
@@ -1359,6 +1360,7 @@ const NAV_ITEMS = [
   {id:"queue", label:"Approval Queue", short:"Approvals", icon:"queue", tile:true},
   {id:"workspace", label:"Workspace", short:"Workspace", icon:"workspace", tile:true},
   {id:"chat", label:"Team Chat", icon:"chat"},
+  {id:"campaigns", label:"Campaigns", icon:"megaphone"},
   {id:"library", label:"Content Library", icon:"grid"},
   {id:"published", label:"Published Content", icon:"published"},
   {id:"analytics", label:"Analytics", icon:"analytics"},
@@ -3947,6 +3949,848 @@ function PageHeader({title, subtitle, action}){
   );
 }
 
+/* ============================== CAMPAIGNS ==============================
+   Year plan, campaign pages (kitchen brief, tasks, influencers, costs, results), budget with carry-over between
+   seasons, monthly sales / email reports read by AI, and an influencer list. Stored in /api/camp (D1 camp_docs).
+   Everyone can look; only admins can change anything (the server checks too). The campaign's name also lives in
+   state.campaigns, which the rest of the app (Create, filters) uses. */
+const CAMP_TYPES = {
+  menu:{label:"Menu / food", c:"var(--accent)", s:"var(--accent-soft)", rgb:[217,88,42]},
+  influencer:{label:"Influencer", c:"var(--violet)", s:"var(--violet-soft)", rgb:[124,111,214]},
+  holiday:{label:"Holiday", c:"var(--amber)", s:"var(--amber-soft)", rgb:[214,140,20]},
+  email:{label:"Email", c:"var(--blue)", s:"var(--blue-soft)", rgb:[55,138,221]},
+  offer:{label:"Offer / promo", c:"var(--green)", s:"var(--green-soft)", rgb:[40,150,90]},
+  other:{label:"Other", c:"var(--ink-soft)", s:"var(--surface-2)", rgb:[120,120,120]},
+};
+const CAMP_STATUS = {idea:["Idea","var(--ink-soft)","var(--surface-2)"], planning:["Planning","var(--amber)","var(--amber-soft)"], live:["Live","var(--green)","var(--green-soft)"], finished:["Finished","var(--blue)","var(--blue-soft)"]};
+const CAMP_BRANCHES = ["Shoreditch","Angel","Victoria"];
+const COST_CATS = ["Food","Printing","Influencer","Ads","Photo / video","Staff","Prizes","Other"];
+const REPORT_SOURCES = {pos:"POS (till)", deliveroo:"Deliveroo", ubereats:"Uber Eats", sevenrooms:"SevenRooms email"};
+const MONTHS_SHORT = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+const CNY_DATES = {2025:"01-29", 2026:"02-17", 2027:"02-06", 2028:"01-26", 2029:"02-13", 2030:"02-03"};
+const money = (n, sign) => { const v = Math.round(Number(n)||0); const s = "£"+Math.abs(v).toLocaleString("en-GB"); return v<0 ? "−"+s : (sign && v>0 ? "+"+s : s); };
+const isoDay = d => d.toISOString().slice(0,10);
+function easterDate(y){ const a=y%19,b=Math.floor(y/100),c=y%100,d=Math.floor(b/4),e=b%4,f=Math.floor((b+8)/25),g=Math.floor((b-f+1)/3),h=(19*a+b-d-g+15)%30,i=Math.floor(c/4),k=c%4,l=(32+2*e+2*i-h-k)%7,m=Math.floor((a+11*h+22*l)/451),mo=Math.floor((h+l-7*m+114)/31),da=((h+l-7*m+114)%31)+1; return new Date(Date.UTC(y,mo-1,da)); }
+function campNthWeekday(y, month, weekday, n){ const d = new Date(Date.UTC(y,month,1)); d.setUTCDate(1 + (weekday-d.getUTCDay()+7)%7 + (n-1)*7); return d; }
+function ukKeyDates(y){
+  const e = easterDate(y), ms = new Date(e); ms.setUTCDate(e.getUTCDate()-21);
+  const bf = campNthWeekday(y,10,4,4); bf.setUTCDate(bf.getUTCDate()+1);
+  return [CNY_DATES[y] && {date:y+"-"+CNY_DATES[y], name:"Chinese New Year"}, {date:y+"-02-14", name:"Valentine's Day"}, {date:isoDay(ms), name:"Mother's Day"},
+    {date:isoDay(e), name:"Easter"}, {date:isoDay(campNthWeekday(y,5,0,3)), name:"Father's Day"}, {date:y+"-10-31", name:"Halloween"},
+    {date:isoDay(bf), name:"Black Friday"}, {date:y+"-12-25", name:"Christmas"}, {date:y+"-12-31", name:"New Year's Eve"}].filter(Boolean);
+}
+const fmtDay = d => d ? fmtDate(d+"T12:00:00", {day:"numeric", month:"short"}) : "";
+const campRange = c => c.start ? fmtDay(c.start)+(c.end && c.end!==c.start ? " – "+fmtDay(c.end) : "")+" "+c.start.slice(0,4) : "No dates yet";
+const splitList = t => String(t||"").split(/[,\n]+/).map(x=>x.trim().toLowerCase()).filter(Boolean);
+function monthsBetween(a, b){ if(!a) return []; const out = []; let y = +a.slice(0,4), m = +a.slice(5,7); const ey = +(b||a).slice(0,4), em = +(b||a).slice(5,7);
+  for(let i=0; i<36 && (y<ey || (y===ey && m<=em)); i++){ out.push(y+"-"+String(m).padStart(2,"0")); m++; if(m>12){ m=1; y++; } } return out; }
+const handleKey = h => String(h||"").trim().replace(/^@/, "").toLowerCase();
+
+function loadScriptOnce(src){
+  window.__cfScripts = window.__cfScripts || {};
+  if(!window.__cfScripts[src]) window.__cfScripts[src] = new Promise((res, rej)=>{ const s = document.createElement("script"); s.src = src; s.onload = res;
+    s.onerror = ()=>{ delete window.__cfScripts[src]; rej(new Error("Couldn't load a helper — check your connection")); }; document.head.appendChild(s); });
+  return window.__cfScripts[src];
+}
+/* A simple branded PDF (jsPDF): a title block, an optional drawing (the year chart) and sections of lines. */
+async function makePdf({kicker, title, subtitle, sections=[], landscape, draw}){
+  await loadScriptOnce("https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js");
+  const doc = new window.jspdf.jsPDF({orientation: landscape? "landscape" : "portrait", unit:"pt", format:"a4"});
+  const W = doc.internal.pageSize.getWidth(), H = doc.internal.pageSize.getHeight(), M = 44;
+  const clean = t => String(t==null? "" : t).replace(/[‘’]/g, "'").replace(/[“”]/g, '"').replace(/[^\x20-\x7E\xA0-\xFF€–—•\n]/g, "");
+  let y = 50;
+  const page = need => { if(y + need > H - 50){ doc.addPage(); y = 50; } };
+  doc.setFont("helvetica", "bold"); doc.setFontSize(9); doc.setTextColor(217, 88, 42); doc.text(clean(kicker||"SANJUGO"), M, y); y += 20;
+  doc.setFontSize(18); doc.setTextColor(20, 20, 20); doc.splitTextToSize(clean(title), W-2*M).forEach(l=>{ doc.text(l, M, y); y += 22; });
+  if(subtitle){ doc.setFont("helvetica", "normal"); doc.setFontSize(10); doc.setTextColor(110, 110, 110); doc.splitTextToSize(clean(subtitle), W-2*M).forEach(l=>{ doc.text(l, M, y); y += 14; }); }
+  y += 10;
+  if(draw) y = draw(doc, y, W, M, clean);
+  for(const sec of sections){
+    if(!sec || !(sec.lines||[]).length) continue;
+    page(40); doc.setFont("helvetica", "bold"); doc.setFontSize(11.5); doc.setTextColor(20, 20, 20); doc.text(clean(sec.heading), M, y); y += 16;
+    doc.setFont("helvetica", "normal"); doc.setFontSize(10); doc.setTextColor(50, 50, 50);
+    for(const line of sec.lines){ for(const l of doc.splitTextToSize(clean(line), W-2*M-10)){ page(14); doc.text(l, M+8, y); y += 14; } y += 2; }
+    y += 10;
+  }
+  const n = doc.getNumberOfPages();
+  for(let i=1; i<=n; i++){ doc.setPage(i); doc.setFont("helvetica", "normal"); doc.setFontSize(8); doc.setTextColor(150, 150, 150); doc.text("Sanjugo Creator Studio · "+fmtDate(new Date().toISOString()), M, H-24); }
+  return doc.output("blob");
+}
+const canShareFiles = ()=>{ try{ return !!(navigator.canShare && navigator.canShare({files:[new File(["x"], "x.pdf", {type:"application/pdf"})]})); }catch(e){ return false; } };
+async function savePdf(blob, name, share){
+  const file = new File([blob], name, {type:"application/pdf"});
+  if(share && canShareFiles()){ try{ await navigator.share({files:[file], title:name}); return; }catch(e){ if(e && e.name==="AbortError") return; } }
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(a.href), 5000);
+}
+function downloadCsv(rows, name){
+  const csv = rows.map(r=>r.map(v=>{ const s = String(v==null? "" : v); return /[",\n]/.test(s) ? '"'+s.replace(/"/g, '""')+'"' : s; }).join(",")).join("\n");
+  const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob(["﻿"+csv], {type:"text/csv"})); a.download = name; document.body.appendChild(a); a.click(); a.remove();
+}
+/* A sales / email report file → plain text for the AI (CSV as is, Excel via SheetJS, PDF via pdf.js). */
+async function reportFileText(file){
+  const n = file.name.toLowerCase();
+  if(/\.(csv|tsv|txt)$/.test(n) || (file.type||"").startsWith("text/")) return (await file.text()).slice(0, 80000);
+  if(/\.(xlsx|xlsm|xls)$/.test(n)){
+    await loadScriptOnce("https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js");
+    const wb = window.XLSX.read(await file.arrayBuffer(), {type:"array"});
+    return wb.SheetNames.map(s=>"## "+s+"\n"+window.XLSX.utils.sheet_to_csv(wb.Sheets[s])).join("\n\n").slice(0, 80000);
+  }
+  if(/\.pdf$/.test(n)){
+    await loadScriptOnce("https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js");
+    const lib = window.pdfjsLib; lib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+    const pdf = await lib.getDocument({data: await file.arrayBuffer()}).promise; let out = "";
+    for(let i=1; i<=Math.min(pdf.numPages, 30); i++){ const tc = await (await pdf.getPage(i)).getTextContent(); out += tc.items.map(x=>x.str).join(" ")+"\n"; }
+    return out.slice(0, 80000);
+  }
+  throw new Error("Use a CSV, Excel or PDF file");
+}
+
+function useCampData(){
+  const {state} = useApp();
+  const [docs, setDocs] = useState(null), [study, setStudy] = useState([]), [err, setErr] = useState("");
+  const load = useCallback(async ()=>{
+    try{ const r = await fetch("/api/camp"); const d = await r.json().catch(()=>({})); if(!r.ok) throw new Error(d.error || "Couldn't load campaigns"); setDocs(d.docs || []); setErr(""); }
+    catch(e){ setErr(e.message); setDocs(ds=>ds || []); }
+    fetch("/api/study").then(r=>r.json()).then(d=>setStudy(d.entries || [])).catch(()=>{});
+  }, []);
+  useEffect(()=>{ load(); }, []);
+  const post = async (path, body)=>{ const r = await fetch("/api/camp/"+path, {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({...body, userId: state.currentUserId})});
+    const d = await r.json().catch(()=>({})); if(!r.ok) throw new Error(d.error || "Couldn't save"); return d; };
+  const save = async doc=>{ const d = await post("save", {doc}); setDocs(ds=>[...(ds||[]).filter(x=>x.id!==d.doc.id), d.doc]); return d.doc; };
+  const del = async id=>{ await post("delete", {id}); setDocs(ds=>(ds||[]).filter(x=>x.id!==id)); };
+  return {docs, study, err, load, save, del, setStudy, post};
+}
+function guessCampType(name){ const n = String(name||"").toLowerCase();
+  return /lunch|menu|creation|dish|roll|ramen|sushi/.test(n) ? "menu" : /influenc|collab/.test(n) ? "influencer" : /christmas|new year|valentine|easter|halloween|mother|father/.test(n) ? "holiday" : /email|newsletter/.test(n) ? "email" : "offer"; }
+function campList(docs, stateCampaigns){
+  const byId = new Map((docs||[]).filter(d=>d.kind==="campaign").map(d=>[d.id, d]));
+  const out = (stateCampaigns||[]).filter(c=>byId.has(c.id) || !c.archived).map(c=>{ const d = byId.get(c.id);
+    return d ? {...d, name: d.name || c.name} : {kind:"campaign", id:c.id, name:c.name, details:c.details||"", type:guessCampType(c.name), status:"live", legacy:true}; });
+  byId.forEach((d, id)=>{ if(!out.some(o=>o.id===id)) out.push(d); });
+  return out;
+}
+const yearOf = c => c.start ? +c.start.slice(0,4) : null;
+const inYear = (c, y) => c.start && c.start <= y+"-12-31" && (c.end || c.start) >= y+"-01-01";
+function budgetOf(docs, year){ return (docs||[]).find(d=>d.kind==="budget" && d.year===year) || {kind:"budget", id:"budget_"+year, year, total:0, seasons:[]}; }
+function seasonOfCamp(c, budget){
+  if(!c) return null;
+  if(c.seasonId && budget.seasons.some(s=>s.id===c.seasonId)) return c.seasonId;
+  const s = c.start && budget.seasons.find(s=>s.start && s.end && c.start>=s.start && c.start<=s.end);
+  return s ? s.id : null;
+}
+function costSeason(cost, camps, budget){ if(cost.seasonId && budget.seasons.some(s=>s.id===cost.seasonId)) return cost.seasonId; return seasonOfCamp(camps.find(c=>c.id===cost.campaignId), budget); }
+/* The money rules: an overspent season borrows from the next one straight away; a finished season's leftover moves to the next. */
+function budgetLedger(budget, costs, camps, today){
+  const seasons = [...(budget.seasons||[])].sort((a,b)=>String(a.start||"9").localeCompare(String(b.start||"9")));
+  const yearCosts = costs.filter(x=>String(x.date||"").startsWith(String(budget.year)));
+  let carry = 0; const rows = [];
+  seasons.forEach((s, i)=>{
+    const spent = yearCosts.filter(x=>costSeason(x, camps, budget)===s.id).reduce((a,x)=>a+(+x.amount||0), 0);
+    const carryIn = carry, available = (+s.budget||0) + carryIn, balance = available - spent, ended = !!(s.end && s.end < today);
+    const carryOut = balance < 0 ? balance : (ended ? balance : 0);
+    rows.push({...s, spent, carryIn, available, balance, ended, carryOut, prev: seasons[i-1], next: seasons[i+1]});
+    carry = carryOut;
+  });
+  const allocated = seasons.reduce((a,s)=>a+(+s.budget||0), 0);
+  const spentAll = yearCosts.reduce((a,x)=>a+(+x.amount||0), 0);
+  const unseasoned = yearCosts.filter(x=>!costSeason(x, camps, budget)).reduce((a,x)=>a+(+x.amount||0), 0);
+  return {rows, allocated, unallocated: (+budget.total||0) - allocated + carry - unseasoned, spentAll, left: (+budget.total||0) - spentAll, unseasoned, finalCarry: carry};
+}
+function ledgerNote(r){
+  const to = r.next ? r.next.name : "the money not yet split";
+  if(r.balance < 0) return "Over by "+money(-r.balance)+" — borrowed from "+to;
+  if(r.ended && r.balance > 0) return money(r.balance)+" unused — moved to "+to;
+  if(r.carryIn > 0) return "Includes "+money(r.carryIn)+" left from "+(r.prev? r.prev.name : "before")+" — can spend more";
+  if(r.carryIn < 0) return money(-r.carryIn)+" less: covers "+(r.prev? r.prev.name : "the season before")+"'s overspend";
+  return r.ended ? "Finished, spent exactly" : "On track";
+}
+/* What a campaign sold, from the uploaded monthly reports: items / codes / emails it tracks, in the months it ran. */
+function campResults(c, docs){
+  const months = monthsBetween(c.start, c.end || c.start);
+  const words = splitList(c.track && c.track.items), codes = splitList(c.track && c.track.codes), emails = splitList(c.track && c.track.emails);
+  const reps = (docs||[]).filter(d=>d.kind==="report" && months.includes(d.month));
+  const lines = [], mail = []; let qty = 0, sales = 0;
+  for(const r of reps){
+    const s = r.summary || {};
+    if(r.source==="sevenrooms"){
+      for(const e of s.emails||[]){ const nm = String(e.name||"").toLowerCase();
+        const hit = emails.length ? emails.some(w=>nm.includes(w)) : (e.date && e.date>=c.start && e.date<=(c.end||c.start));
+        if(hit) mail.push({...e, month:r.month}); }
+      continue;
+    }
+    let q = 0, v = 0; const codeHits = [];
+    if(words.length) for(const it of s.items||[]){ const nm = String(it.name||"").toLowerCase(); if(words.some(w=>nm.includes(w))){ q += +it.qty||0; v += +it.sales||0; } }
+    if(codes.length) for(const cd of s.codes||[]){ const nm = String(cd.code||"").toLowerCase(); if(codes.some(w=>nm.includes(w))) codeHits.push(cd); }
+    if(q || v || codeHits.length) lines.push({source:r.source, month:r.month, qty:q, sales:v, codes:codeHits});
+    qty += q; sales += v;
+  }
+  return {months, lines, mail, qty, sales, reportsFound: reps.length};
+}
+function collabViews(col, study){ const e = col.studyKey && (study||[]).find(s=>s.key===col.studyKey); const v = e && e.manual && e.manual.views; return v!=null && v!=="" ? {n:+v, auto:true} : {n:+col.views||0, auto:false}; }
+
+function CampPill({type}){ const t = CAMP_TYPES[type] || CAMP_TYPES.other; return <span style={{fontSize:11, fontWeight:700, padding:"2px 8px", borderRadius:99, background:t.s, color:t.c, whiteSpace:"nowrap"}}>{t.label}</span>; }
+function CampStatus({status}){ const s = CAMP_STATUS[status] || CAMP_STATUS.idea; return <span style={{fontSize:11, fontWeight:700, padding:"2px 8px", borderRadius:99, background:s[2], color:s[1], whiteSpace:"nowrap"}}>{s[0]}</span>; }
+const campInput = {width:"100%", padding:"8px 10px", borderRadius:8, border:"1px solid var(--border)", background:"var(--surface)", color:"var(--ink)", fontSize:13, boxSizing:"border-box", fontFamily:"inherit"};
+function Field({label, children, style}){ return <label style={{display:"block", fontSize:12, fontWeight:700, color:"var(--ink-soft)", ...style}}>{label}<div style={{marginTop:4, fontWeight:400}}>{children}</div></label>; }
+function Stat({label, value, sub, tone}){ return <div style={{background:"var(--surface-2)", borderRadius:10, padding:"10px 12px", minWidth:0}}><div style={{fontSize:11.5, color:"var(--ink-mute)", fontWeight:600}}>{label}</div>
+  <div style={{fontSize:19, fontWeight:700, color: tone==="neg"? "var(--red)" : tone==="pos"? "var(--green)" : "var(--ink)"}}>{value}</div>{sub && <div style={{fontSize:11.5, color:"var(--ink-mute)"}}>{sub}</div>}</div>; }
+
+/* ---------- Year planner ---------- */
+function YearTimeline({year, camps, onOpen}){
+  const y0 = Date.UTC(year,0,1), span = Date.UTC(year+1,0,1) - y0;
+  const pct = d => Math.max(0, Math.min(100, (Date.parse(d+"T00:00:00Z") - y0) / span * 100));
+  const list = camps.filter(c=>inYear(c, year)).sort((a,b)=>a.start.localeCompare(b.start));
+  const lanes = []; const placed = list.map(c=>{ const end = c.end || c.start; let i = lanes.findIndex(e=>e < c.start); if(i<0){ i = lanes.length; lanes.push(end); } else lanes[i] = end; return {c, lane:i}; });
+  const keys = ukKeyDates(year);
+  const today = isoDay(new Date());
+  return (
+    <div style={{overflowX:"auto", overflowY:"hidden", WebkitOverflowScrolling:"touch", paddingBottom:6}}>
+      <div style={{minWidth:720, position:"relative"}}>
+        <div style={{display:"grid", gridTemplateColumns:"repeat(12,1fr)", fontSize:11.5, fontWeight:700, color:"var(--ink-mute)", borderBottom:"1px solid var(--border)", paddingBottom:5}}>
+          {MONTHS_SHORT.map(m=><span key={m} style={{paddingLeft:4}}>{m}</span>)}
+        </div>
+        <div style={{position:"relative", height: 44 + Math.max(1, lanes.length)*28}}>
+          {MONTHS_SHORT.map((m,i)=><span key={m} style={{position:"absolute", top:0, bottom:0, left:(i/12*100)+"%", borderLeft:"1px solid var(--border)", opacity:.6}}/>)}
+          {today.startsWith(String(year)) && <span title="Today" style={{position:"absolute", top:0, bottom:0, left:pct(today)+"%", borderLeft:"2px solid var(--red)"}}/>}
+          {keys.map((k,i)=><span key={k.name} title={k.name+" · "+fmtDay(k.date)} style={{position:"absolute", top: i%2? 17 : 3, left:"calc("+pct(k.date)+"% - 4px)", fontSize:10.5, color:"var(--ink-mute)", whiteSpace:"nowrap"}}>◆ {k.name.replace("'s Day","'s").replace("Chinese New Year","CNY").replace("New Year's Eve","NYE")}</span>)}
+          {placed.map(({c, lane})=>{ const t = CAMP_TYPES[c.type] || CAMP_TYPES.other; const l = pct(c.start), r = pct(c.end || c.start);
+            return <button key={c.id} onClick={()=>onOpen(c)} title={c.name+" · "+campRange(c)}
+              style={{position:"absolute", top:36+lane*28, left:l+"%", width:"max(" + Math.max(0.6, r-l) + "%, 22px)", height:23, borderRadius:6, border:"1px solid "+t.c, background:t.s, color:t.c,
+                fontSize:11.5, fontWeight:700, padding:"0 7px", textAlign:"left", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis", cursor:"pointer", boxSizing:"border-box"}}>{c.name}</button>; })}
+        </div>
+      </div>
+    </div>
+  );
+}
+async function yearPlanPdf(year, camps, share){
+  const list = camps.filter(c=>inYear(c, year)).sort((a,b)=>a.start.localeCompare(b.start));
+  const blob = await makePdf({kicker:"SANJUGO · CAMPAIGN PLAN", title:"Campaign plan "+year, subtitle: list.length+" campaigns · key dates: "+ukKeyDates(year).map(k=>k.name+" "+fmtDay(k.date)).join(", "), landscape:true,
+    draw:(doc, y, W, M, clean)=>{
+      const x0 = M, w = W-2*M, y0 = Date.UTC(year,0,1), span = Date.UTC(year+1,0,1)-y0, px = d => x0 + Math.max(0, Math.min(1, (Date.parse(d+"T00:00:00Z")-y0)/span))*w;
+      doc.setFontSize(8.5); doc.setFont("helvetica", "bold"); doc.setTextColor(120,120,120);
+      MONTHS_SHORT.forEach((m,i)=>{ doc.text(m, x0 + i*w/12 + 3, y); doc.setDrawColor(225,225,225); doc.line(x0 + i*w/12, y+4, x0 + i*w/12, y + 8 + Math.max(1, list.length)*17); });
+      y += 10; const lanes = [];
+      list.forEach(c=>{ const end = c.end || c.start; let i = lanes.findIndex(e=>e < c.start); if(i<0){ i = lanes.length; lanes.push(end); } else lanes[i] = end;
+        const t = CAMP_TYPES[c.type] || CAMP_TYPES.other, a = px(c.start), b = Math.max(px(end), a+14);
+        doc.setFillColor(...t.rgb); doc.roundedRect(a, y + i*17, b-a, 13, 2, 2, "F");
+        doc.setTextColor(255,255,255); doc.setFontSize(7.5); doc.text(doc.splitTextToSize(clean(c.name), Math.max(30, b-a-4))[0] || "", a+3, y + i*17 + 9); });
+      return y + Math.max(1, lanes.length)*17 + 24;
+    },
+    sections: MONTHS_SHORT.map((m,i)=>{ const key = year+"-"+String(i+1).padStart(2,"0"); const cs = list.filter(c=>c.start.slice(0,7)<=key && (c.end||c.start).slice(0,7)>=key);
+      return {heading: m+" "+year, lines: cs.map(c=>"• "+c.name+" — "+(CAMP_TYPES[c.type]||CAMP_TYPES.other).label+" · "+campRange(c)+((c.branches||[]).length? " · "+c.branches.join(", ") : "")+(c.owner? " · "+(USERS.find(u=>u.id===c.owner)||{}).name : ""))}; })});
+  await savePdf(blob, "Sanjugo campaign plan "+year+".pdf", share);
+}
+
+function CampaignsPage(){
+  const {state, dispatch} = useApp();
+  const me = USERS.find(u=>u.id===state.currentUserId) || {};
+  const admin = me.role==="admin";
+  const data = useCampData();
+  const [tab, setTab] = useState("plan");
+  const [year, setYear] = useState(new Date().getFullYear() + (new Date().getMonth()>=9 ? 1 : 0));
+  const [openId, setOpenId] = useState(null);
+  const [busy, setBusy] = useState("");
+  const camps = useMemo(()=>campList(data.docs, state.campaigns), [data.docs, state.campaigns]);
+  const toast = (message, variant)=>dispatch({type:"ADD_TOAST", message, variant});
+  const run = async (label, fn)=>{ setBusy(label); try{ await fn(); }catch(e){ toast(e.message || "Something went wrong", "danger"); } setBusy(""); };
+  async function saveCamp(c){
+    const {legacy, ...doc} = c;
+    const saved = await data.save({...doc, kind:"campaign"});
+    if(state.campaigns.some(x=>x.id===saved.id)) dispatch({type:"UPDATE_CAMPAIGN", id:saved.id, patch:{name:saved.name, details:saved.details||"", archived: !!saved.archived}});
+    else dispatch({type:"ADD_CAMPAIGN", campaign:{id:saved.id, brand:BRANDS[0].id, name:saved.name, details:saved.details||"", archived:false, createdAt:new Date().toISOString()}});
+    return saved;
+  }
+  async function newCamp(){
+    await run("Creating…", async ()=>{
+      const start = year+"-"+String(new Date().getFullYear()===year ? new Date().getMonth()+1 : 1).padStart(2,"0")+"-01";
+      const c = await saveCamp({id:"c_"+Math.random().toString(36).slice(2,10), name:"New campaign", type:"menu", status:"idea", start, end:start, branches:[...CAMP_BRANCHES], owner:me.id, budget:0,
+        kitchen:{dishes:[], dates:"", notes:""}, tasks:[], collabs:[], track:{items:"", codes:"", emails:""}, results:{}});
+      setOpenId(c.id); setTab("plan");
+    });
+  }
+  const open = camps.find(c=>c.id===openId);
+  const tabs = [["plan","Plan"],["budget","Budget"],["reports","Sales & email reports"],["influencers","Influencers"]];
+  if(data.docs===null) return <div><PageHeader title="Campaigns" subtitle="Loading…"/><Skeleton h={220}/></div>;
+  return (
+    <div>
+      <PageHeader title="Campaigns" subtitle={(admin? "" : "View only — admins can make changes · ")+"Plan the year, track the budget and see what each campaign sold."}
+        action={<div style={{display:"flex", gap:8, flexWrap:"wrap", alignItems:"center"}}>
+          {!open && <div style={{display:"flex", alignItems:"center", gap:4}}><Button size="sm" onClick={()=>setYear(y=>y-1)}>‹</Button><span style={{fontWeight:700, fontSize:14, minWidth:44, textAlign:"center"}}>{year}</span><Button size="sm" onClick={()=>setYear(y=>y+1)}>›</Button></div>}
+          {admin && !open && <Button variant="primary" size="sm" icon="plus" onClick={newCamp} disabled={!!busy}>New campaign</Button>}
+        </div>}/>
+      {data.err && <div style={{padding:"9px 12px", borderRadius:10, background:"var(--red-soft)", color:"var(--red)", fontSize:13, marginBottom:12}}>{data.err}</div>}
+      {busy && <div style={{fontSize:12.5, color:"var(--ink-mute)", marginBottom:8}}>{busy}</div>}
+      {open ? <CampaignDetail key={open.id} camp={open} camps={camps} data={data} admin={admin} onBack={()=>setOpenId(null)} saveCamp={saveCamp} toast={toast}/> : <>
+        <div style={{display:"flex", gap:6, flexWrap:"wrap", marginBottom:14}}>
+          {tabs.map(([k,l])=><button key={k} onClick={()=>setTab(k)} style={{padding:"7px 13px", borderRadius:99, border:"1px solid "+(tab===k? "var(--accent)" : "var(--border)"), background: tab===k? "var(--accent-soft)" : "var(--surface)", color: tab===k? "var(--accent)" : "var(--ink-soft)", fontWeight:700, fontSize:13, cursor:"pointer"}}>{l}</button>)}
+        </div>
+        {tab==="plan" && <CampPlan year={year} camps={camps} data={data} admin={admin} onOpen={c=>setOpenId(c.id)} run={run}/>}
+        {tab==="budget" && <CampBudget year={year} camps={camps} data={data} admin={admin} run={run} toast={toast}/>}
+        {tab==="reports" && <CampReports data={data} admin={admin} toast={toast}/>}
+        {tab==="influencers" && <CampInfluencers camps={camps} data={data} admin={admin} toast={toast} onOpen={c=>setOpenId(c.id)}/>}
+      </>}
+    </div>
+  );
+}
+
+function CampPlan({year, camps, data, admin, onOpen, run}){
+  const list = camps.filter(c=>inYear(c, year)).sort((a,b)=>a.start.localeCompare(b.start));
+  const undated = camps.filter(c=>!c.start && !c.archived);
+  const share = canShareFiles();
+  return (
+    <div style={{display:"flex", flexDirection:"column", gap:14}}>
+      <Card style={{padding:14}}>
+        <div style={{display:"flex", alignItems:"center", gap:10, flexWrap:"wrap", marginBottom:10}}>
+          <div style={{display:"flex", gap:6, flexWrap:"wrap", flex:1}}>{Object.entries(CAMP_TYPES).filter(([k])=>k!=="other").map(([k])=><CampPill key={k} type={k}/>)}<span style={{fontSize:11.5, color:"var(--ink-mute)"}}>◆ key dates · <span style={{color:"var(--red)"}}>|</span> today</span></div>
+          <Button size="sm" icon="download" onClick={()=>run("Making the PDF…", ()=>yearPlanPdf(year, camps, false))}>PDF</Button>
+          {share && <Button size="sm" icon="share" onClick={()=>run("Making the PDF…", ()=>yearPlanPdf(year, camps, true))}>Share</Button>}
+          <Button size="sm" icon="file" onClick={()=>downloadCsv([["Campaign","Type","Status","Start","End","Branches","Owner","Budget £"], ...list.map(c=>[c.name, (CAMP_TYPES[c.type]||{}).label, (CAMP_STATUS[c.status]||[])[0], c.start, c.end||c.start, (c.branches||[]).join(" / "), (USERS.find(u=>u.id===c.owner)||{}).name||"", c.budget||0])], "Sanjugo campaign plan "+year+".csv")}>Excel</Button>
+        </div>
+        {list.length ? <YearTimeline year={year} camps={camps} onOpen={onOpen}/> : <div style={{fontSize:13, color:"var(--ink-mute)", padding:"18px 4px"}}>Nothing planned for {year} yet.{admin? " Tap “New campaign” to start." : ""}</div>}
+      </Card>
+      {list.length>0 && <Card style={{padding:6}}>
+        {list.map(c=><CampRow key={c.id} c={c} data={data} onOpen={onOpen}/>)}
+      </Card>}
+      {undated.length>0 && <div>
+        <div style={{fontSize:13, fontWeight:700, margin:"4px 2px 8px"}}>No dates yet <span style={{fontWeight:400, color:"var(--ink-mute)"}}>· open one and set its dates to put it on the plan</span></div>
+        <Card style={{padding:6}}>{undated.map(c=><CampRow key={c.id} c={c} data={data} onOpen={onOpen}/>)}</Card>
+      </div>}
+    </div>
+  );
+}
+function CampRow({c, data, onOpen}){
+  const spent = (data.docs||[]).filter(d=>d.kind==="cost" && d.campaignId===c.id).reduce((a,x)=>a+(+x.amount||0), 0);
+  return (
+    <button onClick={()=>onOpen(c)} style={{display:"flex", alignItems:"center", gap:10, width:"100%", padding:"10px 10px", border:"none", borderBottom:"1px solid var(--border)", background:"none", cursor:"pointer", textAlign:"left", color:"var(--ink)", flexWrap:"wrap"}}>
+      <span style={{width:4, alignSelf:"stretch", borderRadius:4, background:(CAMP_TYPES[c.type]||CAMP_TYPES.other).c}}/>
+      <div style={{flex:"1 1 220px", minWidth:0}}>
+        <div style={{fontWeight:700, fontSize:13.5}}>{c.name}</div>
+        <div style={{fontSize:12, color:"var(--ink-mute)"}}>{campRange(c)}{(c.branches||[]).length && (c.branches||[]).length<3 ? " · "+c.branches.join(", ") : ""}{c.owner? " · "+((USERS.find(u=>u.id===c.owner)||{}).name||"") : ""}</div>
+      </div>
+      <CampPill type={c.type}/><CampStatus status={c.status}/>
+      <span style={{fontSize:12, color: c.budget && spent>c.budget ? "var(--red)" : "var(--ink-mute)", minWidth:90, textAlign:"right"}}>{money(spent)}{c.budget? " / "+money(c.budget) : ""}</span>
+      <Icon name="chevronRight" size={15} style={{color:"var(--ink-mute)"}}/>
+    </button>
+  );
+}
+
+/* ---------- Campaign page ---------- */
+function CampSection({title, icon, children, action}){
+  return <Card style={{padding:14, minWidth:0}}>
+    <div style={{display:"flex", alignItems:"center", gap:8, marginBottom:10}}><Icon name={icon} size={16} style={{color:"var(--accent)"}}/><span style={{fontWeight:700, fontSize:14, flex:1}}>{title}</span>{action}</div>
+    {children}
+  </Card>;
+}
+function CampaignDetail({camp, camps, data, admin, onBack, saveCamp, toast}){
+  const {state, dispatch} = useApp();
+  const [c, setC] = useState(()=>({kitchen:{dishes:[], dates:"", notes:""}, tasks:[], collabs:[], track:{items:"", codes:"", emails:""}, results:{}, branches:[...CAMP_BRANCHES], ...camp}));
+  const [dirty, setDirty] = useState(!!camp.legacy);
+  const [busy, setBusy] = useState("");
+  const [collabOpen, setCollabOpen] = useState(null);
+  const [costOpen, setCostOpen] = useState(false);
+  const set = patch => { setC(x=>({...x, ...patch})); setDirty(true); };
+  const setIn = (key, patch) => set({[key]: {...(c[key]||{}), ...patch}});
+  const ro = !admin;
+  const year = c.start ? +c.start.slice(0,4) : new Date().getFullYear();
+  const budget = budgetOf(data.docs, year);
+  const costs = (data.docs||[]).filter(d=>d.kind==="cost" && d.campaignId===c.id).sort((a,b)=>String(b.date).localeCompare(String(a.date)));
+  const spent = costs.reduce((a,x)=>a+(+x.amount||0), 0);
+  const posts = state.contentItems.filter(i=>i.campaign===c.id);
+  const res = campResults(c, data.docs);
+  const views = (c.collabs||[]).reduce((a,col)=>a+collabViews(col, data.study).n, 0);
+  const extra = +(c.results && c.results.extraSales) || 0;
+  const salesForReturn = extra || res.sales;
+  async function save(){ setBusy("Saving…"); try{ const s = await saveCamp(c); setC(x=>({...x, ...s, legacy:false})); setDirty(false); toast("Campaign saved"); }catch(e){ toast(e.message, "danger"); } setBusy(""); }
+  async function remove(){ setBusy("Deleting…"); try{ await data.del(c.id); dispatch({type:"UPDATE_CAMPAIGN", id:c.id, patch:{archived:true}}); toast("Campaign removed (posts keep their link)"); onBack(); }catch(e){ toast(e.message, "danger"); setBusy(""); } }
+  const listEdit = (key, i, patch) => set({[key]: (c[key]||[]).map((x,j)=>j===i? {...x, ...patch} : x)});
+  const listDel = (key, i) => set({[key]: (c[key]||[]).filter((_,j)=>j!==i)});
+  const dishes = (c.kitchen && c.kitchen.dishes) || [];
+  const setDishes = d => setIn("kitchen", {dishes:d});
+  const share = canShareFiles();
+  async function kitchenPdf(shareIt){
+    setBusy("Making the PDF…");
+    try{
+      const blob = await makePdf({kicker:"SANJUGO · KITCHEN BRIEF", title:c.name, subtitle:campRange(c)+((c.branches||[]).length? " · "+c.branches.join(", ") : ""), sections:[
+        {heading:"Dishes", lines: dishes.map((d,i)=>(i+1)+". "+d.name+(d.note? " — "+d.note : "")+(d.done? "  (ready)" : ""))},
+        {heading:"Key dates for the kitchen", lines: String(c.kitchen.dates||"").split("\n").filter(Boolean)},
+        {heading:"Notes", lines: String(c.kitchen.notes||"").split("\n").filter(Boolean)},
+        {heading:"About the campaign", lines: String(c.details||"").split("\n").filter(Boolean)},
+      ]});
+      await savePdf(blob, "Kitchen brief - "+c.name+".pdf", shareIt);
+    }catch(e){ toast(e.message, "danger"); }
+    setBusy("");
+  }
+  async function resultsPdf(shareIt){
+    setBusy("Making the PDF…");
+    try{
+      const blob = await makePdf({kicker:"SANJUGO · CAMPAIGN RESULTS", title:c.name, subtitle:campRange(c)+((c.branches||[]).length? " · "+c.branches.join(", ") : ""), sections:[
+        {heading:"Results", lines:[
+          res.qty? res.qty.toLocaleString("en-GB")+" sold"+(res.sales? " · "+money(res.sales) : "")+" (from the monthly reports)" : "",
+          c.results && c.results.sold ? "Sold (typed in): "+c.results.sold : "",
+          extra? "Extra sales: "+money(extra) : "", "Spent: "+money(spent)+(c.budget? " of "+money(c.budget)+" budget" : ""),
+          salesForReturn && spent ? "Return: "+(salesForReturn/spent).toFixed(1)+"x (sales ÷ spend)" : "",
+          views? "Influencer views: "+views.toLocaleString("en-GB") : "", posts.length? "Our posts: "+posts.length : ""].filter(Boolean)},
+        {heading:"By report", lines: res.lines.map(l=>REPORT_SOURCES[l.source]+" "+l.month+": "+l.qty+" sold · "+money(l.sales)+(l.codes.length? " · codes "+l.codes.map(x=>x.code+" ×"+x.count).join(", ") : ""))},
+        {heading:"Emails", lines: res.mail.map(e=>e.name+": "+(e.openRate!=null? e.openRate+"% opened" : "")+(e.clickRate!=null? " · "+e.clickRate+"% clicked" : "")+(e.bookings? " · "+e.bookings+" bookings" : ""))},
+        {heading:"Influencers", lines:(c.collabs||[]).map(col=>col.handle+" — "+(col.status||"")+" · "+collabViews(col, data.study).n.toLocaleString("en-GB")+" views · "+money(col.cost))},
+        {heading:"Notes", lines:String((c.results && c.results.notes) || "").split("\n").filter(Boolean)},
+      ]});
+      await savePdf(blob, "Results - "+c.name+".pdf", shareIt);
+    }catch(e){ toast(e.message, "danger"); }
+    setBusy("");
+  }
+  const ownerOptions = activeUsers().map(u=>({value:u.id, label:u.name}));
+  const seasonOptions = [{value:"", label: budget.seasons.length ? "Automatic (by date)" : "No seasons yet — set them in Budget"}, ...budget.seasons.map(s=>({value:s.id, label:s.name}))];
+  const check = (on, fn) => <input type="checkbox" checked={!!on} disabled={ro} onChange={e=>fn(e.target.checked)} style={{width:16, height:16, flexShrink:0}}/>;
+  const delBtn = fn => !ro && <button onClick={fn} title="Remove" style={{border:"none", background:"none", color:"var(--ink-mute)", cursor:"pointer", fontSize:14, padding:"0 4px"}}>✕</button>;
+  return (
+    <div style={{display:"flex", flexDirection:"column", gap:12}}>
+      <div style={{display:"flex", alignItems:"center", gap:8, flexWrap:"wrap"}}>
+        <Button size="sm" icon="chevronLeft" onClick={onBack}>Campaigns</Button>
+        <span style={{flex:1}}/>
+        {busy && <span style={{fontSize:12.5, color:"var(--ink-mute)"}}>{busy}</span>}
+        {admin && dirty && <Button size="sm" variant="primary" icon="check" onClick={save} disabled={!!busy}>Save changes</Button>}
+      </div>
+      <Card style={{padding:16}}>
+        <div style={{display:"flex", gap:8, alignItems:"center", flexWrap:"wrap", marginBottom:8}}><CampPill type={c.type}/><CampStatus status={c.status}/>{c.legacy && <span style={{fontSize:11.5, color:"var(--amber)"}}>Set the dates and save to put it on the plan</span>}</div>
+        {ro ? <h2 style={{margin:"0 0 4px", fontSize:20}}>{c.name}</h2> : <input value={c.name} onChange={e=>set({name:e.target.value})} style={{...campInput, fontSize:18, fontWeight:700, marginBottom:10}}/>}
+        {ro ? <div style={{fontSize:13, color:"var(--ink-mute)"}}>{campRange(c)} · {(c.branches||[]).join(", ")} · {(USERS.find(u=>u.id===c.owner)||{}).name||""}</div> :
+        <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(150px, 1fr))", gap:10}}>
+          <Field label="Type"><Select value={c.type||"other"} onChange={v=>set({type:v})} options={Object.entries(CAMP_TYPES).map(([k,t])=>({value:k, label:t.label}))}/></Field>
+          <Field label="Status"><Select value={c.status||"idea"} onChange={v=>set({status:v})} options={Object.entries(CAMP_STATUS).map(([k,s])=>({value:k, label:s[0]}))}/></Field>
+          <Field label="Starts"><input type="date" value={c.start||""} onChange={e=>set({start:e.target.value, end: !c.end || c.end < e.target.value ? e.target.value : c.end})} style={campInput}/></Field>
+          <Field label="Ends"><input type="date" value={c.end||""} min={c.start||undefined} onChange={e=>set({end:e.target.value})} style={campInput}/></Field>
+          <Field label="Owner"><Select value={c.owner||""} onChange={v=>set({owner:v})} placeholder="Nobody yet" options={ownerOptions}/></Field>
+          <Field label="Budget (£)"><input type="number" min="0" value={c.budget||""} onChange={e=>set({budget:+e.target.value||0})} style={campInput} placeholder="0"/></Field>
+          <Field label="Budget season"><Select value={c.seasonId||""} onChange={v=>set({seasonId:v})} options={seasonOptions}/></Field>
+          <Field label="Branches"><div style={{display:"flex", gap:10, flexWrap:"wrap", paddingTop:6}}>{CAMP_BRANCHES.map(b=><label key={b} style={{display:"flex", gap:4, alignItems:"center", fontSize:12.5}}>{check((c.branches||[]).includes(b), on=>set({branches: on? [...(c.branches||[]), b] : (c.branches||[]).filter(x=>x!==b)}))}{b}</label>)}</div></Field>
+        </div>}
+        {ro ? (c.details && <div style={{fontSize:13, marginTop:10, whiteSpace:"pre-wrap", lineHeight:1.5}}>{c.details}</div>) :
+          <Field label="What it is (offer, rules, codes — AI Dev + reads this too)" style={{marginTop:10}}><textarea value={c.details||""} onChange={e=>set({details:e.target.value})} rows={2} style={{...campInput, resize:"vertical"}}/></Field>}
+      </Card>
+      <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(130px, 1fr))", gap:8}}>
+        <Stat label="Spent" value={money(spent)} sub={c.budget? (spent>c.budget? money(spent-c.budget)+" over" : "of "+money(c.budget)) : "no budget set"} tone={c.budget && spent>c.budget ? "neg" : null}/>
+        <Stat label="Sold (reports)" value={res.qty? res.qty.toLocaleString("en-GB") : "—"} sub={res.sales? money(res.sales) : res.reportsFound? "no tracked items found" : "no reports for these months"}/>
+        <Stat label="Extra sales" value={extra? money(extra) : "—"} sub="typed in below"/>
+        <Stat label="Return" value={salesForReturn && spent ? (salesForReturn/spent).toFixed(1)+"×" : "—"} sub="sales ÷ spend"/>
+        <Stat label="Influencer views" value={views? views.toLocaleString("en-GB") : "—"} sub={(c.collabs||[]).length+" collab"+((c.collabs||[]).length===1?"":"s")}/>
+        <Stat label="Our posts" value={posts.length||"—"} sub="linked in Create"/>
+      </div>
+      <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(300px, 1fr))", gap:12, alignItems:"start"}}>
+        <CampSection title="Kitchen brief" icon="bulb" action={<div style={{display:"flex", gap:6}}><Button size="sm" icon="download" onClick={()=>kitchenPdf(false)}>PDF</Button>{share && <Button size="sm" icon="share" onClick={()=>kitchenPdf(true)}>Share</Button>}</div>}>
+          <div style={{fontSize:11.5, color:"var(--ink-mute)", marginBottom:8}}>For the chefs — send the PDF on WhatsApp.</div>
+          {dishes.map((d,i)=><div key={i} style={{display:"flex", gap:8, alignItems:"center", marginBottom:6}}>
+            {check(d.done, on=>setDishes(dishes.map((x,j)=>j===i? {...x, done:on} : x)))}
+            {ro ? <span style={{fontSize:13, flex:1}}><b>{d.name}</b>{d.note? " — "+d.note : ""}</span> : <>
+              <input value={d.name} placeholder="Dish" onChange={e=>setDishes(dishes.map((x,j)=>j===i? {...x, name:e.target.value} : x))} style={{...campInput, flex:"1 1 40%"}}/>
+              <input value={d.note||""} placeholder="Note (tasting date, cost…)" onChange={e=>setDishes(dishes.map((x,j)=>j===i? {...x, note:e.target.value} : x))} style={{...campInput, flex:"1 1 50%"}}/></>}
+            {delBtn(()=>setDishes(dishes.filter((_,j)=>j!==i)))}
+          </div>)}
+          {!ro && <Button size="sm" icon="plus" onClick={()=>setDishes([...dishes, {name:"", note:"", done:false}])}>Add dish</Button>}
+          {ro ? <>{c.kitchen.dates && <div style={{fontSize:12.5, marginTop:8, whiteSpace:"pre-wrap"}}><b>Dates:</b> {c.kitchen.dates}</div>}{c.kitchen.notes && <div style={{fontSize:12.5, marginTop:4, whiteSpace:"pre-wrap"}}><b>Notes:</b> {c.kitchen.notes}</div>}</> : <>
+            <Field label="Key dates for the kitchen (one per line)" style={{marginTop:10}}><textarea value={c.kitchen.dates||""} onChange={e=>setIn("kitchen", {dates:e.target.value})} rows={2} placeholder={"8 Jan tasting\n12 Jan photo shoot"} style={{...campInput, resize:"vertical"}}/></Field>
+            <Field label="Notes for the chefs" style={{marginTop:8}}><textarea value={c.kitchen.notes||""} onChange={e=>setIn("kitchen", {notes:e.target.value})} rows={2} style={{...campInput, resize:"vertical"}}/></Field></>}
+        </CampSection>
+        <CampSection title="Plan and tasks" icon="check">
+          {(c.tasks||[]).map((t,i)=><div key={i} style={{display:"flex", gap:8, alignItems:"center", marginBottom:6, flexWrap:"wrap"}}>
+            {check(t.done, on=>listEdit("tasks", i, {done:on}))}
+            {ro ? <span style={{fontSize:13, flex:1, textDecoration:t.done? "line-through" : "none"}}>{t.text}{t.who? " · "+((USERS.find(u=>u.id===t.who)||{}).name||"") : ""}{t.due? " · "+fmtDay(t.due) : ""}</span> : <>
+              <input value={t.text} placeholder="Task" onChange={e=>listEdit("tasks", i, {text:e.target.value})} style={{...campInput, flex:"2 1 140px"}}/>
+              <Select value={t.who||""} onChange={v=>listEdit("tasks", i, {who:v})} placeholder="Who" options={ownerOptions} style={{flex:"1 1 90px"}}/>
+              <input type="date" value={t.due||""} onChange={e=>listEdit("tasks", i, {due:e.target.value})} style={{...campInput, flex:"1 1 110px"}}/></>}
+            {delBtn(()=>listDel("tasks", i))}
+          </div>)}
+          {!(c.tasks||[]).length && ro && <div style={{fontSize:12.5, color:"var(--ink-mute)"}}>No tasks yet.</div>}
+          {!ro && <Button size="sm" icon="plus" onClick={()=>set({tasks:[...(c.tasks||[]), {text:"", who:"", due:"", done:false}]})}>Add task</Button>}
+        </CampSection>
+        <CampSection title="Influencer collabs" icon="team" action={!ro && <Button size="sm" icon="plus" onClick={()=>setCollabOpen({})}>Add</Button>}>
+          {!(c.collabs||[]).length ? <div style={{fontSize:12.5, color:"var(--ink-mute)"}}>No influencers on this campaign yet.</div> :
+            (c.collabs||[]).map((col,i)=>{ const v = collabViews(col, data.study); return (
+              <div key={col.id||i} style={{display:"flex", gap:8, alignItems:"center", padding:"7px 0", borderTop: i? "1px solid var(--border)" : "none", flexWrap:"wrap"}}>
+                <div style={{flex:"1 1 150px", minWidth:0}}><div style={{fontWeight:700, fontSize:13}}>{col.handle}</div><div style={{fontSize:11.5, color:"var(--ink-mute)"}}>{col.status||"idea"}{col.date? " · "+fmtDay(col.date) : ""}{col.email? " · "+col.email : ""}</div></div>
+                {col.link ? <a href={col.link} target="_blank" rel="noopener noreferrer" style={{fontSize:12, fontWeight:600, color:"var(--accent)"}}>Post ↗</a> : <span style={{fontSize:12, color:"var(--ink-mute)"}}>not posted</span>}
+                <span style={{fontSize:12.5, minWidth:70, textAlign:"right"}}>{v.n? v.n.toLocaleString("en-GB")+" views" : "—"}{v.auto && <span title="Pulled from Instagram through Make" style={{marginLeft:4, fontSize:10, fontWeight:700, color:"var(--green)"}}>auto</span>}</span>
+                <span style={{fontSize:12.5, minWidth:46, textAlign:"right"}}>{money(col.cost)}</span>
+                {!ro && <button onClick={()=>setCollabOpen({...col, index:i})} style={{border:"none", background:"none", color:"var(--ink-mute)", cursor:"pointer"}}><Icon name="edit" size={14}/></button>}
+              </div>); })}
+          <div style={{fontSize:11.5, color:"var(--ink-mute)", marginTop:6}}>Instagram collabs update their views by themselves. For other posts, type the views in.</div>
+        </CampSection>
+        <CampSection title="Costs" icon="file" action={admin && <Button size="sm" icon="plus" onClick={()=>setCostOpen(true)}>Add cost</Button>}>
+          {!costs.length ? <div style={{fontSize:12.5, color:"var(--ink-mute)"}}>No costs yet.</div> : costs.map(x=><CostLine key={x.id} x={x} admin={admin} data={data} toast={toast}/>)}
+          {c.budget>0 && <div style={{fontSize:12.5, marginTop:8, fontWeight:700, color: spent>c.budget? "var(--red)" : "var(--green)"}}>{spent>c.budget? money(spent-c.budget)+" over budget — the season borrows it from the next one" : money(c.budget-spent)+" left"}</div>}
+        </CampSection>
+        <CampSection title="Results" icon="analytics" action={<div style={{display:"flex", gap:6}}><Button size="sm" icon="download" onClick={()=>resultsPdf(false)}>PDF</Button>{share && <Button size="sm" icon="share" onClick={()=>resultsPdf(true)}>Share</Button>}</div>}>
+          {!ro && <div style={{display:"grid", gridTemplateColumns:"1fr", gap:8, marginBottom:10}}>
+            <Field label="Count these items from the sales reports (comma-separated)"><input value={c.track.items||""} onChange={e=>setIn("track", {items:e.target.value})} placeholder="wagyu roll, prosperity platter" style={campInput}/></Field>
+            <Field label="Promo codes"><input value={c.track.codes||""} onChange={e=>setIn("track", {codes:e.target.value})} placeholder="ANGEL, ANGEL5OFF20" style={campInput}/></Field>
+            <Field label="Emails (SevenRooms name — leave empty to take every email sent during the campaign)"><input value={c.track.emails||""} onChange={e=>setIn("track", {emails:e.target.value})} placeholder="Happy CNY" style={campInput}/></Field>
+          </div>}
+          {res.lines.length ? res.lines.map((l,i)=><div key={i} style={{fontSize:12.5, padding:"3px 0"}}><b>{REPORT_SOURCES[l.source]}</b> {l.month}: {l.qty.toLocaleString("en-GB")} sold · {money(l.sales)}{l.codes.length? " · "+l.codes.map(x=>x.code+" ×"+x.count).join(", ") : ""}</div>)
+            : <div style={{fontSize:12.5, color:"var(--ink-mute)"}}>{!c.start ? "Set the dates first." : res.reportsFound ? "Reports found for "+res.months.join(", ")+", but none of the tracked items or codes." : "No sales reports uploaded for "+(res.months.join(", ")||"these months")+" yet (Sales & email reports tab)."}</div>}
+          {res.mail.map((e,i)=><div key={"m"+i} style={{fontSize:12.5, padding:"3px 0"}}>✉ <b>{e.name}</b>: {e.openRate!=null? e.openRate+"% opened" : ""}{e.clickRate!=null? " · "+e.clickRate+"% clicked" : ""}{e.bookings? " · "+e.bookings+" bookings" : ""}</div>)}
+          {res.months.length>0 && res.lines.length>0 && <div style={{fontSize:11, color:"var(--ink-mute)", marginTop:4}}>Reports are monthly, so a campaign that runs part of a month counts that whole month.</div>}
+          {ro ? <>{c.results.sold && <div style={{fontSize:12.5, marginTop:8}}><b>Sold:</b> {c.results.sold}</div>}{c.results.notes && <div style={{fontSize:12.5, marginTop:4, whiteSpace:"pre-wrap"}}>{c.results.notes}</div>}</> :
+          <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(130px, 1fr))", gap:8, marginTop:10}}>
+            <Field label="Sold (typed in)"><input value={c.results.sold||""} onChange={e=>setIn("results", {sold:e.target.value})} placeholder="e.g. 1,320 rolls" style={campInput}/></Field>
+            <Field label="Extra sales (£)"><input type="number" value={c.results.extraSales||""} onChange={e=>setIn("results", {extraSales:+e.target.value||0})} placeholder="vs the weeks before" style={campInput}/></Field>
+            <Field label="Notes" style={{gridColumn:"1 / -1"}}><textarea value={c.results.notes||""} onChange={e=>setIn("results", {notes:e.target.value})} rows={2} style={{...campInput, resize:"vertical"}}/></Field>
+          </div>}
+        </CampSection>
+        <CampSection title="Linked posts" icon="calendar">
+          {!posts.length ? <div style={{fontSize:12.5, color:"var(--ink-mute)"}}>No posts yet. Pick this campaign in Create (step 1) and they show here.</div> :
+            posts.slice(0, 12).map(p=><button key={p.id} onClick={()=>dispatch({type:"SET_ROUTE", route:"calendar"})} style={{display:"flex", width:"100%", gap:8, alignItems:"center", padding:"5px 0", border:"none", background:"none", cursor:"pointer", textAlign:"left", color:"var(--ink)"}}>
+              <div style={{width:34, height:34, flexShrink:0}}><Thumb item={p} radius={6} iconSize={12}/></div>
+              <span style={{flex:1, fontSize:12.5, minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>{p.title}</span><StatusBadge status={p.status}/></button>)}
+        </CampSection>
+      </div>
+      {admin && <div style={{display:"flex", justifyContent:"flex-end"}}><ConfirmButton confirmLabel="Yes, delete this campaign" onConfirm={remove}>Delete campaign</ConfirmButton></div>}
+      {collabOpen && <CollabModal col={collabOpen} camp={c} data={data} toast={toast} onClose={()=>setCollabOpen(null)} onSave={col=>{ const i = col.index; delete col.index;
+        set({collabs: i!=null ? (c.collabs||[]).map((x,j)=>j===i? col : x) : [...(c.collabs||[]), col]}); setCollabOpen(null); toast("Added — tap “Save changes” to keep it"); }}
+        onDelete={collabOpen.index!=null ? ()=>{ listDel("collabs", collabOpen.index); setCollabOpen(null); } : null}/>}
+      {costOpen && <CostModal camps={camps} data={data} toast={toast} preset={{campaignId:c.id}} onClose={()=>setCostOpen(false)}/>}
+    </div>
+  );
+}
+function CostLine({x, admin, data, toast, camps}){
+  const camp = camps && camps.find(c=>c.id===x.campaignId);
+  return <div style={{display:"flex", gap:8, alignItems:"center", padding:"6px 0", borderTop:"1px solid var(--border)", fontSize:12.5, flexWrap:"wrap"}}>
+    <span style={{color:"var(--ink-mute)", minWidth:48}}>{fmtDay(x.date)}</span>
+    <span style={{flex:"1 1 160px", minWidth:0}}>{camp? <b>{camp.name} · </b> : null}{x.category}{x.supplier? " · "+x.supplier : ""}{x.note? <span style={{color:"var(--ink-mute)"}}> — {x.note}</span> : null}</span>
+    {x.receiptUrl && <a href={x.receiptUrl} target="_blank" rel="noopener noreferrer" style={{color:"var(--accent)", fontWeight:600}}>receipt</a>}
+    <b>{money(x.amount)}</b>
+    {admin && <button title="Delete" onClick={async ()=>{ try{ await data.del(x.id); toast("Cost deleted"); }catch(e){ toast(e.message, "danger"); } }} style={{border:"none", background:"none", color:"var(--ink-mute)", cursor:"pointer"}}>✕</button>}
+  </div>;
+}
+function CostModal({camps, data, toast, preset, onClose}){
+  const {state} = useApp();
+  const [f, setF] = useState({date:isoDay(new Date()), campaignId:"", seasonId:"", category:"Food", supplier:"", amount:"", note:"", ...preset});
+  const [file, setFile] = useState(null), [busy, setBusy] = useState(false);
+  const year = +f.date.slice(0,4); const budget = budgetOf(data.docs, year);
+  const camp = camps.find(c=>c.id===f.campaignId);
+  async function save(){
+    if(!(+f.amount)) return toast("Type the amount", "warn");
+    setBusy(true);
+    try{
+      let receiptUrl = "";
+      if(file) receiptUrl = (await uploadMediaFile(file)).url;
+      await data.save({kind:"cost", ...f, amount:+f.amount, receiptUrl, seasonId: f.campaignId ? "" : f.seasonId, by: state.currentUserId});
+      toast("Cost added"); onClose();
+    }catch(e){ toast(e.message, "danger"); setBusy(false); }
+  }
+  return <Modal open onClose={onClose} width={460}><div style={{padding:20}}>
+    <h3 style={{margin:"0 0 14px", fontSize:17}}>Add a cost</h3>
+    <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:10}}>
+      <Field label="Date"><input type="date" value={f.date} onChange={e=>setF({...f, date:e.target.value})} style={campInput}/></Field>
+      <Field label="Amount (£)"><input type="number" min="0" step="0.01" value={f.amount} onChange={e=>setF({...f, amount:e.target.value})} style={campInput} autoFocus/></Field>
+      <Field label="Campaign" style={{gridColumn:"1 / -1"}}><Select value={f.campaignId} onChange={v=>setF({...f, campaignId:v})} placeholder="No campaign (season cost)" options={camps.filter(c=>!c.start || inYear(c, year)).map(c=>({value:c.id, label:c.name}))}/></Field>
+      {!f.campaignId && <Field label="Season" style={{gridColumn:"1 / -1"}}><Select value={f.seasonId} onChange={v=>setF({...f, seasonId:v})} placeholder={budget.seasons.length? "Pick a season" : "No seasons yet"} options={budget.seasons.map(s=>({value:s.id, label:s.name}))}/></Field>}
+      {f.campaignId && <div style={{gridColumn:"1 / -1", fontSize:11.5, color:"var(--ink-mute)"}}>Counts towards {(()=>{ const s = budget.seasons.find(s=>s.id===seasonOfCamp(camp, budget)); return s? "the "+s.name+" season" : "no season yet (set seasons in Budget)"; })()}.</div>}
+      <Field label="Category"><Select value={f.category} onChange={v=>setF({...f, category:v})} options={COST_CATS.map(c=>({value:c, label:c}))}/></Field>
+      <Field label="Supplier / who"><input value={f.supplier} onChange={e=>setF({...f, supplier:e.target.value})} placeholder="Instaprint, @foodie.ldn…" style={campInput}/></Field>
+      <Field label="Note" style={{gridColumn:"1 / -1"}}><input value={f.note} onChange={e=>setF({...f, note:e.target.value})} style={campInput}/></Field>
+      <Field label="Receipt (photo or PDF, optional)" style={{gridColumn:"1 / -1"}}><input type="file" accept="image/*,application/pdf" onChange={e=>setFile(e.target.files[0]||null)} style={{fontSize:12.5}}/></Field>
+    </div>
+    <div style={{display:"flex", justifyContent:"flex-end", gap:8, marginTop:16}}><Button onClick={onClose}>Cancel</Button><Button variant="primary" onClick={save} disabled={busy}>{busy? "Saving…" : "Add cost"}</Button></div>
+  </div></Modal>;
+}
+function CollabModal({col, camp, data, toast, onClose, onSave, onDelete}){
+  const {state} = useApp();
+  const known = (data.docs||[]).filter(d=>d.kind==="influencer");
+  const [f, setF] = useState({handle:"", email:"", platform:"instagram", link:"", date: camp.start || isoDay(new Date()), views:"", cost:"", status:"asked", ...col});
+  const [busy, setBusy] = useState(false);
+  async function save(){
+    const handle = "@"+handleKey(f.handle);
+    if(handle==="@") return toast("Type the influencer's @handle", "warn");
+    setBusy(true);
+    let out = {...f, handle, id: f.id || "col_"+Math.random().toString(36).slice(2,9), cost:+f.cost||0, views:+f.views||0};
+    try{
+      // Keep a contact card for them in Influencers.
+      const prof = known.find(k=>handleKey(k.handle)===handleKey(handle));
+      if(!prof || (f.email && f.email!==prof.email)) await data.save({kind:"influencer", ...(prof||{}), handle, email: f.email || (prof && prof.email) || ""});
+      // A posted collab also goes into Published Content, so Make can keep its Instagram numbers fresh.
+      if(f.link && /^https:\/\//.test(f.link) && !f.studyKey){
+        const r = await fetch("/api/study/manual", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({userId: state.currentUserId,
+          manual:{url:f.link, account:handle, platform:f.platform, views:f.views, cost:f.cost, publishedAt:f.date, caption:"Collab · "+camp.name, fetch: f.platform==="instagram"}})});
+        const d = await r.json().catch(()=>({}));
+        if(r.ok && d.entry){ out.studyKey = d.entry.key; data.setStudy(s=>[...s.filter(x=>x.key!==d.entry.key), d.entry]); }
+        else toast((d.error || "Couldn't add it to Published Content")+" — saved here anyway", "warn");
+      }
+      onSave(out);
+    }catch(e){ toast(e.message, "danger"); setBusy(false); }
+  }
+  return <Modal open onClose={onClose} width={480}><div style={{padding:20}}>
+    <h3 style={{margin:"0 0 14px", fontSize:17}}>{col.handle? "Edit collab" : "Add an influencer collab"}</h3>
+    <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:10}}>
+      <Field label="@handle"><input list="cf-infl-handles" value={f.handle} onChange={e=>{ const k = known.find(x=>handleKey(x.handle)===handleKey(e.target.value)); setF({...f, handle:e.target.value, email: f.email || (k && k.email) || ""}); }} placeholder="@foodie.ldn" style={campInput}/>
+        <datalist id="cf-infl-handles">{known.map(k=><option key={k.id} value={k.handle}/>)}</datalist></Field>
+      <Field label="Email / phone"><input value={f.email} onChange={e=>setF({...f, email:e.target.value})} style={campInput}/></Field>
+      <Field label="Status"><Select value={f.status} onChange={v=>setF({...f, status:v})} options={["idea","asked","confirmed","visited","posted","paid"].map(s=>({value:s, label:s[0].toUpperCase()+s.slice(1)}))}/></Field>
+      <Field label="Date (visit or post)"><input type="date" value={f.date} onChange={e=>setF({...f, date:e.target.value})} style={campInput}/></Field>
+      <Field label="Platform"><Select value={f.platform} onChange={v=>setF({...f, platform:v})} options={["instagram","tiktok","youtube","facebook"].map(p=>({value:p, label:PLATFORM_META[p==="youtube"? "youtube" : p] ? PLATFORM_META[p].label : p}))}/></Field>
+      <Field label="Cost (£, incl. meal)"><input type="number" min="0" value={f.cost} onChange={e=>setF({...f, cost:e.target.value})} style={campInput}/></Field>
+      <Field label="Link to their post / video" style={{gridColumn:"1 / -1"}}><input value={f.link} onChange={e=>setF({...f, link:e.target.value})} placeholder="https://www.instagram.com/reel/…" style={campInput}/></Field>
+      <Field label="Views (if it's not on Instagram, or to correct it)" style={{gridColumn:"1 / -1"}}><input type="number" min="0" value={f.views} onChange={e=>setF({...f, views:e.target.value})} style={campInput}/></Field>
+    </div>
+    <div style={{display:"flex", gap:8, marginTop:16, alignItems:"center"}}>{onDelete && <Button variant="subtle" onClick={onDelete}>Remove</Button>}<span style={{flex:1}}/><Button onClick={onClose}>Cancel</Button><Button variant="primary" onClick={save} disabled={busy}>{busy? "Saving…" : "Done"}</Button></div>
+  </div></Modal>;
+}
+
+/* ---------- Budget ---------- */
+function CampBudget({year, camps, data, admin, run, toast}){
+  const saved = budgetOf(data.docs, year);
+  const [b, setB] = useState(saved); const [dirty, setDirty] = useState(false); const [costOpen, setCostOpen] = useState(false);
+  useEffect(()=>{ setB(budgetOf(data.docs, year)); setDirty(false); }, [year, data.docs && data.docs.filter(d=>d.kind==="budget").map(d=>d.updatedAt).join()]);
+  const set = patch => { setB(x=>({...x, ...patch})); setDirty(true); };
+  const costs = (data.docs||[]).filter(d=>d.kind==="cost");
+  const today = isoDay(new Date());
+  const L = budgetLedger(b, costs, camps, today);
+  const ro = !admin;
+  const yearCosts = costs.filter(x=>String(x.date||"").startsWith(String(year))).sort((a,b)=>String(b.date).localeCompare(String(a.date)));
+  const addSeason = ()=>set({seasons:[...b.seasons, {id:"s_"+Math.random().toString(36).slice(2,8), name:"", start:"", end:"", budget:0}]});
+  const editSeason = (id, patch)=>set({seasons:b.seasons.map(s=>s.id===id? {...s, ...patch} : s)});
+  const presetSeasons = ()=>set({seasons:[
+    {name:"Chinese New Year", start:year+"-01-01", end:year+"-02-13"}, {name:"Valentine's", start:year+"-02-14", end:year+"-02-28"}, {name:"Mother's Day & Easter", start:year+"-03-01", end:year+"-04-30"},
+    {name:"Summer", start:year+"-05-01", end:year+"-08-31"}, {name:"Autumn", start:year+"-09-01", end:year+"-11-14"}, {name:"Christmas & New Year", start:year+"-11-15", end:year+"-12-31"},
+  ].map(s=>({...s, id:"s_"+Math.random().toString(36).slice(2,8), budget:0}))});
+  async function save(){ await run("Saving the budget…", async ()=>{ await data.save({...b, kind:"budget", year, seasons:b.seasons.filter(s=>s.name.trim())}); setDirty(false); toast("Budget saved"); }); }
+  async function pdf(){ await run("Making the PDF…", async ()=>{
+    const blob = await makePdf({kicker:"SANJUGO · MARKETING BUDGET", title:"Budget "+year, subtitle:"Year budget "+money(b.total)+" · spent "+money(L.spentAll)+" · left "+money(L.left), sections:[
+      {heading:"Seasons", lines: L.rows.map(r=>r.name+": budget "+money(r.budget)+(r.carryIn? " ("+money(r.carryIn, true)+" carried)" : "")+" · spent "+money(r.spent)+" · balance "+money(r.balance)+" — "+ledgerNote(r))},
+      {heading:"Costs", lines: yearCosts.map(x=>fmtDay(x.date)+" · "+((camps.find(c=>c.id===x.campaignId)||{}).name || "season cost")+" · "+x.category+(x.supplier? " · "+x.supplier : "")+" · "+money(x.amount))},
+    ]});
+    await savePdf(blob, "Sanjugo budget "+year+".pdf", false); }); }
+  return (
+    <div style={{display:"flex", flexDirection:"column", gap:14}}>
+      <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(140px, 1fr))", gap:8}}>
+        <Card style={{padding:"10px 12px"}}><div style={{fontSize:11.5, color:"var(--ink-mute)", fontWeight:600}}>Year budget</div>
+          {ro ? <div style={{fontSize:19, fontWeight:700}}>{money(b.total)}</div> : <input type="number" min="0" value={b.total||""} onChange={e=>set({total:+e.target.value||0})} placeholder="0" style={{...campInput, fontSize:17, fontWeight:700, marginTop:2}}/>}</Card>
+        <Stat label="Spent" value={money(L.spentAll)}/>
+        <Stat label={"Left for "+year} value={money(L.left)} tone={L.left<0? "neg" : null}/>
+        <Stat label="Not yet split into seasons" value={money(L.unallocated)} tone={L.unallocated<0? "neg" : null} sub={L.finalCarry? "incl. "+money(L.finalCarry, true)+" carried from the last season" : null}/>
+      </div>
+      <Card style={{padding:14}}>
+        <div style={{display:"flex", alignItems:"center", gap:8, marginBottom:8, flexWrap:"wrap"}}>
+          <span style={{fontWeight:700, fontSize:14, flex:1}}>Seasons</span>
+          {admin && !b.seasons.length && <Button size="sm" onClick={presetSeasons}>Use the usual seasons</Button>}
+          {admin && <Button size="sm" icon="plus" onClick={addSeason}>Add season</Button>}
+          <Button size="sm" icon="download" onClick={pdf}>PDF</Button>
+          {admin && dirty && <Button size="sm" variant="primary" icon="check" onClick={save}>Save budget</Button>}
+        </div>
+        <div style={{fontSize:11.5, color:"var(--ink-mute)", marginBottom:10}}>Overspend in a season is borrowed from the next season straight away. Money a finished season didn't use moves to the next one, so it can spend more.</div>
+        {!b.seasons.length ? <div style={{fontSize:12.5, color:"var(--ink-mute)"}}>No seasons yet.{admin? " Add your own, or start from the usual ones." : ""}</div> :
+        <div style={{overflowX:"auto"}}><table style={{width:"100%", borderCollapse:"collapse", fontSize:12.5, minWidth:640}}>
+          <thead><tr style={{color:"var(--ink-mute)", textAlign:"left"}}><th style={{padding:"6px 4px"}}>Season</th><th>Dates</th><th>Budget</th><th>Carried</th><th>Spent</th><th>Balance</th><th style={{width:"28%"}}>What happens</th>{admin && <th/>}</tr></thead>
+          <tbody>{L.rows.map(r=>{ const use = r.available>0 ? Math.min(100, r.spent/r.available*100) : (r.spent? 100 : 0); return (
+            <tr key={r.id} style={{borderTop:"1px solid var(--border)", verticalAlign:"top"}}>
+              <td style={{padding:"7px 4px", minWidth:170}}>{ro ? <b>{r.name}</b> : <input value={r.name} onChange={e=>editSeason(r.id, {name:e.target.value})} placeholder="Season name" style={{...campInput, padding:"5px 7px"}}/>}
+                <div style={{height:5, borderRadius:3, background:"var(--surface-2)", marginTop:5, overflow:"hidden"}}><span style={{display:"block", height:5, width:use+"%", background: r.balance<0? "var(--red)" : "var(--green)"}}/></div>
+                <div style={{fontSize:11, color:"var(--ink-mute)", marginTop:3}}>{camps.filter(c=>seasonOfCamp(c, b)===r.id).map(c=>c.name).join(", ")}</div></td>
+              <td style={{padding:"7px 4px", whiteSpace:"nowrap"}}>{ro ? fmtDay(r.start)+" – "+fmtDay(r.end) : <div style={{display:"flex", flexDirection:"column", gap:3}}><input type="date" value={r.start||""} onChange={e=>editSeason(r.id, {start:e.target.value})} style={{...campInput, padding:"4px 6px", width:130}}/><input type="date" value={r.end||""} onChange={e=>editSeason(r.id, {end:e.target.value})} style={{...campInput, padding:"4px 6px", width:130}}/></div>}</td>
+              <td style={{padding:"7px 4px"}}>{ro ? money(r.budget) : <input type="number" min="0" value={r.budget||""} onChange={e=>editSeason(r.id, {budget:+e.target.value||0})} style={{...campInput, padding:"5px 7px", width:90}}/>}</td>
+              <td style={{padding:"7px 4px", color: r.carryIn<0? "var(--red)" : r.carryIn>0? "var(--green)" : "var(--ink-mute)"}}>{r.carryIn? money(r.carryIn, true) : "—"}</td>
+              <td style={{padding:"7px 4px"}}>{money(r.spent)}</td>
+              <td style={{padding:"7px 4px", fontWeight:700, color: r.balance<0? "var(--red)" : "var(--green)"}}>{money(r.balance)}</td>
+              <td style={{padding:"7px 4px", color:"var(--ink-soft)"}}>{ledgerNote(r)}</td>
+              {admin && <td><button title="Remove season" onClick={()=>set({seasons:b.seasons.filter(s=>s.id!==r.id)})} style={{border:"none", background:"none", color:"var(--ink-mute)", cursor:"pointer"}}>✕</button></td>}
+            </tr>); })}</tbody>
+        </table></div>}
+        {L.unseasoned>0 && <div style={{fontSize:12, color:"var(--amber)", marginTop:8}}>{money(L.unseasoned)} of costs aren't in any season (their campaign has no dates or no matching season) — they come out of the money not yet split.</div>}
+      </Card>
+      <Card style={{padding:14}}>
+        <div style={{display:"flex", alignItems:"center", gap:8, marginBottom:6, flexWrap:"wrap"}}><span style={{fontWeight:700, fontSize:14, flex:1}}>Costs {year}</span>
+          <Button size="sm" icon="file" onClick={()=>downloadCsv([["Date","Campaign","Season","Category","Supplier","Amount £","Note","Receipt"], ...yearCosts.map(x=>[x.date, (camps.find(c=>c.id===x.campaignId)||{}).name||"", (b.seasons.find(s=>s.id===costSeason(x, camps, b))||{}).name||"", x.category, x.supplier, x.amount, x.note, x.receiptUrl? location.origin+x.receiptUrl : ""])], "Sanjugo costs "+year+".csv")}>Excel</Button>
+          {admin && <Button size="sm" variant="primary" icon="plus" onClick={()=>setCostOpen(true)}>Add cost</Button>}</div>
+        {!yearCosts.length ? <div style={{fontSize:12.5, color:"var(--ink-mute)"}}>No costs for {year} yet.</div> : yearCosts.map(x=><CostLine key={x.id} x={x} admin={admin} data={data} toast={toast} camps={camps}/>)}
+      </Card>
+      {costOpen && <CostModal camps={camps} data={data} toast={toast} preset={{date: String(year)===today.slice(0,4) ? today : year+"-01-01"}} onClose={()=>setCostOpen(false)}/>}
+    </div>
+  );
+}
+
+/* ---------- Sales & email reports ---------- */
+function prevMonth(){ const d = new Date(); d.setDate(1); d.setMonth(d.getMonth()-1); return d.toISOString().slice(0,7); }
+function CampReports({data, admin, toast}){
+  const reports = (data.docs||[]).filter(d=>d.kind==="report").sort((a,b)=>String(b.month).localeCompare(String(a.month)));
+  const [up, setUp] = useState(null);
+  const [view, setView] = useState(null);
+  const months = [...new Set(reports.map(r=>r.month))].slice(0, 6);
+  const emails = reports.filter(r=>r.source==="sevenrooms").flatMap(r=>((r.summary||{}).emails||[]).map(e=>({...e, month:r.month}))).sort((a,b)=>String(b.date||b.month).localeCompare(String(a.date||a.month)));
+  return (
+    <div style={{display:"flex", flexDirection:"column", gap:14}}>
+      <div style={{fontSize:12.5, color:"var(--ink-mute)"}}>Upload each month's report (CSV, Excel or PDF) and AI reads the numbers. Check them, then save. Campaign pages use them to count what each campaign sold.</div>
+      <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(160px, 1fr))", gap:10}}>
+        {Object.entries(REPORT_SOURCES).map(([k,l])=>{ const mine = reports.filter(r=>r.source===k); return (
+          <Card key={k} style={{padding:14, textAlign:"center"}}>
+            <div style={{fontWeight:700, fontSize:13.5}}>{l}</div>
+            <div style={{fontSize:11.5, color:"var(--ink-mute)", margin:"4px 0 8px", minHeight:16}}>{mine.length? mine.slice(0,3).map(r=>fmtDate(r.month+"-15", {month:"short", year:"2-digit"})+" ✓").join(" · ") : "Nothing yet"}</div>
+            {admin && <Button size="sm" icon="upload" onClick={()=>setUp({source:k, month:prevMonth()})}>Upload</Button>}
+          </Card>); })}
+      </div>
+      {reports.length>0 && <Card style={{padding:14}}>
+        <div style={{fontWeight:700, fontSize:14, marginBottom:8}}>Monthly totals</div>
+        <div style={{overflowX:"auto"}}><table style={{width:"100%", borderCollapse:"collapse", fontSize:12.5, minWidth:520}}>
+          <thead><tr style={{color:"var(--ink-mute)", textAlign:"left"}}><th style={{padding:"5px 4px"}}>Month</th>{["pos","deliveroo","ubereats"].map(k=><th key={k}>{REPORT_SOURCES[k]}</th>)}<th>Emails</th></tr></thead>
+          <tbody>{months.map(m=><tr key={m} style={{borderTop:"1px solid var(--border)"}}><td style={{padding:"6px 4px", fontWeight:700}}>{fmtDate(m+"-15", {month:"long", year:"numeric"})}</td>
+            {["pos","deliveroo","ubereats","sevenrooms"].map(k=>{ const r = reports.find(x=>x.source===k && x.month===m); const s = (r||{}).summary||{};
+              return <td key={k}>{!r ? <span style={{color:"var(--ink-mute)"}}>—</span> : <button onClick={()=>setView(r)} style={{border:"none", background:"none", padding:0, color:"var(--accent)", fontWeight:600, cursor:"pointer", fontSize:12.5}}>{k==="sevenrooms" ? ((s.emails||[]).length+" emails") : (s.totalSales!=null? money(s.totalSales) : "open")}{s.orders && k!=="sevenrooms" ? " · "+s.orders.toLocaleString("en-GB")+" orders" : ""}</button>}</td>; })}</tr>)}</tbody>
+        </table></div>
+      </Card>}
+      {emails.length>0 && <Card style={{padding:14}}>
+        <div style={{fontWeight:700, fontSize:14, marginBottom:8}}>Email marketing (SevenRooms)</div>
+        <div style={{overflowX:"auto"}}><table style={{width:"100%", borderCollapse:"collapse", fontSize:12.5, minWidth:520}}>
+          <thead><tr style={{color:"var(--ink-mute)", textAlign:"left"}}><th style={{padding:"5px 4px"}}>Email</th><th>Date</th><th>Sent</th><th>Opened</th><th>Clicked</th><th>Bookings</th></tr></thead>
+          <tbody>{emails.slice(0, 30).map((e,i)=><tr key={i} style={{borderTop:"1px solid var(--border)"}}><td style={{padding:"6px 4px", fontWeight:600}}>{e.name}</td><td>{e.date? fmtDay(e.date) : e.month}</td><td>{e.sent? (+e.sent).toLocaleString("en-GB") : "—"}</td>
+            <td>{e.openRate!=null? e.openRate+"%" : "—"}</td><td>{e.clickRate!=null? e.clickRate+"%" : "—"}</td><td>{e.bookings||"—"}</td></tr>)}</tbody>
+        </table></div>
+      </Card>}
+      {up && <ReportUpload preset={up} data={data} toast={toast} exists={id=>reports.some(r=>r.id===id)} onClose={()=>setUp(null)}/>}
+      {view && <ReportView r={view} admin={admin} data={data} toast={toast} onClose={()=>setView(null)}/>}
+    </div>
+  );
+}
+function SummaryEditor({s, setS, source}){
+  const num = (k, label) => <Field label={label}><input type="number" value={s[k]==null? "" : s[k]} onChange={e=>setS({...s, [k]: e.target.value==="" ? null : +e.target.value})} style={campInput}/></Field>;
+  const table = (key, cols) => <div style={{overflowX:"auto"}}><table style={{width:"100%", borderCollapse:"collapse", fontSize:12, minWidth: cols.length*90}}>
+    <thead><tr style={{color:"var(--ink-mute)", textAlign:"left"}}>{cols.map(([k,l])=><th key={k} style={{padding:"4px"}}>{l}</th>)}<th/></tr></thead>
+    <tbody>{(s[key]||[]).map((row,i)=><tr key={i}>{cols.map(([k,,t])=><td key={k} style={{padding:"2px"}}><input type={t||"text"} value={row[k]==null? "" : row[k]} onChange={e=>setS({...s, [key]:(s[key]||[]).map((x,j)=>j===i? {...x, [k]: t==="number"? (e.target.value===""? null : +e.target.value) : e.target.value} : x)})} style={{...campInput, padding:"4px 6px", fontSize:12}}/></td>)}
+      <td><button onClick={()=>setS({...s, [key]:(s[key]||[]).filter((_,j)=>j!==i)})} style={{border:"none", background:"none", color:"var(--ink-mute)", cursor:"pointer"}}>✕</button></td></tr>)}</tbody></table></div>;
+  return <div style={{display:"flex", flexDirection:"column", gap:10}}>
+    {source!=="sevenrooms" && <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:10}}>{num("totalSales", "Total sales (£)")}{num("orders", "Orders")}</div>}
+    {source!=="sevenrooms" && <div><div style={{fontSize:12, fontWeight:700, marginBottom:4}}>Items ({(s.items||[]).length})</div>{table("items", [["name","Item"],["qty","Qty","number"],["sales","£","number"]])}</div>}
+    {source!=="sevenrooms" && (s.codes||[]).length>0 && <div><div style={{fontSize:12, fontWeight:700, marginBottom:4}}>Promo codes</div>{table("codes", [["code","Code"],["count","Used","number"],["discount","Discount £","number"]])}</div>}
+    {source!=="sevenrooms" && (s.branches||[]).length>0 && <div><div style={{fontSize:12, fontWeight:700, marginBottom:4}}>Branches</div>{table("branches", [["name","Branch"],["sales","£","number"],["orders","Orders","number"]])}</div>}
+    {(source==="sevenrooms" || (s.emails||[]).length>0) && <div><div style={{fontSize:12, fontWeight:700, marginBottom:4}}>Emails</div>{table("emails", [["name","Email"],["date","Date"],["sent","Sent","number"],["openRate","Open %","number"],["clickRate","Click %","number"],["bookings","Bookings","number"]])}</div>}
+    {s.notes && <div style={{fontSize:12, color:"var(--ink-mute)"}}>AI note: {s.notes}</div>}
+  </div>;
+}
+function ReportUpload({preset, data, toast, exists, onClose}){
+  const [f, setF] = useState(preset); const [file, setFile] = useState(null);
+  const [step, setStep] = useState("pick"); const [summary, setSummary] = useState(null); const [msg, setMsg] = useState("");
+  const id = "report_"+f.source+"_"+f.month;
+  async function read(){
+    if(!file) return toast("Pick the report file first", "warn");
+    setStep("reading");
+    try{
+      setMsg("Opening the file…"); const text = await reportFileText(file);
+      setMsg("AI is reading the numbers…");
+      const r = await fetch("/api/camp/read-report", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({source:f.source, month:f.month, fileName:file.name, text})});
+      const d = await r.json().catch(()=>({})); if(!r.ok) throw new Error(d.error || "Couldn't read the report");
+      setSummary(d.summary || {}); if(d.summary && /^\d{4}-\d{2}$/.test(d.summary.month||"")) setF(x=>({...x, month:d.summary.month}));
+      setStep("check");
+    }catch(e){ toast(e.message, "danger"); setStep("pick"); }
+  }
+  async function save(){
+    setStep("saving");
+    try{ const up = await uploadMediaFile(file); await data.save({kind:"report", id, source:f.source, month:f.month, fileName:file.name, fileUrl:up.url, summary}); toast(REPORT_SOURCES[f.source]+" "+f.month+" saved"); onClose(); }
+    catch(e){ toast(e.message, "danger"); setStep("check"); }
+  }
+  return <Modal open onClose={onClose} width={step==="check"? 720 : 460}><div style={{padding:20}}>
+    <h3 style={{margin:"0 0 14px", fontSize:17}}>Upload a report</h3>
+    <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, marginBottom:12}}>
+      <Field label="From"><Select value={f.source} onChange={v=>setF({...f, source:v})} options={Object.entries(REPORT_SOURCES).map(([k,l])=>({value:k, label:l}))}/></Field>
+      <Field label="Month"><input type="month" value={f.month} onChange={e=>setF({...f, month:e.target.value})} style={campInput}/></Field>
+    </div>
+    {step==="pick" && <>
+      <Field label="Report file (CSV, Excel or PDF)"><input type="file" accept=".csv,.tsv,.txt,.xlsx,.xls,.xlsm,.pdf" onChange={e=>setFile(e.target.files[0]||null)} style={{fontSize:12.5}}/></Field>
+      {exists(id) && <div style={{fontSize:12, color:"var(--amber)", marginTop:8}}>There's already a {REPORT_SOURCES[f.source]} report for {f.month} — saving replaces it.</div>}
+      <div style={{display:"flex", justifyContent:"flex-end", gap:8, marginTop:16}}><Button onClick={onClose}>Cancel</Button><Button variant="primary" icon="zap" onClick={read}>Read it</Button></div>
+    </>}
+    {(step==="reading" || step==="saving") && <div style={{fontSize:13, color:"var(--ink-soft)", padding:"14px 0"}}>⏳ {step==="saving"? "Saving…" : msg}</div>}
+    {step==="check" && summary && <>
+      <div style={{fontSize:12.5, color:"var(--ink-mute)", marginBottom:10}}>Check these numbers against the report — fix anything that's wrong, then save.</div>
+      <SummaryEditor s={summary} setS={setSummary} source={f.source}/>
+      <div style={{display:"flex", justifyContent:"flex-end", gap:8, marginTop:16}}><Button onClick={()=>setStep("pick")}>Back</Button><Button variant="primary" icon="check" onClick={save}>Looks right, save</Button></div>
+    </>}
+  </div></Modal>;
+}
+function ReportView({r, admin, data, toast, onClose}){
+  const [s, setS] = useState(r.summary||{}); const [dirty, setDirty] = useState(false);
+  return <Modal open onClose={onClose} width={720}><div style={{padding:20}}>
+    <div style={{display:"flex", alignItems:"center", gap:8, marginBottom:12, flexWrap:"wrap"}}><h3 style={{margin:0, fontSize:17, flex:1}}>{REPORT_SOURCES[r.source]} · {fmtDate(r.month+"-15", {month:"long", year:"numeric"})}</h3>
+      {r.fileUrl && <a href={r.fileUrl} target="_blank" rel="noopener noreferrer" style={{fontSize:12.5, color:"var(--accent)", fontWeight:600}}>Original file ↗</a>}</div>
+    {admin ? <SummaryEditor s={s} setS={v=>{ setS(v); setDirty(true); }} source={r.source}/> : <SummaryEditor s={s} setS={()=>{}} source={r.source}/>}
+    <div style={{display:"flex", gap:8, marginTop:16}}>{admin && <ConfirmButton confirmLabel="Yes, delete" onConfirm={async ()=>{ try{ await data.del(r.id); toast("Report deleted"); onClose(); }catch(e){ toast(e.message, "danger"); } }}>Delete</ConfirmButton>}
+      <span style={{flex:1}}/><Button onClick={onClose}>Close</Button>{admin && dirty && <Button variant="primary" onClick={async ()=>{ try{ await data.save({...r, summary:s}); toast("Saved"); onClose(); }catch(e){ toast(e.message, "danger"); } }}>Save</Button>}</div>
+  </div></Modal>;
+}
+
+/* ---------- Influencers ---------- */
+function CampInfluencers({camps, data, admin, toast, onOpen}){
+  const [edit, setEdit] = useState(null); const [openH, setOpenH] = useState(null);
+  const rows = useMemo(()=>{
+    const map = new Map();
+    const get = h => { const k = handleKey(h); if(!k) return null; if(!map.has(k)) map.set(k, {key:k, handle:"@"+k, profile:null, collabs:[]}); return map.get(k); };
+    for(const d of (data.docs||[]).filter(d=>d.kind==="influencer")){ const r = get(d.handle); if(r) r.profile = d; }
+    const linked = new Set();
+    for(const c of camps) for(const col of c.collabs||[]){ const r = get(col.handle); if(!r) continue; const v = collabViews(col, data.study); if(col.studyKey) linked.add(col.studyKey);
+      r.collabs.push({camp:c, link:col.link, date:col.date, views:v.n, auto:v.auto, cost:+col.cost||0, status:col.status}); }
+    for(const e of data.study||[]){ const m = e.manual; if(!m || linked.has(e.key)) continue;
+      for(const h of String(m.account||"").split(/\s+/).filter(Boolean)){ const r = get(h); if(!r) continue;
+        r.collabs.push({camp:null, link:m.url, date:(m.publishedAt||"").slice(0,10), views:+m.views||0, auto: !!(m.fetch && m.fetch.status==="ok"), cost:+((e.tags||{}).cost)||0, status:"posted"}); } }
+    return [...map.values()].map(r=>({...r, views:r.collabs.reduce((a,x)=>a+x.views, 0), cost:r.collabs.reduce((a,x)=>a+x.cost, 0)})).sort((a,b)=>b.views-a.views);
+  }, [camps, data.docs, data.study]);
+  const open = rows.find(r=>r.key===openH);
+  return (
+    <div style={{display:"flex", flexDirection:"column", gap:14}}>
+      <div style={{display:"flex", alignItems:"center", gap:8, flexWrap:"wrap"}}><div style={{fontSize:12.5, color:"var(--ink-mute)", flex:1}}>Everyone we've worked with: contact, every collab, views and cost per 1,000 views. Collab posts from Published Content show here too.</div>
+        {admin && <Button size="sm" variant="primary" icon="plus" onClick={()=>setEdit({})}>Add influencer</Button>}</div>
+      {!rows.length ? <Card><EmptyState icon="team" title="No influencers yet" subtitle="Add one here, or add a collab on a campaign page."/></Card> :
+      <Card style={{padding:6}}><div style={{overflowX:"auto"}}><table style={{width:"100%", borderCollapse:"collapse", fontSize:12.5, minWidth:560}}>
+        <thead><tr style={{color:"var(--ink-mute)", textAlign:"left"}}><th style={{padding:"7px 8px"}}>Influencer</th><th>Contact</th><th>Collabs</th><th>Views</th><th>Cost</th><th>£ per 1k views</th></tr></thead>
+        <tbody>{rows.map(r=>{ const cpm = r.views ? r.cost/r.views*1000 : null; return (
+          <tr key={r.key} onClick={()=>setOpenH(r.key)} style={{borderTop:"1px solid var(--border)", cursor:"pointer"}}>
+            <td style={{padding:"8px"}}><b>{r.handle}</b>{r.profile && r.profile.followers ? <div style={{fontSize:11, color:"var(--ink-mute)"}}>{(+r.profile.followers).toLocaleString("en-GB")} followers</div> : null}</td>
+            <td style={{color:"var(--ink-soft)"}}>{(r.profile && (r.profile.email || r.profile.phone)) || "—"}</td><td>{r.collabs.length}</td><td>{r.views? r.views.toLocaleString("en-GB") : "—"}</td><td>{money(r.cost)}</td>
+            <td style={{fontWeight:700, color: cpm==null? "var(--ink-mute)" : cpm<=3? "var(--green)" : cpm>=10? "var(--red)" : "var(--ink)"}}>{cpm==null? "—" : "£"+cpm.toFixed(2)}</td>
+          </tr>); })}</tbody></table></div></Card>}
+      {open && <Modal open onClose={()=>setOpenH(null)} width={560}><div style={{padding:20}}>
+        <div style={{display:"flex", alignItems:"center", gap:8, marginBottom:4}}><h3 style={{margin:0, fontSize:17, flex:1}}>{open.handle}</h3>{admin && <Button size="sm" icon="edit" onClick={()=>{ setEdit(open.profile || {handle:open.handle}); setOpenH(null); }}>Edit contact</Button>}</div>
+        <div style={{fontSize:12.5, color:"var(--ink-mute)", marginBottom:12}}>{[open.profile && open.profile.email, open.profile && open.profile.phone, open.profile && open.profile.followers && (+open.profile.followers).toLocaleString("en-GB")+" followers", open.profile && open.profile.rate && "usual rate "+open.profile.rate].filter(Boolean).join(" · ") || "No contact details yet"}</div>
+        {open.profile && open.profile.notes && <div style={{fontSize:12.5, marginBottom:10, whiteSpace:"pre-wrap"}}>{open.profile.notes}</div>}
+        {open.collabs.sort((a,b)=>String(b.date).localeCompare(String(a.date))).map((x,i)=><div key={i} style={{display:"flex", gap:8, alignItems:"center", padding:"7px 0", borderTop:"1px solid var(--border)", fontSize:12.5, flexWrap:"wrap"}}>
+          <span style={{color:"var(--ink-mute)", minWidth:50}}>{fmtDay(x.date)}</span>
+          <span style={{flex:"1 1 160px"}}>{x.camp ? <button onClick={()=>{ setOpenH(null); onOpen(x.camp); }} style={{border:"none", background:"none", padding:0, color:"var(--accent)", fontWeight:700, cursor:"pointer", fontSize:12.5}}>{x.camp.name}</button> : <span style={{color:"var(--ink-mute)"}}>No campaign</span>} · {x.status}</span>
+          {x.link && <a href={x.link} target="_blank" rel="noopener noreferrer" style={{color:"var(--accent)", fontWeight:600}}>Post ↗</a>}
+          <span>{x.views? x.views.toLocaleString("en-GB")+" views" : "—"}{x.auto && <span style={{marginLeft:4, fontSize:10, fontWeight:700, color:"var(--green)"}}>auto</span>}</span><b>{money(x.cost)}</b></div>)}
+      </div></Modal>}
+      {edit && <InfluencerModal inf={edit} data={data} toast={toast} onClose={()=>setEdit(null)}/>}
+    </div>
+  );
+}
+function InfluencerModal({inf, data, toast, onClose}){
+  const [f, setF] = useState({handle:"", email:"", phone:"", followers:"", rate:"", notes:"", ...inf}); const [busy, setBusy] = useState(false);
+  async function save(){
+    const handle = "@"+handleKey(f.handle); if(handle==="@") return toast("Type their @handle", "warn");
+    const existing = (data.docs||[]).find(d=>d.kind==="influencer" && handleKey(d.handle)===handleKey(handle) && d.id!==f.id);
+    setBusy(true); try{ await data.save({...(existing||{}), ...f, kind:"influencer", handle, followers:+f.followers||0, id: f.id || (existing && existing.id)}); toast("Saved"); onClose(); }catch(e){ toast(e.message, "danger"); setBusy(false); }
+  }
+  return <Modal open onClose={onClose} width={460}><div style={{padding:20}}>
+    <h3 style={{margin:"0 0 14px", fontSize:17}}>{inf.id? "Edit influencer" : "Add influencer"}</h3>
+    <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:10}}>
+      <Field label="@handle"><input value={f.handle} onChange={e=>setF({...f, handle:e.target.value})} style={campInput}/></Field>
+      <Field label="Followers"><input type="number" value={f.followers} onChange={e=>setF({...f, followers:e.target.value})} style={campInput}/></Field>
+      <Field label="Email"><input value={f.email} onChange={e=>setF({...f, email:e.target.value})} style={campInput}/></Field>
+      <Field label="Phone"><input value={f.phone} onChange={e=>setF({...f, phone:e.target.value})} style={campInput}/></Field>
+      <Field label="Usual rate" style={{gridColumn:"1 / -1"}}><input value={f.rate} onChange={e=>setF({...f, rate:e.target.value})} placeholder="£150 per reel, or meal only" style={campInput}/></Field>
+      <Field label="Notes" style={{gridColumn:"1 / -1"}}><textarea value={f.notes} onChange={e=>setF({...f, notes:e.target.value})} rows={3} style={{...campInput, resize:"vertical"}}/></Field>
+    </div>
+    <div style={{display:"flex", justifyContent:"flex-end", gap:8, marginTop:16}}><Button onClick={onClose}>Cancel</Button><Button variant="primary" onClick={save} disabled={busy}>{busy? "Saving…" : "Save"}</Button></div>
+  </div></Modal>;
+}
+
+/* Reload everything — new posts, chat, approvals and the newest app version (an app on the Home Screen has no reload button). */
+async function refreshApp(){
+  try{ const reg = navigator.serviceWorker && await navigator.serviceWorker.getRegistration(); if(reg) await Promise.race([reg.update(), new Promise(r=>setTimeout(r, 3000))]); }catch(e){}
+  location.reload();
+}
+function RefreshButton(){
+  const [spin, setSpin] = useState(false);
+  return <button onClick={()=>{ setSpin(true); refreshApp(); }} title="Refresh Creator Studio" aria-label="Refresh"
+    style={{width:38, height:38, borderRadius:99, border:"1px solid var(--border)", background:"var(--surface)", color:"var(--ink-soft)", cursor:"pointer", display:"inline-flex", alignItems:"center", justifyContent:"center", flexShrink:0}}>
+    <Icon name="refresh" size={17} style={spin? {animation:"cf-spin .8s linear infinite"} : undefined}/></button>;
+}
+
+
 /* ============================== DASHBOARD ============================== */
 function StatTile({label, value, sub, color, icon, onClick, hint}){
   return (
@@ -4240,7 +5084,7 @@ function DashboardPage(){
   return (
     <div>
       <PageHeader title={hello} subtitle={fmtDate(new Date().toISOString(), {weekday:"short", day:"numeric", month:"short"})+" · "+(ws===null ? "checking…" : todo.length ? todo.length+" thing"+(todo.length>1?"s":"")+" need"+(todo.length>1?"":"s")+" you" : "nothing waiting for you")}
-        action={perms.create && <Button variant="primary" icon="plus" onClick={()=>go("create")}>Create</Button>}/>
+        action={<div style={{display:"flex", gap:8, alignItems:"center"}}><RefreshButton/>{perms.create && <Button variant="primary" icon="plus" onClick={()=>go("create")}>Create</Button>}</div>}/>
 
       <Card style={{padding:16, minWidth:0}}>
         <div className="cf-todo-head">
@@ -5622,6 +6466,10 @@ function CampaignManager(){
   const inputStyle = {padding:"8px 10px", borderRadius:8, border:"1px solid var(--border)", fontSize:13, background:"var(--surface)", color:"var(--ink)"};
   return (
     <div>
+      <div style={{display:"flex", alignItems:"center", gap:10, padding:"9px 12px", borderRadius:10, background:"var(--accent-soft)", marginBottom:12, fontSize:12.5, flexWrap:"wrap"}}>
+        <span style={{flex:"1 1 220px"}}>Dates, budget, kitchen brief, influencers and results are on the <b>Campaigns</b> page. Here you can just add, rename or archive names.</span>
+        <Button size="sm" onClick={()=>dispatch({type:"SET_ROUTE", route:"campaigns"})}>Open Campaigns</Button>
+      </div>
       <div style={{display:"flex", gap:8, flexWrap:"wrap", marginBottom:14}}>
         <input value={name} onChange={e=>setName(e.target.value)} onKeyDown={e=>e.key==="Enter" && add()} placeholder="New campaign name, e.g. Christmas Menu 2026" style={{...inputStyle, flex:1, minWidth:200}}/>
         <Button variant="primary" icon="plus" onClick={add} disabled={!name.trim()}>Add campaign</Button>
@@ -9507,9 +10355,9 @@ function App(){
     dashboard: <DashboardPage/>, calendar: <ContentCalendarPage/>, queue: <ApprovalQueuePage key={state.queueTab||""}/>,
     create: <CreateContentPage key={JSON.stringify(state.createPrefill||{})}/>, published: <PublishedContentPage/>, analytics: <AnalyticsPage/>,
     team: <SettingsPage/>, settings: <SettingsPage/>, chat: <ChatPage/>, library: <LibraryPage key={state.libraryQuery||""}/>,
-    workspace: <WorkspacePage key={state.workspaceProject||""}/>,
+    workspace: <WorkspacePage key={state.workspaceProject||""}/>, campaigns: <CampaignsPage/>,
   };
-  const titles = {dashboard:"Sanjugo Dashboard", calendar:"Calendar", queue:"Approval Queue", create:"Create Content", published:"Published", analytics:"Analytics", team:"Team", settings:"Settings", chat:"Team Chat", library:"Content Library", workspace:"Workspace"};
+  const titles = {dashboard:"Sanjugo Dashboard", calendar:"Calendar", queue:"Approval Queue", create:"Create Content", published:"Published", analytics:"Analytics", team:"Team", settings:"Settings", chat:"Team Chat", library:"Content Library", workspace:"Workspace", campaigns:"Campaigns"};
 
   if(state.lock) return <LockScreen lock={state.lock}/>;
   const accessOn = !!(state.me && state.me.accessEnabled);

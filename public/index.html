@@ -4262,15 +4262,34 @@ function CampaignsPage(){
     else dispatch({type:"ADD_CAMPAIGN", campaign:{id:saved.id, brand:BRANDS[0].id, name:saved.name, details:saved.details||"", archived:false, createdAt:new Date().toISOString()}});
     return saved;
   }
-  async function newCamp(date, name){
+  // New campaign: asks for the name and dates first (nothing is saved until "Create").
+  const [newOpen, setNewOpen] = useState(null);
+  function newCamp(date, name){
+    const start = typeof date==="string" ? date : year+"-"+String(new Date().getFullYear()===year ? new Date().getMonth()+1 : 1).padStart(2,"0")+"-01";
+    setNewOpen({name: name || "", type: name? "holiday" : "menu", start, end: start, budget:""});
+  }
+  async function createCamp(f){
     await run("Creating…", async ()=>{
-      const start = typeof date==="string" ? date : year+"-"+String(new Date().getFullYear()===year ? new Date().getMonth()+1 : 1).padStart(2,"0")+"-01";
-      const c = await saveCamp({id:"c_"+Math.random().toString(36).slice(2,10), name: name || "New campaign", type: name? "holiday" : "menu", status:"idea", start, end:start, branches:[...CAMP_BRANCHES], owner:me.id, budget:0,
-        kitchen:{dishes:[], dates:"", notes:""}, tasks:[], collabs:[], track:{items:"", codes:"", emails:""}, results:{}});
-      setOpenId(c.id); setTab("plan");
+      const c = await saveCamp({id:"c_"+Math.random().toString(36).slice(2,10), name:f.name.trim(), type:f.type, status:"planning", start:f.start, end:f.end||f.start, branches:[...CAMP_BRANCHES], owner:me.id, budget:+f.budget||0,
+        details:f.details||"", kitchen:{dishes:[], dates:"", notes:""}, tasks:[], collabs:[], track:{items:"", codes:"", emails:""}, results:{}});
+      setNewOpen(null); setOpenId(c.id);
+      toast("Campaign created — it's now in Create's campaign list too");
     });
   }
   const open = camps.find(c=>c.id===openId);
+  const newModal = newOpen && <Modal open onClose={()=>setNewOpen(null)} width={460}><div style={{padding:20}}>
+    <h3 style={{margin:"0 0 14px", fontSize:17}}>New campaign</h3>
+    <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:10}}>
+      <Field label="Name" style={{gridColumn:"1 / -1"}}><input autoFocus value={newOpen.name} onChange={e=>setNewOpen({...newOpen, name:e.target.value})} placeholder="10th Anniversary — £10 Wagyu Roll" style={campInput}/></Field>
+      <Field label="Type"><Select value={newOpen.type} onChange={v=>setNewOpen({...newOpen, type:v})} options={Object.entries(CAMP_TYPES).map(([k,t])=>({value:k, label:t.label}))}/></Field>
+      <Field label="Budget £ (optional)"><input type="number" min="0" value={newOpen.budget} onChange={e=>setNewOpen({...newOpen, budget:e.target.value})} style={campInput}/></Field>
+      <Field label="Starts"><input type="date" value={newOpen.start} onChange={e=>setNewOpen({...newOpen, start:e.target.value, end: !newOpen.end || newOpen.end < e.target.value ? e.target.value : newOpen.end})} style={campInput}/></Field>
+      <Field label="Ends"><input type="date" value={newOpen.end} min={newOpen.start} onChange={e=>setNewOpen({...newOpen, end:e.target.value})} style={campInput}/></Field>
+      <Field label="About (offer, rules, codes — optional)" style={{gridColumn:"1 / -1"}}><textarea value={newOpen.details||""} onChange={e=>setNewOpen({...newOpen, details:e.target.value})} rows={2} style={{...campInput, resize:"vertical"}}/></Field>
+    </div>
+    <div style={{display:"flex", justifyContent:"flex-end", gap:8, marginTop:16}}><Button onClick={()=>setNewOpen(null)}>Cancel</Button>
+      <Button variant="primary" disabled={!newOpen.name.trim() || !newOpen.start || !!busy} onClick={()=>createCamp(newOpen)}>{busy? "Creating…" : "Create campaign"}</Button></div>
+  </div></Modal>;
   const tabs = [["overview","Overview"],["plan","Plan"],["budget","Budget"],["reports","Sales reports"],["email","Email marketing"],["influencers","Influencers"]];
   if(data.docs===null) return <div><PageHeader title="Campaigns" subtitle="Loading…"/><Skeleton h={220}/></div>;
   return (
@@ -4282,6 +4301,7 @@ function CampaignsPage(){
         </div>}/>
       {data.err && <div style={{padding:"9px 12px", borderRadius:10, background:"var(--red-soft)", color:"var(--red)", fontSize:13, marginBottom:12}}>{data.err}</div>}
       {busy && <div style={{fontSize:12.5, color:"var(--ink-mute)", marginBottom:8}}>{busy}</div>}
+      {newModal}
       {open ? <CampaignDetail key={open.id} camp={open} camps={camps} data={data} admin={admin} onBack={()=>setOpenId(null)} saveCamp={saveCamp} toast={toast}/> : <>
         <div className="cf-noscrollbar" style={{display:"flex", gap:2, overflowX:"auto", borderBottom:"1px solid var(--border)", marginBottom:16}}>
           {tabs.map(([k,l])=><button key={k} onClick={()=>setTab(k)} style={{flexShrink:0, padding:"10px 12px", border:"none", background:"none", cursor:"pointer", fontSize:13.5, fontWeight:600, color: tab===k? "var(--ink)" : "var(--ink-mute)", borderBottom:"2px solid "+(tab===k? "var(--accent)" : "transparent"), marginBottom:-1}}>{l}</button>)}
@@ -4437,12 +4457,12 @@ function CampSection({title, icon, children, action}){
 function CampaignDetail({camp, camps, data, admin, onBack, saveCamp, toast}){
   const {state, dispatch} = useApp();
   const [c, setC] = useState(()=>({kitchen:{dishes:[], dates:"", notes:""}, tasks:[], collabs:[], track:{items:"", codes:"", emails:""}, results:{}, branches:[...CAMP_BRANCHES], ...camp}));
-  const [dirty, setDirty] = useState(!!camp.legacy);
+  const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState("");
   const [collabOpen, setCollabOpen] = useState(null);
   const [costOpen, setCostOpen] = useState(false);
   const [detailTab, setDetailTab] = useState("results");
-  const [editing, setEditing] = useState(!!camp.legacy || camp.name==="New campaign");
+  const [editing, setEditing] = useState(!!camp.legacy || !camp.start || camp.name==="New campaign");
   const set = patch => { setC(x=>({...x, ...patch})); setDirty(true); };
   const setIn = (key, patch) => set({[key]: {...(c[key]||{}), ...patch}});
   const ro = !admin;
@@ -4523,10 +4543,9 @@ function CampaignDetail({camp, camps, data, admin, onBack, saveCamp, toast}){
   return (
     <div style={{display:"flex", flexDirection:"column", gap:14}}>
       <div style={{display:"flex", alignItems:"center", gap:8, flexWrap:"wrap"}}>
-        <Button size="sm" icon="chevronLeft" onClick={onBack}>Campaigns</Button>
+        <Button size="sm" icon="chevronLeft" onClick={()=>{ if(admin && dirty && !window.confirm("You have unsaved changes. Leave without saving?")) return; onBack(); }}>Campaigns</Button>
         <span style={{flex:1}}/>
         {busy && <span style={{fontSize:12.5, color:"var(--ink-mute)"}}>{busy}</span>}
-        {admin && dirty && <Button size="sm" variant="primary" icon="check" onClick={save} disabled={!!busy}>Save changes</Button>}
       </div>
 
       <Card style={{padding:0, overflow:"hidden"}}>
@@ -4670,6 +4689,11 @@ function CampaignDetail({camp, camps, data, admin, onBack, saveCamp, toast}){
       </Card>
 
       {admin && <div style={{display:"flex", justifyContent:"flex-end"}}><ConfirmButton confirmLabel="Yes, delete this campaign" onConfirm={remove}>Delete campaign</ConfirmButton></div>}
+      {admin && dirty && <div style={{position:"sticky", bottom:"calc(12px + env(safe-area-inset-bottom, 0px))", zIndex:20, display:"flex", alignItems:"center", gap:10, padding:"10px 14px", borderRadius:12, background:"var(--ink)", color:"var(--surface)", boxShadow:"var(--shadow-md)", flexWrap:"wrap"}}>
+        <span style={{flex:1, fontSize:13.5, fontWeight:600}}>Unsaved changes</span>
+        <button onClick={()=>{ setC({kitchen:{dishes:[], dates:"", notes:""}, tasks:[], collabs:[], track:{items:"", codes:"", emails:""}, results:{}, branches:[...CAMP_BRANCHES], ...camp}); setDirty(false); }} style={{border:"none", background:"none", color:"inherit", opacity:.8, fontSize:13, fontWeight:600, cursor:"pointer"}}>Discard</button>
+        <Button size="sm" variant="primary" icon="check" onClick={save} disabled={!!busy}>{busy? "Saving…" : "Save"}</Button>
+      </div>}
       {collabOpen && <CollabModal col={collabOpen} camp={c} data={data} toast={toast} onClose={()=>setCollabOpen(null)} onSave={col=>{ const i = col.index; delete col.index;
         set({collabs: i!=null ? (c.collabs||[]).map((x,j)=>j===i? col : x) : [...(c.collabs||[]), col]}); setCollabOpen(null); toast("Added — tap “Save changes” to keep it"); }}
         onDelete={collabOpen.index!=null ? ()=>{ listDel("collabs", collabOpen.index); setCollabOpen(null); } : null}/>}

@@ -3972,13 +3972,59 @@ const money = (n, sign) => { const v = Math.round(Number(n)||0); const s = "£"+
 const isoDay = d => d.toISOString().slice(0,10);
 function easterDate(y){ const a=y%19,b=Math.floor(y/100),c=y%100,d=Math.floor(b/4),e=b%4,f=Math.floor((b+8)/25),g=Math.floor((b-f+1)/3),h=(19*a+b-d-g+15)%30,i=Math.floor(c/4),k=c%4,l=(32+2*e+2*i-h-k)%7,m=Math.floor((a+11*h+22*l)/451),mo=Math.floor((h+l-7*m+114)/31),da=((h+l-7*m+114)%31)+1; return new Date(Date.UTC(y,mo-1,da)); }
 function campNthWeekday(y, month, weekday, n){ const d = new Date(Date.UTC(y,month,1)); d.setUTCDate(1 + (weekday-d.getUTCDay()+7)%7 + (n-1)*7); return d; }
-function ukKeyDates(y){
-  const e = easterDate(y), ms = new Date(e); ms.setUTCDate(e.getUTCDate()-21);
+/* UK holidays and the dates that matter to a restaurant. kind: "bank" = bank holiday (England & Wales), "major" = shown on
+   the year plan too, "minor" = month view only. Moon-based dates (Ramadan, Eid, Diwali, Mid-Autumn) are from tables. */
+const MID_AUTUMN = {2026:"09-25", 2027:"09-15", 2028:"10-03"};
+const RAMADAN = {2026:"02-18", 2027:"02-08", 2028:"01-28"};
+const EID = {2026:"03-20", 2027:"03-10", 2028:"02-27"};
+function ukHolidays(y){
+  const D = (m, d) => new Date(Date.UTC(y, m, d));
+  const add = (d, n) => { const x = new Date(d); x.setUTCDate(x.getUTCDate()+n); return x; };
+  const lastMon = m => { const d = D(m+1, 0); d.setUTCDate(d.getUTCDate() - (d.getUTCDay()+6)%7); return d; };
+  const e = easterDate(y);
+  // Bank holidays that fall on a weekend move to the next weekday ("substitute day").
+  const ny = D(0,1); const nyObs = ny.getUTCDay()===6 ? add(ny,2) : ny.getUTCDay()===0 ? add(ny,1) : ny;
+  const xmas = D(11,25), dow = xmas.getUTCDay();
+  const xObs = dow===6 ? D(11,27) : dow===0 ? D(11,27) : xmas, bObs = dow===5 ? D(11,28) : dow===6 ? D(11,28) : dow===0 ? D(11,26) : D(11,26);
   const bf = campNthWeekday(y,10,4,4); bf.setUTCDate(bf.getUTCDate()+1);
-  return [CNY_DATES[y] && {date:y+"-"+CNY_DATES[y], name:"Chinese New Year"}, {date:y+"-02-14", name:"Valentine's Day"}, {date:isoDay(ms), name:"Mother's Day"},
-    {date:isoDay(e), name:"Easter"}, {date:isoDay(campNthWeekday(y,5,0,3)), name:"Father's Day"}, {date:y+"-10-31", name:"Halloween"},
-    {date:isoDay(bf), name:"Black Friday"}, {date:y+"-12-25", name:"Christmas"}, {date:y+"-12-31", name:"New Year's Eve"}].filter(Boolean);
+  const t = (tbl, name, kind, note) => tbl[y] ? [{date:y+"-"+tbl[y], name, kind, note}] : [];
+  const list = [
+    {date:isoDay(nyObs), name:"New Year's Day"+(nyObs.getTime()!==ny.getTime()? " (bank holiday)" : ""), kind:"bank", note:"Bank holiday — slow start to the year; Veganuary and Dry January all month."},
+    ...t(RAMADAN, "Ramadan starts", "minor", "About a month of fasting — iftar (evening) offers work well. Date depends on the moon (±1 day)."),
+    ...t(CNY_DATES, "Chinese New Year", "major", "One of our biggest dates — set menu, decorations, red packets. Celebrations run about two weeks."),
+    {date:y+"-02-14", name:"Valentine's Day", kind:"major", note:"Couples' dinners — sets for two, book-ahead posts 1–2 weeks before."},
+    {date:isoDay(add(e,-47)), name:"Pancake Day", kind:"minor", note:"Shrove Tuesday — fun dessert tie-in."},
+    {date:y+"-03-17", name:"St Patrick's Day", kind:"minor", note:"Busy evenings in town."},
+    ...t(EID, "Eid al-Fitr", "minor", "End of Ramadan — family meals. Date depends on the moon (±1 day)."),
+    {date:isoDay(add(e,-21)), name:"Mother's Day", kind:"major", note:"Mothering Sunday — family lunches book up, gift cards sell well."},
+    {date:isoDay(add(e,-2)), name:"Good Friday", kind:"bank", note:"Bank holiday — long weekend starts."},
+    {date:isoDay(e), name:"Easter Sunday", kind:"major", note:"Long weekend — families out, school holidays around it."},
+    {date:isoDay(add(e,1)), name:"Easter Monday", kind:"bank", note:"Bank holiday."},
+    {date:y+"-04-23", name:"St George's Day", kind:"minor", note:""},
+    {date:isoDay(campNthWeekday(y,4,1,1)), name:"Early May bank holiday", kind:"bank", note:"Long weekend."},
+    {date:isoDay(lastMon(4)), name:"Spring bank holiday", kind:"bank", note:"Long weekend; half-term week around it."},
+    {date:isoDay(campNthWeekday(y,5,0,3)), name:"Father's Day", kind:"major", note:"Sunday family meals — wagyu and sharing platters."},
+    {date:y+"-06-18", name:"World Sushi Day", kind:"major", note:"Made for us — offers, chef reels, behind the scenes."},
+    {date:isoDay(lastMon(7)), name:"Summer bank holiday", kind:"bank", note:"Last long weekend of summer."},
+    ...t(MID_AUTUMN, "Mid-Autumn Festival", "minor", "Mooncake season — East Asian guests celebrate."),
+    {date:y+"-10-31", name:"Halloween", kind:"major", note:"Themed specials and spooky reels."},
+    ...t(DIWALI, "Diwali", "minor", "Festival of lights — celebrations and group dinners."),
+    {date:y+"-11-05", name:"Bonfire Night", kind:"minor", note:""},
+    {date:isoDay(bf), name:"Black Friday", kind:"major", note:"Gift card and delivery deals; Christmas booking push starts."},
+    {date:y+"-12-24", name:"Christmas Eve", kind:"minor", note:"Busy lunch, quieter night."},
+    {date:isoDay(xObs), name:"Christmas Day"+(xObs.getTime()!==xmas.getTime()? " (bank holiday)" : ""), kind:"bank", note:"Bank holiday — most restaurants closed or set menu only."},
+    {date:isoDay(bObs), name:"Boxing Day"+(bObs.getTime()!==D(11,26).getTime()? " (bank holiday)" : ""), kind:"bank", note:"Bank holiday — sales shoppers, delivery busy."},
+    {date:y+"-12-31", name:"New Year's Eve", kind:"major", note:"Party night — set menus and bookings."},
+  ];
+  // When Christmas falls on a weekend, show the day itself as well as the substitute bank holiday.
+  if(xObs.getTime()!==xmas.getTime()) list.push({date:y+"-12-25", name:"Christmas Day", kind:"major", note:""});
+  if(bObs.getTime()!==D(11,26).getTime()) list.push({date:y+"-12-26", name:"Boxing Day", kind:"major", note:""});
+  if(nyObs.getTime()!==ny.getTime()) list.push({date:y+"-01-01", name:"New Year's Day", kind:"major", note:""});
+  return list.sort((a,b)=>a.date.localeCompare(b.date));
 }
+// The year plan shows only the big ones (the month view shows everything).
+const ukKeyDates = y => { const seen = new Set(); return ukHolidays(y).filter(h=>((h.kind==="major" && !/^(Boxing Day|New Year's Day)$/.test(h.name)) || h.name==="Christmas Day" || h.name==="Christmas Day (bank holiday)") && !/Christmas Eve/.test(h.name) && !seen.has(h.name.replace(" (bank holiday)", "")) && seen.add(h.name.replace(" (bank holiday)", ""))); };
+const HOLIDAY_TONE = {bank:["var(--red)","var(--red-soft)"], major:["var(--amber)","var(--amber-soft)"], minor:["var(--ink-soft)","var(--surface-2)"]};
 const fmtDay = d => d ? fmtDate(d+"T12:00:00", {day:"numeric", month:"short"}) : "";
 const campRange = c => c.start ? fmtDay(c.start)+(c.end && c.end!==c.start ? " – "+fmtDay(c.end) : "")+" "+c.start.slice(0,4) : "No dates yet";
 const splitList = t => String(t||"").split(/[,\n]+/).map(x=>x.trim().toLowerCase()).filter(Boolean);
@@ -4136,7 +4182,7 @@ function Stat({label, value, sub, tone}){ return <div style={{background:"var(--
   <div style={{fontSize:19, fontWeight:700, color: tone==="neg"? "var(--red)" : tone==="pos"? "var(--green)" : "var(--ink)"}}>{value}</div>{sub && <div style={{fontSize:11.5, color:"var(--ink-mute)"}}>{sub}</div>}</div>; }
 
 /* ---------- Year planner ---------- */
-function YearTimeline({year, camps, onOpen}){
+function YearTimeline({year, camps, onOpen, onMonth}){
   const y0 = Date.UTC(year,0,1), span = Date.UTC(year+1,0,1) - y0;
   const pct = d => Math.max(0, Math.min(100, (Date.parse(d+"T00:00:00Z") - y0) / span * 100));
   const list = camps.filter(c=>inYear(c, year)).sort((a,b)=>a.start.localeCompare(b.start));
@@ -4147,7 +4193,7 @@ function YearTimeline({year, camps, onOpen}){
     <div style={{overflowX:"auto", overflowY:"hidden", WebkitOverflowScrolling:"touch", paddingBottom:6}}>
       <div style={{minWidth:720, position:"relative"}}>
         <div style={{display:"grid", gridTemplateColumns:"repeat(12,1fr)", fontSize:11.5, fontWeight:700, color:"var(--ink-mute)", borderBottom:"1px solid var(--border)", paddingBottom:5}}>
-          {MONTHS_SHORT.map(m=><span key={m} style={{paddingLeft:4}}>{m}</span>)}
+          {MONTHS_SHORT.map((m,i)=><button key={m} onClick={()=>onMonth && onMonth(i)} title={"Open "+m+" "+year} style={{paddingLeft:4, border:"none", background:"none", textAlign:"left", font:"inherit", color:"inherit", cursor:"pointer"}}>{m}</button>)}
         </div>
         <div style={{position:"relative", height: 44 + Math.max(1, lanes.length)*28}}>
           {MONTHS_SHORT.map((m,i)=><span key={m} style={{position:"absolute", top:0, bottom:0, left:(i/12*100)+"%", borderLeft:"1px solid var(--border)", opacity:.6}}/>)}
@@ -4200,10 +4246,10 @@ function CampaignsPage(){
     else dispatch({type:"ADD_CAMPAIGN", campaign:{id:saved.id, brand:BRANDS[0].id, name:saved.name, details:saved.details||"", archived:false, createdAt:new Date().toISOString()}});
     return saved;
   }
-  async function newCamp(){
+  async function newCamp(date, name){
     await run("Creating…", async ()=>{
-      const start = year+"-"+String(new Date().getFullYear()===year ? new Date().getMonth()+1 : 1).padStart(2,"0")+"-01";
-      const c = await saveCamp({id:"c_"+Math.random().toString(36).slice(2,10), name:"New campaign", type:"menu", status:"idea", start, end:start, branches:[...CAMP_BRANCHES], owner:me.id, budget:0,
+      const start = typeof date==="string" ? date : year+"-"+String(new Date().getFullYear()===year ? new Date().getMonth()+1 : 1).padStart(2,"0")+"-01";
+      const c = await saveCamp({id:"c_"+Math.random().toString(36).slice(2,10), name: name || "New campaign", type: name? "holiday" : "menu", status:"idea", start, end:start, branches:[...CAMP_BRANCHES], owner:me.id, budget:0,
         kitchen:{dishes:[], dates:"", notes:""}, tasks:[], collabs:[], track:{items:"", codes:"", emails:""}, results:{}});
       setOpenId(c.id); setTab("plan");
     });
@@ -4216,7 +4262,7 @@ function CampaignsPage(){
       <PageHeader title="Campaigns" subtitle={(admin? "" : "View only — admins can make changes · ")+"Plan the year, track the budget and see what each campaign sold."}
         action={<div style={{display:"flex", gap:8, flexWrap:"wrap", alignItems:"center"}}>
           {!open && <div style={{display:"flex", alignItems:"center", gap:4}}><Button size="sm" onClick={()=>setYear(y=>y-1)}>‹</Button><span style={{fontWeight:700, fontSize:14, minWidth:44, textAlign:"center"}}>{year}</span><Button size="sm" onClick={()=>setYear(y=>y+1)}>›</Button></div>}
-          {admin && !open && <Button variant="primary" size="sm" icon="plus" onClick={newCamp} disabled={!!busy}>New campaign</Button>}
+          {admin && !open && <Button variant="primary" size="sm" icon="plus" onClick={()=>newCamp()} disabled={!!busy}>New campaign</Button>}
         </div>}/>
       {data.err && <div style={{padding:"9px 12px", borderRadius:10, background:"var(--red-soft)", color:"var(--red)", fontSize:13, marginBottom:12}}>{data.err}</div>}
       {busy && <div style={{fontSize:12.5, color:"var(--ink-mute)", marginBottom:8}}>{busy}</div>}
@@ -4224,7 +4270,7 @@ function CampaignsPage(){
         <div style={{display:"flex", gap:6, flexWrap:"wrap", marginBottom:14}}>
           {tabs.map(([k,l])=><button key={k} onClick={()=>setTab(k)} style={{padding:"7px 13px", borderRadius:99, border:"1px solid "+(tab===k? "var(--accent)" : "var(--border)"), background: tab===k? "var(--accent-soft)" : "var(--surface)", color: tab===k? "var(--accent)" : "var(--ink-soft)", fontWeight:700, fontSize:13, cursor:"pointer"}}>{l}</button>)}
         </div>
-        {tab==="plan" && <CampPlan year={year} camps={camps} data={data} admin={admin} onOpen={c=>setOpenId(c.id)} run={run}/>}
+        {tab==="plan" && <CampPlan year={year} setYear={setYear} camps={camps} data={data} admin={admin} onOpen={c=>setOpenId(c.id)} onNew={newCamp} run={run}/>}
         {tab==="budget" && <CampBudget year={year} camps={camps} data={data} admin={admin} run={run} toast={toast}/>}
         {tab==="reports" && <CampReports data={data} admin={admin} toast={toast}/>}
         {tab==="influencers" && <CampInfluencers camps={camps} data={data} admin={admin} toast={toast} onOpen={c=>setOpenId(c.id)}/>}
@@ -4233,22 +4279,111 @@ function CampaignsPage(){
   );
 }
 
-function CampPlan({year, camps, data, admin, onOpen, run}){
+/* Month view: a Mon–Sun calendar. Campaigns run as bars across their days; UK holidays sit on their day with a note
+   in the list below. Admins tap an empty day to start a campaign on it. */
+function MonthCalendar({year, month, camps, admin, onOpen, onNew}){
+  const narrow = useIsNarrow(640);
+  const first = new Date(Date.UTC(year, month, 1)), days = new Date(Date.UTC(year, month+1, 0)).getUTCDate();
+  const lead = (first.getUTCDay()+6)%7;
+  const weeks = []; for(let i=0; i<Math.ceil((lead+days)/7); i++){ const ws = new Date(Date.UTC(year, month, 1 - lead + i*7)); weeks.push(Array.from({length:7}, (_,k)=>{ const d = new Date(ws); d.setUTCDate(ws.getUTCDate()+k); return isoDay(d); })); }
+  const hol = {}; for(const h of [...ukHolidays(year-1), ...ukHolidays(year), ...ukHolidays(year+1)]) (hol[h.date] = hol[h.date] || []).push(h);
+  const today = isoDay(new Date()), mKey = year+"-"+String(month+1).padStart(2,"0");
+  const head = narrow ? 34 : 40, lane = narrow ? 19 : 22;
+  return (
+    <div>
+      <div style={{display:"grid", gridTemplateColumns:"repeat(7, minmax(0,1fr))", fontSize:11, fontWeight:700, color:"var(--ink-mute)", marginBottom:4}}>
+        {(narrow? ["M","T","W","T","F","S","S"] : ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]).map((d,i)=><span key={i} style={{paddingLeft:6}}>{d}</span>)}
+      </div>
+      <div style={{border:"1px solid var(--border)", borderRadius:10, overflow:"hidden"}}>
+        {weeks.map((w, wi)=>{
+          const segs = camps.filter(c=>c.start && c.start<=w[6] && (c.end||c.start)>=w[0]).sort((a,b)=>a.start.localeCompare(b.start) || (b.end||b.start).localeCompare(a.end||a.start));
+          const lanes = []; const placed = segs.map(c=>{ const s0 = Math.max(0, w.indexOf(c.start<w[0]? w[0] : c.start)), e0 = (c.end||c.start)>w[6] ? 6 : w.indexOf(c.end||c.start);
+            let l = lanes.findIndex(x=>x < s0); if(l<0){ l = lanes.length; lanes.push(e0); } else lanes[l] = e0; return {c, s0, e0, l, cont: c.start<w[0], more:(c.end||c.start)>w[6]}; });
+          return (
+            <div key={wi} style={{position:"relative", display:"grid", gridTemplateColumns:"repeat(7, minmax(0,1fr))", minHeight: head + Math.max(1, lanes.length)*lane + 10, borderTop: wi? "1px solid var(--border)" : "none"}}>
+              {w.map((d, k)=>{ const out = !d.startsWith(mKey), hs = hol[d] || [], bank = hs.some(h=>h.kind==="bank");
+                return <div key={d} onClick={()=>admin && onNew(d)} title={(hs.map(h=>h.name).join(", ") || "")+(admin? (hs.length? " · " : "")+"Tap to start a campaign on "+fmtDay(d) : "")}
+                  style={{borderLeft: k? "1px solid var(--border)" : "none", padding:"4px 5px", minWidth:0, cursor: admin? "copy" : "default", background: out? "var(--surface-2)" : bank? "var(--red-soft)" : "transparent", opacity: out? .55 : 1}}>
+                  <div style={{display:"flex", alignItems:"center", gap:4}}>
+                    <span style={{fontSize:12, fontWeight:700, width:21, height:21, lineHeight:"21px", textAlign:"center", borderRadius:99, background: d===today? "var(--accent)" : "transparent", color: d===today? "#fff" : bank? "var(--red)" : "var(--ink)"}}>{+d.slice(8)}</span>
+                  </div>
+                  {hs.length>0 && <div style={{fontSize: narrow? 9 : 10.5, fontWeight:600, color:HOLIDAY_TONE[hs[0].kind][0], whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis", lineHeight:1.2}}>{narrow? "●" : hs[0].name.replace(" (bank holiday)", "")}{!narrow && hs.length>1? " +"+(hs.length-1) : ""}</div>}
+                </div>; })}
+              {placed.map(({c, s0, e0, l, cont, more})=>{ const t = CAMP_TYPES[c.type] || CAMP_TYPES.other;
+                return <button key={c.id} onClick={e=>{ e.stopPropagation(); onOpen(c); }} title={c.name+" · "+campRange(c)}
+                  style={{position:"absolute", top: head + l*lane, left:"calc("+(s0/7*100)+"% + 3px)", width:"calc("+((e0-s0+1)/7*100)+"% - 6px)", height: lane-3,
+                    borderRadius: (cont? "0 " : "5px ")+(more? "0 0 " : "5px 5px ")+(cont? "0" : "5px"), border:"1px solid "+t.c, background:t.s, color:t.c, fontSize: narrow? 10 : 11.5, fontWeight:700,
+                    padding:"0 5px", textAlign:"left", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis", cursor:"pointer", boxSizing:"border-box"}}>{cont? "‹ " : ""}{c.name}</button>; })}
+            </div>);
+        })}
+      </div>
+    </div>
+  );
+}
+async function monthPlanPdf(year, month, camps, share){
+  const mKey = year+"-"+String(month+1).padStart(2,"0"), title = MONTHS_SHORT[month]+" "+year;
+  const full = fmtDate(mKey+"-15", {month:"long", year:"numeric"});
+  const cs = camps.filter(c=>c.start && c.start.slice(0,7)<=mKey && (c.end||c.start).slice(0,7)>=mKey).sort((a,b)=>a.start.localeCompare(b.start));
+  const hs = ukHolidays(year).filter(h=>h.date.startsWith(mKey));
+  const blob = await makePdf({kicker:"SANJUGO · CAMPAIGN PLAN", title:"Campaign plan — "+full, subtitle: cs.length+" campaign"+(cs.length===1?"":"s")+" · "+hs.length+" holidays and key dates", sections:[
+    {heading:"Campaigns", lines: cs.map(c=>"• "+c.name+" — "+(CAMP_TYPES[c.type]||CAMP_TYPES.other).label+" · "+campRange(c)+((c.branches||[]).length? " · "+c.branches.join(", ") : "")+(c.owner? " · "+((USERS.find(u=>u.id===c.owner)||{}).name||"") : ""))},
+    {heading:"UK holidays and key dates", lines: hs.map(h=>"• "+fmtDate(h.date+"T12:00:00", {weekday:"short", day:"numeric", month:"short"})+" — "+h.name+(h.kind==="bank" && !/bank holiday/.test(h.name)? " (bank holiday)" : "")+(h.note? ": "+h.note : ""))},
+  ]});
+  await savePdf(blob, "Sanjugo campaign plan "+title+".pdf", share);
+}
+function CampPlan({year, setYear, camps, data, admin, onOpen, onNew, run}){
+  const now = new Date();
+  const [view, setView] = useState(()=>{ try{ return localStorage.getItem("cf-camp-view") || "year"; }catch(e){ return "year"; } });
+  const [month, setMonth] = useState(year===now.getFullYear() ? now.getMonth() : 0);
+  useEffect(()=>{ try{ localStorage.setItem("cf-camp-view", view); }catch(e){} }, [view]);
+  const go = d => { let m = month + d, y = year; if(m<0){ m = 11; y--; } if(m>11){ m = 0; y++; } setMonth(m); if(y!==year) setYear(y); };
+  const openMonth = m => { setMonth(m); setView("month"); };
   const list = camps.filter(c=>inYear(c, year)).sort((a,b)=>a.start.localeCompare(b.start));
+  const mKey = year+"-"+String(month+1).padStart(2,"0");
+  const monthList = camps.filter(c=>c.start && c.start.slice(0,7)<=mKey && (c.end||c.start).slice(0,7)>=mKey).sort((a,b)=>a.start.localeCompare(b.start));
+  const monthHols = ukHolidays(year).filter(h=>h.date.startsWith(mKey));
   const undated = camps.filter(c=>!c.start && !c.archived);
   const share = canShareFiles();
+  const seg = (k, l) => <button onClick={()=>setView(k)} style={{padding:"6px 14px", border:"none", borderRadius:7, background: view===k? "var(--surface)" : "transparent", boxShadow: view===k? "var(--shadow-sm)" : "none", color: view===k? "var(--ink)" : "var(--ink-mute)", fontWeight:700, fontSize:12.5, cursor:"pointer"}}>{l}</button>;
+  const pdf = shareIt => run("Making the PDF…", ()=> view==="month" ? monthPlanPdf(year, month, camps, shareIt) : yearPlanPdf(year, camps, shareIt));
   return (
     <div style={{display:"flex", flexDirection:"column", gap:14}}>
       <Card style={{padding:14}}>
-        <div style={{display:"flex", alignItems:"center", gap:10, flexWrap:"wrap", marginBottom:10}}>
-          <div style={{display:"flex", gap:6, flexWrap:"wrap", flex:1}}>{Object.entries(CAMP_TYPES).filter(([k])=>k!=="other").map(([k])=><CampPill key={k} type={k}/>)}<span style={{fontSize:11.5, color:"var(--ink-mute)"}}>◆ key dates · <span style={{color:"var(--red)"}}>|</span> today</span></div>
-          <Button size="sm" icon="download" onClick={()=>run("Making the PDF…", ()=>yearPlanPdf(year, camps, false))}>PDF</Button>
-          {share && <Button size="sm" icon="share" onClick={()=>run("Making the PDF…", ()=>yearPlanPdf(year, camps, true))}>Share</Button>}
-          <Button size="sm" icon="file" onClick={()=>downloadCsv([["Campaign","Type","Status","Start","End","Branches","Owner","Budget £"], ...list.map(c=>[c.name, (CAMP_TYPES[c.type]||{}).label, (CAMP_STATUS[c.status]||[])[0], c.start, c.end||c.start, (c.branches||[]).join(" / "), (USERS.find(u=>u.id===c.owner)||{}).name||"", c.budget||0])], "Sanjugo campaign plan "+year+".csv")}>Excel</Button>
+        <div style={{display:"flex", alignItems:"center", gap:10, flexWrap:"wrap", marginBottom:12}}>
+          <div style={{display:"inline-flex", padding:3, borderRadius:9, background:"var(--surface-2)"}}>{seg("month", "Month")}{seg("year", "Year")}</div>
+          {view==="month" && <div style={{display:"flex", alignItems:"center", gap:4}}>
+            <Button size="sm" onClick={()=>go(-1)}>‹</Button>
+            <span style={{fontWeight:700, fontSize:14, minWidth:120, textAlign:"center"}}>{fmtDate(mKey+"-15", {month:"long", year:"numeric"})}</span>
+            <Button size="sm" onClick={()=>go(1)}>›</Button>
+            {(year!==now.getFullYear() || month!==now.getMonth()) && <Button size="sm" variant="subtle" onClick={()=>{ setMonth(now.getMonth()); setYear(now.getFullYear()); }}>Today</Button>}
+          </div>}
+          <span style={{flex:1}}/>
+          <Button size="sm" icon="download" onClick={()=>pdf(false)}>PDF</Button>
+          {share && <Button size="sm" icon="share" onClick={()=>pdf(true)}>Share</Button>}
+          {view==="year" && <Button size="sm" icon="file" onClick={()=>downloadCsv([["Campaign","Type","Status","Start","End","Branches","Owner","Budget £"], ...list.map(c=>[c.name, (CAMP_TYPES[c.type]||{}).label, (CAMP_STATUS[c.status]||[])[0], c.start, c.end||c.start, (c.branches||[]).join(" / "), (USERS.find(u=>u.id===c.owner)||{}).name||"", c.budget||0])], "Sanjugo campaign plan "+year+".csv")}>Excel</Button>}
         </div>
-        {list.length ? <YearTimeline year={year} camps={camps} onOpen={onOpen}/> : <div style={{fontSize:13, color:"var(--ink-mute)", padding:"18px 4px"}}>Nothing planned for {year} yet.{admin? " Tap “New campaign” to start." : ""}</div>}
+        <div style={{display:"flex", gap:6, flexWrap:"wrap", marginBottom:10, alignItems:"center"}}>{Object.entries(CAMP_TYPES).filter(([k])=>k!=="other").map(([k])=><CampPill key={k} type={k}/>)}
+          {view==="month" ? <span style={{fontSize:11.5, color:"var(--ink-mute)"}}><span style={{color:"var(--red)", fontWeight:700}}>■</span> bank holiday · <span style={{color:"var(--amber)", fontWeight:700}}>■</span> key date{admin? " · tap an empty day to start a campaign" : ""}</span>
+            : <span style={{fontSize:11.5, color:"var(--ink-mute)"}}>◆ key dates · <span style={{color:"var(--red)"}}>|</span> today · tap a month to open it</span>}</div>
+        {view==="month" ? <MonthCalendar year={year} month={month} camps={camps} admin={admin} onOpen={onOpen} onNew={onNew}/>
+          : list.length ? <YearTimeline year={year} camps={camps} onOpen={onOpen} onMonth={openMonth}/> : <div style={{fontSize:13, color:"var(--ink-mute)", padding:"18px 4px"}}>Nothing planned for {year} yet.{admin? " Tap “New campaign” to start, or switch to Month and tap a day." : ""}</div>}
       </Card>
-      {list.length>0 && <Card style={{padding:6}}>
+      {view==="month" && <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(300px, 1fr))", gap:14, alignItems:"start"}}>
+        <Card style={{padding:6}}>
+          <div style={{fontWeight:700, fontSize:14, padding:"8px 10px 4px"}}>Campaigns in {MONTHS_SHORT[month]}</div>
+          {monthList.length ? monthList.map(c=><CampRow key={c.id} c={c} data={data} onOpen={onOpen}/>) : <div style={{fontSize:12.5, color:"var(--ink-mute)", padding:"6px 10px 12px"}}>Nothing this month yet.</div>}
+        </Card>
+        <Card style={{padding:14}}>
+          <div style={{fontWeight:700, fontSize:14, marginBottom:8}}>UK holidays and key dates</div>
+          {!monthHols.length ? <div style={{fontSize:12.5, color:"var(--ink-mute)"}}>No holidays this month.</div> : monthHols.map(h=><div key={h.date+h.name} style={{display:"flex", gap:10, padding:"7px 0", borderTop:"1px solid var(--border)"}}>
+            <div style={{minWidth:46, textAlign:"center"}}><div style={{fontSize:16, fontWeight:700, color:HOLIDAY_TONE[h.kind][0]}}>{+h.date.slice(8)}</div><div style={{fontSize:10.5, color:"var(--ink-mute)"}}>{fmtDate(h.date+"T12:00:00", {weekday:"short"})}</div></div>
+            <div style={{flex:1, minWidth:0}}><div style={{fontSize:13, fontWeight:700}}>{h.name}{h.kind==="bank" && <span style={{marginLeft:6, fontSize:10.5, fontWeight:700, padding:"1px 6px", borderRadius:99, background:"var(--red-soft)", color:"var(--red)"}}>Bank holiday</span>}</div>
+              {h.note && <div style={{fontSize:12, color:"var(--ink-soft)", lineHeight:1.45}}>{h.note}</div>}
+              {admin && <button onClick={()=>onNew(h.date, h.name.replace(" (bank holiday)", "")+" "+year)} style={{border:"none", background:"none", padding:0, marginTop:2, color:"var(--accent)", fontWeight:600, fontSize:12, cursor:"pointer"}}>+ Plan a campaign for this</button>}</div>
+          </div>)}
+        </Card>
+      </div>}
+      {view==="year" && list.length>0 && <Card style={{padding:6}}>
         {list.map(c=><CampRow key={c.id} c={c} data={data} onOpen={onOpen}/>)}
       </Card>}
       {undated.length>0 && <div>

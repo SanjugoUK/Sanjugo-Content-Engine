@@ -4249,7 +4249,7 @@ function CampaignsPage(){
   const admin = me.role==="admin";
   const data = useCampData();
   const [tab, setTab] = useState("overview");
-  const [year, setYear] = useState(new Date().getFullYear() + (new Date().getMonth()>=9 ? 1 : 0));
+  const [year, setYear] = useState(new Date().getFullYear());
   const [openId, setOpenId] = useState(null);
   const [busy, setBusy] = useState("");
   const camps = useMemo(()=>campList(data.docs, state.campaigns), [data.docs, state.campaigns]);

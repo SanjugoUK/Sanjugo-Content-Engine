@@ -9186,15 +9186,17 @@ function wsDay(iso){ const d = new Date(iso); return fmtDate(iso, d.getFullYear(
 function wsDays(from, to){ const n = Math.max(0, Math.round((new Date(to||Date.now()) - new Date(from))/86400e3)); return n===0 ? "same day" : n===1 ? "1 day" : n+" days"; }
 // Ideas everyone except the project's creator votes on. Enough No's (3, or everyone if fewer vote) and it's dropped.
 function wsIsRemoved(it, voters){ return (it.no||[]).filter(v=>voters.includes(v)).length >= Math.max(1, Math.min(3, voters.length)); }
-// "Picked" = someone marked it ⭐ Priority, or a majority of the voters (2 of 3) said Yes. Only picked ideas reach the creator.
-const wsNeed = voters=> Math.floor(voters.length/2)+1;
+// "Picked" = someone marked it ⭐ Priority, or 3 Yes votes (everyone, when fewer than 3 people vote). Only picked ideas reach the creator.
+const wsNeed = voters=> Math.min(3, voters.length);
 const wsYes = (it, voters)=> (it.yes||[]).filter(v=>voters.includes(v)).length;
 function wsPicked(it, voters){ return !!it.priority || (voters.length>0 && wsYes(it, voters) >= wsNeed(voters)); }
 // The project's creator and Video Creators only see the picked ideas.
 function wsOnlyPicked(p, userId){ const u = USERS.find(x=>x.id===userId); return !!p && (p.creatorId===userId || (u && u.role==="video")); }
+// Order: ⭐ Priority first, then ideas with Yes votes (most first), then everything else in the order it was added —
+// so an idea nobody has voted on stays where it was put.
 function wsRank(list, voters){
   const n = it=>(it.no||[]).filter(v=>voters.includes(v)).length, y = it=>(it.yes||[]).filter(v=>voters.includes(v)).length;
-  return [...list].sort((a,b)=> (b.priority?1:0)-(a.priority?1:0) || n(a)-n(b) || y(b)-y(a) || b.createdAt.localeCompare(a.createdAt));
+  return [...list].sort((a,b)=> (b.priority?1:0)-(a.priority?1:0) || y(b)-y(a) || (y(a)? n(a)-n(b) : 0) || String(a.createdAt).localeCompare(String(b.createdAt)));
 }
 
 function WsCover({p, height=150}){
@@ -9380,16 +9382,37 @@ function WsMeta({it, act}){
   const a = wsUser(it.author);
   return (
     <div style={{display:"flex", alignItems:"center", gap:6, fontSize:11.5, color:"var(--ink-mute)", minWidth:0}}>
-      <Avatar user={a} size={18}/><span style={{whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>{a.name} · {wsAgo(it.createdAt)}</span>
+      <Avatar user={a} size={18}/><span style={{whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>{a.name} · {wsAgo(it.createdAt)}{it.movedFrom? " · from “"+it.movedFrom.title+"”" : ""}</span>
+      {(it.kind==="idea" || it.kind==="link") && <WsMove it={it} act={act}/>}
       <WsDelete it={it} act={act}/>
     </div>
   );
+}
+/* Move an idea (with its votes and comments) to another project. */
+function WsMove({it, act}){
+  const {state} = useApp();
+  const me = USERS.find(u=>u.id===state.currentUserId) || {};
+  const [open, setOpen] = useState(false), [list, setList] = useState(null), [to, setTo] = useState("");
+  if(me.role==="video" && it.author!==me.id) return null;
+  async function show(){ setOpen(true); try{ const d = await fetch("/api/workspace").then(r=>r.json()); setList((d.projects||[]).filter(p=>p.id!==it.projectId && !p.filed)); }catch(e){ setList([]); } }
+  async function move(){ const p = list.find(x=>x.id===to); if(await act("/item/move", {id:it.id, projectId:to}, "Moved to “"+(p? p.title : "the other project")+"”")) setOpen(false); }
+  return <>
+    <button title="Move to another project" onClick={show} style={{border:"none", background:"none", padding:2, cursor:"pointer", color:"var(--ink-mute)", marginLeft:"auto", fontSize:11.5, fontWeight:600, display:"inline-flex", alignItems:"center", gap:3}}><Icon name="folder" size={13}/>Move</button>
+    {open && <Modal open onClose={()=>setOpen(false)} width={420}><div style={{padding:20}}>
+      <h3 style={{margin:"0 0 6px", fontSize:17}}>Move this idea</h3>
+      <div style={{fontSize:12.5, color:"var(--ink-mute)", marginBottom:12}}>Its votes and comments go with it.</div>
+      {list===null ? <div style={{fontSize:13, color:"var(--ink-mute)"}}>Loading projects…</div> : !list.length ? <div style={{fontSize:13, color:"var(--ink-mute)"}}>No other open projects.</div> :
+        <div style={{display:"flex", flexDirection:"column", gap:6, maxHeight:320, overflowY:"auto"}}>{list.map(p=><label key={p.id} style={{display:"flex", alignItems:"center", gap:10, padding:"9px 11px", borderRadius:10, border:"1px solid "+(to===p.id? "var(--accent)" : "var(--border)"), background: to===p.id? "var(--accent-soft)" : "var(--surface)", cursor:"pointer", fontSize:13}}>
+          <input type="radio" checked={to===p.id} onChange={()=>setTo(p.id)}/><span style={{flex:1, minWidth:0, fontWeight:600}}>{p.title}</span><WsStatusBadge status={p.status}/></label>)}</div>}
+      <div style={{display:"flex", justifyContent:"flex-end", gap:8, marginTop:16}}><Button onClick={()=>setOpen(false)}>Cancel</Button><Button variant="primary" disabled={!to} onClick={move}>Move</Button></div>
+    </div></Modal>}
+  </>;
 }
 function WsDelete({it, act}){
   const {state} = useApp();
   const me = USERS.find(u=>u.id===state.currentUserId);
   if(it.kind==="draft" || !(it.author===me.id || me.role==="admin")) return null;
-  return <button title="Delete" onClick={()=>{ if(confirm("Delete this?")) act("/item/delete", {id:it.id}); }} style={{border:"none", background:"none", padding:2, cursor:"pointer", color:"var(--ink-mute)", marginLeft:"auto"}}><Icon name="trash" size={13}/></button>;
+  return <button title="Delete" onClick={()=>{ if(confirm("Delete this?")) act("/item/delete", {id:it.id}); }} style={{border:"none", background:"none", padding:2, cursor:"pointer", color:"var(--ink-mute)", marginLeft: it.kind==="idea" || it.kind==="link" ? 4 : "auto"}}><Icon name="trash" size={13}/></button>;
 }
 
 // ⭐ Priority (top right of an idea): anyone on the team taps it and the idea goes straight to the creator, votes or not.
@@ -9436,8 +9459,13 @@ function WsIdeaMedia({it, height}){
     </div>
   );
   return (
-    <div style={{height: play && e.src ? "min(78vh, 640px)" : height, borderRadius:10, background:"#0d0d10", position:"relative", overflow:"hidden", transition:"height .2s"}}>
-      {e.src && play ? <iframe src={e.src} title="Reference reel" loading="lazy" allow="autoplay; encrypted-media; picture-in-picture" allowFullScreen style={{position:"absolute", inset:0, width:"100%", height:"100%", border:0, background:"#fff"}}/> : (
+    <div style={{height, borderRadius:10, background:"#0d0d10", position:"relative", overflow:"hidden"}}>
+      {e.src && play && <Modal open onClose={()=>setPlay(false)} width={420}><div style={{position:"relative"}}>
+        <button onClick={()=>setPlay(false)} aria-label="Close" style={{position:"absolute", top:8, right:8, zIndex:2, width:32, height:32, borderRadius:99, border:"none", background:"rgba(0,0,0,.6)", color:"#fff", cursor:"pointer"}}>✕</button>
+        <iframe src={e.src} title="Reference reel" allow="autoplay; encrypted-media; picture-in-picture" allowFullScreen style={{display:"block", width:"100%", height:"min(78vh, 680px)", border:0, background:"#fff"}}/>
+        {it.text && <div style={{padding:"10px 14px", fontSize:13, lineHeight:1.45}}>{it.text}</div>}
+      </div></Modal>}
+      {(
         <button onClick={()=> e.src ? setPlay(true) : window.open(it.url, "_blank", "noopener")} style={{position:"absolute", inset:0, border:"none", background:"none", cursor:"pointer", color:"#fff", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:10}}>
           {e.platform ? <PlatformIcon platform={e.platform} size={26}/> : <Icon name="link" size={26}/>}
           <span style={{fontSize:12.5, fontWeight:600, display:"flex", alignItems:"center", gap:6}}><Icon name={e.src? "play":"external"} size={14}/>{e.src? "Play here" : "Open link"}</span>

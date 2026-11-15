@@ -1044,6 +1044,10 @@ function initState(){
 function reducer(state, action){
   const next = baseReducer(state, action);
   if(action.type==="LOAD_STATE" || action.type==="MERGE_SERVER" || next.contentItems===state.contentItems) return next;
+  // A Make result ("published", "failed") isn't an edit: keep the post's time so an out-of-date copy on this device can't
+  // beat a newer copy on the server (that's how an approved TikTok slipped back to "waiting for approval"). Once this
+  // device has the server's copy, the result is applied to that and saved.
+  if(action.type==="MAKE_JOB_RESULT") return next;
   const before = new Map(state.contentItems.map(i=>[i.id, i]));
   const now = new Date().toISOString();
   return {...next, contentItems: next.contentItems.map(i=> before.get(i.id)===i ? i : {...i, updatedAt: now})};
@@ -1363,6 +1367,7 @@ const NAV_ITEMS = [
   {id:"campaigns", label:"Campaigns", icon:"megaphone"},
   {id:"library", label:"Content Library", icon:"grid"},
   {id:"published", label:"Published Content", icon:"published"},
+  {id:"email", label:"Email Marketing", icon:"send"},
   {id:"analytics", label:"Analytics", icon:"analytics"},
   {id:"settings", label:"Settings", icon:"settings"},
 ];
@@ -4255,7 +4260,7 @@ function CampaignsPage(){
     });
   }
   const open = camps.find(c=>c.id===openId);
-  const tabs = [["plan","Plan"],["budget","Budget"],["reports","Sales & email reports"],["influencers","Influencers"]];
+  const tabs = [["plan","Plan"],["budget","Budget"],["reports","Sales reports"],["influencers","Influencers"]];
   if(data.docs===null) return <div><PageHeader title="Campaigns" subtitle="Loading…"/><Skeleton h={220}/></div>;
   return (
     <div>
@@ -4431,6 +4436,11 @@ function CampaignDetail({camp, camps, data, admin, onBack, saveCamp, toast}){
   const costs = (data.docs||[]).filter(d=>d.kind==="cost" && d.campaignId===c.id).sort((a,b)=>String(b.date).localeCompare(String(a.date)));
   const spent = costs.reduce((a,x)=>a+(+x.amount||0), 0);
   const posts = state.contentItems.filter(i=>i.campaign===c.id);
+  // Real numbers of the posts made for this campaign (pulled from Instagram, Facebook, YouTube… via Make).
+  const realData = useRealAnalytics();
+  const postStats = useMemo(()=>realAnalyticsPosts(realData, state.contentItems).filter(p=>p.campaign===c.id), [realData, state.contentItems, c.id]);
+  const ps = postStats.reduce((a,p)=>({views:a.views+p.views, likes:a.likes+p.likes, comments:a.comments+p.comments, shares:a.shares+p.shares, saves:a.saves+p.saves}), {views:0, likes:0, comments:0, shares:0, saves:0});
+  const psEng = ps.views ? (ps.likes+ps.comments+ps.shares+ps.saves)/ps.views*100 : 0;
   const res = campResults(c, data.docs);
   const views = (c.collabs||[]).reduce((a,col)=>a+collabViews(col, data.study).n, 0);
   const extra = +(c.results && c.results.extraSales) || 0;
@@ -4464,7 +4474,8 @@ function CampaignDetail({camp, camps, data, admin, onBack, saveCamp, toast}){
           c.results && c.results.sold ? "Sold (typed in): "+c.results.sold : "",
           extra? "Extra sales: "+money(extra) : "", "Spent: "+money(spent)+(c.budget? " of "+money(c.budget)+" budget" : ""),
           salesForReturn && spent ? "Return: "+(salesForReturn/spent).toFixed(1)+"x (sales ÷ spend)" : "",
-          views? "Influencer views: "+views.toLocaleString("en-GB") : "", posts.length? "Our posts: "+posts.length : ""].filter(Boolean)},
+          views? "Influencer views: "+views.toLocaleString("en-GB") : "", posts.length? "Our posts: "+posts.length+(postStats.length? " · "+ps.views.toLocaleString("en-GB")+" views · "+psEng.toFixed(1)+"% engagement" : "") : ""].filter(Boolean)},
+        {heading:"Our posts", lines: postStats.map(p=>PLATFORM_META[p.platform].label+" · "+p.contentTitle+" · "+fmtDay(p.publishedAt.slice(0,10))+": "+p.views.toLocaleString("en-GB")+" views, "+p.likes+" likes, "+p.comments+" comments, "+p.shares+" shares, "+p.saves+" saves")},
         {heading:"By report", lines: res.lines.map(l=>REPORT_SOURCES[l.source]+" "+l.month+": "+l.qty+" sold · "+money(l.sales)+(l.codes.length? " · codes "+l.codes.map(x=>x.code+" ×"+x.count).join(", ") : ""))},
         {heading:"Emails", lines: res.mail.map(e=>e.name+": "+(e.openRate!=null? e.openRate+"% opened" : "")+(e.clickRate!=null? " · "+e.clickRate+"% clicked" : "")+(e.bookings? " · "+e.bookings+" bookings" : ""))},
         {heading:"Influencers", lines:(c.collabs||[]).map(col=>col.handle+" — "+(col.status||"")+" · "+collabViews(col, data.study).n.toLocaleString("en-GB")+" views · "+money(col.cost))},
@@ -4509,7 +4520,8 @@ function CampaignDetail({camp, camps, data, admin, onBack, saveCamp, toast}){
         <Stat label="Extra sales" value={extra? money(extra) : "—"} sub="typed in below"/>
         <Stat label="Return" value={salesForReturn && spent ? (salesForReturn/spent).toFixed(1)+"×" : "—"} sub="sales ÷ spend"/>
         <Stat label="Influencer views" value={views? views.toLocaleString("en-GB") : "—"} sub={(c.collabs||[]).length+" collab"+((c.collabs||[]).length===1?"":"s")}/>
-        <Stat label="Our posts" value={posts.length||"—"} sub="linked in Create"/>
+        <Stat label="Our posts" value={posts.length||"—"} sub={postStats.length? postStats.length+" live · "+ps.views.toLocaleString("en-GB")+" views" : "linked in Create"}/>
+        {postStats.length>0 && <Stat label="Engagement" value={psEng.toFixed(1)+"%"} sub={(ps.likes+ps.comments+ps.shares+ps.saves).toLocaleString("en-GB")+" likes, comments, shares, saves"}/>}
       </div>
       <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(300px, 1fr))", gap:12, alignItems:"start"}}>
         <CampSection title="Kitchen brief" icon="bulb" action={<div style={{display:"flex", gap:6}}><Button size="sm" icon="download" onClick={()=>kitchenPdf(false)}>PDF</Button>{share && <Button size="sm" icon="share" onClick={()=>kitchenPdf(true)}>Share</Button>}</div>}>
@@ -4575,7 +4587,8 @@ function CampaignDetail({camp, camps, data, admin, onBack, saveCamp, toast}){
           {!posts.length ? <div style={{fontSize:12.5, color:"var(--ink-mute)"}}>No posts yet. Pick this campaign in Create (step 1) and they show here.</div> :
             posts.slice(0, 12).map(p=><button key={p.id} onClick={()=>dispatch({type:"SET_ROUTE", route:"calendar"})} style={{display:"flex", width:"100%", gap:8, alignItems:"center", padding:"5px 0", border:"none", background:"none", cursor:"pointer", textAlign:"left", color:"var(--ink)"}}>
               <div style={{width:34, height:34, flexShrink:0}}><Thumb item={p} radius={6} iconSize={12}/></div>
-              <span style={{flex:1, fontSize:12.5, minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>{p.title}</span><StatusBadge status={p.status}/></button>)}
+              <span style={{flex:1, fontSize:12.5, minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>{p.title}
+                {(()=>{ const st = postStats.filter(x=>x.contentId===p.id); return st.length ? <span style={{display:"block", fontSize:11, color:"var(--ink-mute)"}}>{st.map(x=>PLATFORM_META[x.platform].label+" "+x.views.toLocaleString("en-GB")+" views · "+x.engagementRate.toFixed(1)+"%").join(" · ")}</span> : null; })()}</span><StatusBadge status={p.status}/></button>)}
         </CampSection>
       </div>
       {admin && <div style={{display:"flex", justifyContent:"flex-end"}}><ConfirmButton confirmLabel="Yes, delete this campaign" onConfirm={remove}>Delete campaign</ConfirmButton></div>}
@@ -4748,13 +4761,13 @@ function CampReports({data, admin, toast}){
   const reports = (data.docs||[]).filter(d=>d.kind==="report").sort((a,b)=>String(b.month).localeCompare(String(a.month)));
   const [up, setUp] = useState(null);
   const [view, setView] = useState(null);
-  const months = [...new Set(reports.map(r=>r.month))].slice(0, 6);
+  const months = [...new Set(reports.filter(r=>r.source!=="sevenrooms").map(r=>r.month))].slice(0, 6);
   const emails = reports.filter(r=>r.source==="sevenrooms").flatMap(r=>((r.summary||{}).emails||[]).map(e=>({...e, month:r.month}))).sort((a,b)=>String(b.date||b.month).localeCompare(String(a.date||a.month)));
   return (
     <div style={{display:"flex", flexDirection:"column", gap:14}}>
-      <div style={{fontSize:12.5, color:"var(--ink-mute)"}}>Upload each month's report (CSV, Excel or PDF) and AI reads the numbers. Check them, then save. Campaign pages use them to count what each campaign sold.</div>
+      <div style={{fontSize:12.5, color:"var(--ink-mute)"}}>Upload each month's report (CSV, Excel or PDF) and AI reads the numbers. Check them, then save. Campaign pages use them to count what each campaign sold. SevenRooms email reports are under <b>Email Marketing</b> in the menu.</div>
       <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(160px, 1fr))", gap:10}}>
-        {Object.entries(REPORT_SOURCES).map(([k,l])=>{ const mine = reports.filter(r=>r.source===k); return (
+        {Object.entries(REPORT_SOURCES).filter(([k])=>k!=="sevenrooms").map(([k,l])=>{ const mine = reports.filter(r=>r.source===k); return (
           <Card key={k} style={{padding:14, textAlign:"center"}}>
             <div style={{fontWeight:700, fontSize:13.5}}>{l}</div>
             <div style={{fontSize:11.5, color:"var(--ink-mute)", margin:"4px 0 8px", minHeight:16}}>{mine.length? mine.slice(0,3).map(r=>fmtDate(r.month+"-15", {month:"short", year:"2-digit"})+" ✓").join(" · ") : "Nothing yet"}</div>
@@ -4764,18 +4777,10 @@ function CampReports({data, admin, toast}){
       {reports.length>0 && <Card style={{padding:14}}>
         <div style={{fontWeight:700, fontSize:14, marginBottom:8}}>Monthly totals</div>
         <div style={{overflowX:"auto"}}><table style={{width:"100%", borderCollapse:"collapse", fontSize:12.5, minWidth:520}}>
-          <thead><tr style={{color:"var(--ink-mute)", textAlign:"left"}}><th style={{padding:"5px 4px"}}>Month</th>{["pos","deliveroo","ubereats"].map(k=><th key={k}>{REPORT_SOURCES[k]}</th>)}<th>Emails</th></tr></thead>
+          <thead><tr style={{color:"var(--ink-mute)", textAlign:"left"}}><th style={{padding:"5px 4px"}}>Month</th>{["pos","deliveroo","ubereats"].map(k=><th key={k}>{REPORT_SOURCES[k]}</th>)}</tr></thead>
           <tbody>{months.map(m=><tr key={m} style={{borderTop:"1px solid var(--border)"}}><td style={{padding:"6px 4px", fontWeight:700}}>{fmtDate(m+"-15", {month:"long", year:"numeric"})}</td>
-            {["pos","deliveroo","ubereats","sevenrooms"].map(k=>{ const r = reports.find(x=>x.source===k && x.month===m); const s = (r||{}).summary||{};
+            {["pos","deliveroo","ubereats"].map(k=>{ const r = reports.find(x=>x.source===k && x.month===m); const s = (r||{}).summary||{};
               return <td key={k}>{!r ? <span style={{color:"var(--ink-mute)"}}>—</span> : <button onClick={()=>setView(r)} style={{border:"none", background:"none", padding:0, color:"var(--accent)", fontWeight:600, cursor:"pointer", fontSize:12.5}}>{k==="sevenrooms" ? ((s.emails||[]).length+" emails") : (s.totalSales!=null? money(s.totalSales) : "open")}{s.orders && k!=="sevenrooms" ? " · "+s.orders.toLocaleString("en-GB")+" orders" : ""}</button>}</td>; })}</tr>)}</tbody>
-        </table></div>
-      </Card>}
-      {emails.length>0 && <Card style={{padding:14}}>
-        <div style={{fontWeight:700, fontSize:14, marginBottom:8}}>Email marketing (SevenRooms)</div>
-        <div style={{overflowX:"auto"}}><table style={{width:"100%", borderCollapse:"collapse", fontSize:12.5, minWidth:520}}>
-          <thead><tr style={{color:"var(--ink-mute)", textAlign:"left"}}><th style={{padding:"5px 4px"}}>Email</th><th>Date</th><th>Sent</th><th>Opened</th><th>Clicked</th><th>Bookings</th></tr></thead>
-          <tbody>{emails.slice(0, 30).map((e,i)=><tr key={i} style={{borderTop:"1px solid var(--border)"}}><td style={{padding:"6px 4px", fontWeight:600}}>{e.name}</td><td>{e.date? fmtDay(e.date) : e.month}</td><td>{e.sent? (+e.sent).toLocaleString("en-GB") : "—"}</td>
-            <td>{e.openRate!=null? e.openRate+"%" : "—"}</td><td>{e.clickRate!=null? e.clickRate+"%" : "—"}</td><td>{e.bookings||"—"}</td></tr>)}</tbody>
         </table></div>
       </Card>}
       {up && <ReportUpload preset={up} data={data} toast={toast} exists={id=>reports.some(r=>r.id===id)} onClose={()=>setUp(null)}/>}
@@ -4911,6 +4916,74 @@ function InfluencerModal({inf, data, toast, onClose}){
     </div>
     <div style={{display:"flex", justifyContent:"flex-end", gap:8, marginTop:16}}><Button onClick={onClose}>Cancel</Button><Button variant="primary" onClick={save} disabled={busy}>{busy? "Saving…" : "Save"}</Button></div>
   </div></Modal>;
+}
+
+/* ---------- Email marketing (SevenRooms) ----------
+   Monthly SevenRooms reports, read by AI like the sales reports: every email with sent / opened / clicked / bookings,
+   month-by-month trends, and which campaign each email belonged to. */
+function EmailMarketingPage(){
+  const {state, dispatch} = useApp();
+  const me = USERS.find(u=>u.id===state.currentUserId) || {};
+  const admin = me.role==="admin";
+  const data = useCampData();
+  const [up, setUp] = useState(null), [view, setView] = useState(null);
+  const [sort, setSort] = useState("date");
+  const toast = (message, variant)=>dispatch({type:"ADD_TOAST", message, variant});
+  const camps = useMemo(()=>campList(data.docs, state.campaigns), [data.docs, state.campaigns]);
+  if(data.docs===null) return <div><PageHeader title="Email Marketing" subtitle="Loading…"/><Skeleton h={200}/></div>;
+  const reports = data.docs.filter(d=>d.kind==="report" && d.source==="sevenrooms").sort((a,b)=>String(b.month).localeCompare(String(a.month)));
+  const campOf = e => camps.find(c=>{ const names = splitList(c.track && c.track.emails); const nm = String(e.name||"").toLowerCase();
+    return names.length ? names.some(w=>nm.includes(w)) : (e.date && c.start && e.date>=c.start && e.date<=(c.end||c.start) && c.type==="email"); });
+  const emails = reports.flatMap(r=>((r.summary||{}).emails||[]).map(e=>({...e, month:r.month})));
+  const num = v => v==null || v==="" ? null : +v;
+  const avg = (list, k) => { const v = list.map(e=>num(e[k])).filter(x=>x!=null); return v.length ? v.reduce((a,b)=>a+b, 0)/v.length : null; };
+  const sum = (list, k) => list.reduce((a,e)=>a+(num(e[k])||0), 0);
+  const recent = emails.filter(e=>String(e.date||e.month+"-01") >= isoDay(new Date(Date.now()-365*86400e3)));
+  const sorted = [...emails].sort((a,b)=> sort==="date" ? String(b.date||b.month).localeCompare(String(a.date||a.month)) : (num(b[sort])||0)-(num(a[sort])||0));
+  const best = [...recent].filter(e=>num(e.openRate)!=null).sort((a,b)=>num(b.openRate)-num(a.openRate))[0];
+  const months = [...new Set(emails.map(e=>e.month))].sort().reverse().slice(0, 12);
+  const pct = v => v==null ? "—" : (+v).toFixed(1).replace(/\.0$/, "")+"%";
+  const th = (k, l) => <th style={{padding:"6px 4px", cursor:"pointer", color: sort===k? "var(--accent)" : undefined}} onClick={()=>setSort(k)}>{l}{sort===k? " ↓" : ""}</th>;
+  return (
+    <div>
+      <PageHeader title="Email Marketing" subtitle="SevenRooms emails — upload each month's report and see what people opened, clicked and booked."
+        action={admin && <Button variant="primary" size="sm" icon="upload" onClick={()=>setUp({source:"sevenrooms", month:prevMonth()})}>Upload report</Button>}/>
+      {data.err && <div style={{padding:"9px 12px", borderRadius:10, background:"var(--red-soft)", color:"var(--red)", fontSize:13, marginBottom:12}}>{data.err}</div>}
+      {!reports.length ? <Card><EmptyState icon="send" title="No email reports yet" subtitle={"In SevenRooms, export last month's email campaign report (CSV, Excel or PDF)"+(admin? " and upload it here. AI reads the numbers; you check them before saving." : ". An admin uploads it here.")}
+        action={admin && <Button variant="primary" icon="upload" onClick={()=>setUp({source:"sevenrooms", month:prevMonth()})}>Upload report</Button>}/></Card> : <div style={{display:"flex", flexDirection:"column", gap:14}}>
+        <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(140px, 1fr))", gap:8}}>
+          <Stat label="Emails (last 12 months)" value={recent.length} sub={sum(recent, "sent")? sum(recent, "sent").toLocaleString("en-GB")+" sent" : null}/>
+          <Stat label="Average opened" value={pct(avg(recent, "openRate"))}/>
+          <Stat label="Average clicked" value={pct(avg(recent, "clickRate"))}/>
+          <Stat label="Bookings from emails" value={sum(recent, "bookings")? sum(recent, "bookings").toLocaleString("en-GB") : "—"} sub={sum(recent, "revenue")? money(sum(recent, "revenue")) : null}/>
+          {best && <Stat label="Best opened" value={pct(best.openRate)} sub={best.name}/>}
+        </div>
+        <Card style={{padding:14}}>
+          <div style={{fontWeight:700, fontSize:14, marginBottom:8}}>Month by month</div>
+          <div style={{overflowX:"auto"}}><table style={{width:"100%", borderCollapse:"collapse", fontSize:12.5, minWidth:520}}>
+            <thead><tr style={{color:"var(--ink-mute)", textAlign:"left"}}><th style={{padding:"6px 4px"}}>Month</th><th>Emails</th><th>Sent</th><th>Opened</th><th>Clicked</th><th>Bookings</th><th/></tr></thead>
+            <tbody>{months.map(m=>{ const es = emails.filter(e=>e.month===m), r = reports.find(x=>x.month===m); return (
+              <tr key={m} style={{borderTop:"1px solid var(--border)"}}><td style={{padding:"7px 4px", fontWeight:700}}>{fmtDate(m+"-15", {month:"long", year:"numeric"})}</td><td>{es.length}</td><td>{sum(es, "sent")? sum(es, "sent").toLocaleString("en-GB") : "—"}</td>
+                <td>{pct(avg(es, "openRate"))}</td><td>{pct(avg(es, "clickRate"))}</td><td>{sum(es, "bookings") || "—"}</td>
+                <td>{r && <button onClick={()=>setView(r)} style={{border:"none", background:"none", color:"var(--accent)", fontWeight:600, cursor:"pointer", fontSize:12.5}}>{admin? "Check / edit" : "Open"}</button>}</td></tr>); })}</tbody>
+          </table></div>
+        </Card>
+        <Card style={{padding:14}}>
+          <div style={{fontWeight:700, fontSize:14, marginBottom:8}}>Every email <span style={{fontWeight:400, fontSize:12, color:"var(--ink-mute)"}}>· tap a heading to sort</span></div>
+          <div style={{overflowX:"auto"}}><table style={{width:"100%", borderCollapse:"collapse", fontSize:12.5, minWidth:640}}>
+            <thead><tr style={{color:"var(--ink-mute)", textAlign:"left"}}><th style={{padding:"6px 4px"}}>Email</th>{th("date", "Date")}{th("sent", "Sent")}{th("openRate", "Opened")}{th("clickRate", "Clicked")}{th("bookings", "Bookings")}<th>Campaign</th></tr></thead>
+            <tbody>{sorted.slice(0, 100).map((e,i)=>{ const c = campOf(e); return (
+              <tr key={i} style={{borderTop:"1px solid var(--border)"}}><td style={{padding:"7px 4px", fontWeight:600}}>{e.name}</td><td>{e.date? fmtDay(e.date) : e.month}</td><td>{num(e.sent)!=null? (+e.sent).toLocaleString("en-GB") : "—"}</td>
+                <td style={{fontWeight:700, color: num(e.openRate)!=null && avg(recent, "openRate")!=null ? (+e.openRate >= avg(recent, "openRate") ? "var(--green)" : "var(--ink)") : "var(--ink)"}}>{pct(e.openRate)}</td><td>{pct(e.clickRate)}</td><td>{e.bookings||"—"}</td>
+                <td>{c ? <button onClick={()=>dispatch({type:"SET_ROUTE", route:"campaigns"})} style={{border:"none", background:"none", padding:0, color:"var(--accent)", fontWeight:600, cursor:"pointer", fontSize:12.5}}>{c.name}</button> : <span style={{color:"var(--ink-mute)"}}>—</span>}</td></tr>); })}</tbody>
+          </table></div>
+          <div style={{fontSize:11.5, color:"var(--ink-mute)", marginTop:8}}>An email is linked to a campaign when its name is listed under that campaign's Results → "Emails", or when it was sent during an Email-type campaign.</div>
+        </Card>
+      </div>}
+      {up && <ReportUpload preset={up} data={data} toast={toast} exists={id=>reports.some(r=>r.id===id)} onClose={()=>setUp(null)}/>}
+      {view && <ReportView r={view} admin={admin} data={data} toast={toast} onClose={()=>setView(null)}/>}
+    </div>
+  );
 }
 
 /* Reload everything — new posts, chat, approvals and the newest app version (an app on the Home Screen has no reload button). */
@@ -10490,9 +10563,9 @@ function App(){
     dashboard: <DashboardPage/>, calendar: <ContentCalendarPage/>, queue: <ApprovalQueuePage key={state.queueTab||""}/>,
     create: <CreateContentPage key={JSON.stringify(state.createPrefill||{})}/>, published: <PublishedContentPage/>, analytics: <AnalyticsPage/>,
     team: <SettingsPage/>, settings: <SettingsPage/>, chat: <ChatPage/>, library: <LibraryPage key={state.libraryQuery||""}/>,
-    workspace: <WorkspacePage key={state.workspaceProject||""}/>, campaigns: <CampaignsPage/>,
+    workspace: <WorkspacePage key={state.workspaceProject||""}/>, campaigns: <CampaignsPage/>, email: <EmailMarketingPage/>,
   };
-  const titles = {dashboard:"Sanjugo Dashboard", calendar:"Calendar", queue:"Approval Queue", create:"Create Content", published:"Published", analytics:"Analytics", team:"Team", settings:"Settings", chat:"Team Chat", library:"Content Library", workspace:"Workspace", campaigns:"Campaigns"};
+  const titles = {dashboard:"Sanjugo Dashboard", calendar:"Calendar", queue:"Approval Queue", create:"Create Content", published:"Published", analytics:"Analytics", team:"Team", settings:"Settings", chat:"Team Chat", library:"Content Library", workspace:"Workspace", campaigns:"Campaigns", email:"Email Marketing"};
 
   if(state.lock) return <LockScreen lock={state.lock}/>;
   const accessOn = !!(state.me && state.me.accessEnabled);

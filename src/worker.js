@@ -244,6 +244,10 @@ async function guardApprovals(env, body, stored, viewer) {
       if (added.some((id) => id !== me || !canApprove)) bad = true;
       const wasApproved = ((prev.variants || {})[p] || {}).status === "approved";
       if (v && v.status === "approved" && !wasApproved && !approvalsDone(it, v.approvals, reviewers)) bad = true;
+      // An approved platform only goes back to waiting when the post is edited and resubmitted (a new version) or an
+      // approver undoes it. Anything else is an old copy from another device overwriting the approval.
+      if (v && wasApproved && ["submitted", "draft"].includes(v.status) && !canApprove && (+it.currentVersion || 1) <= (+prev.currentVersion || 1)) bad = true;
+      if (v && ((prev.variants || {})[p] || {}).publishStatus === "published" && v.publishStatus !== "published" && !canApprove) bad = true;
     }
     if ((it.approver || "any") !== (prev.approver || "any") && !canApprove && !["draft", "changes_requested", "rejected"].includes(prev.status)) bad = true;
     if (it.status === "approved" && prev.status !== "approved" && prev.status !== "scheduled" &&

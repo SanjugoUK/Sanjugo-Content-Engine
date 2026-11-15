@@ -4100,18 +4100,27 @@ async function reportFileText(file){
 
 function useCampData(){
   const {state} = useApp();
-  const [docs, setDocs] = useState(null), [study, setStudy] = useState([]), [err, setErr] = useState("");
+  const [docs, setDocs] = useState(null), [study, setStudy] = useState([]), [err, setErr] = useState(""), [projects, setProjects] = useState([]);
   const load = useCallback(async ()=>{
     try{ const r = await fetch("/api/camp"); const d = await r.json().catch(()=>({})); if(!r.ok) throw new Error(d.error || "Couldn't load campaigns"); setDocs(d.docs || []); setErr(""); }
     catch(e){ setErr(e.message); setDocs(ds=>ds || []); }
     fetch("/api/study").then(r=>r.json()).then(d=>setStudy(d.entries || [])).catch(()=>{});
+    fetch("/api/workspace").then(r=>r.json()).then(d=>setProjects(d.projects || [])).catch(()=>{});
   }, []);
   useEffect(()=>{ load(); }, []);
   const post = async (path, body)=>{ const r = await fetch("/api/camp/"+path, {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({...body, userId: state.currentUserId})});
     const d = await r.json().catch(()=>({})); if(!r.ok) throw new Error(d.error || "Couldn't save"); return d; };
   const save = async doc=>{ const d = await post("save", {doc}); setDocs(ds=>[...(ds||[]).filter(x=>x.id!==d.doc.id), d.doc]); return d.doc; };
   const del = async id=>{ await post("delete", {id}); setDocs(ds=>(ds||[]).filter(x=>x.id!==id)); };
-  return {docs, study, err, load, save, del, setStudy, post};
+  // Workspace shoots count as Food costs (to their campaign if they have one), so budgets and charts include them.
+  const all = useMemo(()=>{
+    if(!docs) return docs;
+    const menu = docs.find(d=>d.kind==="menu") || {prices:{}};
+    const shoots = projects.filter(p=>(p.food||[]).length).map(p=>({kind:"cost", id:"ws_"+p.id, virtual:true, projectId:p.id, date:(p.due || p.createdAt || "").slice(0,10), campaignId:p.campaignId||"",
+      category:"Food", supplier:"Workspace shoot", note:p.title, amount: Math.round(foodTotal(p.food, menu)*100)/100})).filter(x=>x.amount>0);
+    return [...docs, ...shoots];
+  }, [docs, projects]);
+  return {docs: all, rawDocs: docs, projects, study, err, load, save, del, setStudy, post};
 }
 function guessCampType(name){ const n = String(name||"").toLowerCase();
   return /lunch|menu|creation|dish|roll|ramen|sushi/.test(n) ? "menu" : /influenc|collab/.test(n) ? "influencer" : /christmas|new year|valentine|easter|halloween|mother|father/.test(n) ? "holiday" : /email|newsletter/.test(n) ? "email" : "offer"; }
@@ -4266,7 +4275,7 @@ function CampaignsPage(){
   if(data.docs===null) return <div><PageHeader title="Campaigns" subtitle="Loading…"/><Skeleton h={220}/></div>;
   return (
     <div>
-      <PageHeader title="Campaigns" subtitle={(admin? "" : "View only — admins can make changes · ")+"Plan the year, track the budget and see what each campaign sold."}
+      <PageHeader title="Campaigns" subtitle={admin? "Plan, budget and results" : "View only — admins make changes"}
         action={<div style={{display:"flex", gap:8, flexWrap:"wrap", alignItems:"center"}}>
           {!open && <div style={{display:"flex", alignItems:"center", gap:4}}><Button size="sm" onClick={()=>setYear(y=>y-1)}>‹</Button><span style={{fontWeight:700, fontSize:14, minWidth:44, textAlign:"center"}}>{year}</span><Button size="sm" onClick={()=>setYear(y=>y+1)}>›</Button></div>}
           {admin && !open && <Button variant="primary" size="sm" icon="plus" onClick={()=>newCamp()} disabled={!!busy}>New campaign</Button>}
@@ -4274,8 +4283,8 @@ function CampaignsPage(){
       {data.err && <div style={{padding:"9px 12px", borderRadius:10, background:"var(--red-soft)", color:"var(--red)", fontSize:13, marginBottom:12}}>{data.err}</div>}
       {busy && <div style={{fontSize:12.5, color:"var(--ink-mute)", marginBottom:8}}>{busy}</div>}
       {open ? <CampaignDetail key={open.id} camp={open} camps={camps} data={data} admin={admin} onBack={()=>setOpenId(null)} saveCamp={saveCamp} toast={toast}/> : <>
-        <div style={{display:"flex", gap:6, flexWrap:"wrap", marginBottom:14}}>
-          {tabs.map(([k,l])=><button key={k} onClick={()=>setTab(k)} style={{padding:"7px 13px", borderRadius:99, border:"1px solid "+(tab===k? "var(--accent)" : "var(--border)"), background: tab===k? "var(--accent-soft)" : "var(--surface)", color: tab===k? "var(--accent)" : "var(--ink-soft)", fontWeight:700, fontSize:13, cursor:"pointer"}}>{l}</button>)}
+        <div className="cf-noscrollbar" style={{display:"flex", gap:2, overflowX:"auto", borderBottom:"1px solid var(--border)", marginBottom:16}}>
+          {tabs.map(([k,l])=><button key={k} onClick={()=>setTab(k)} style={{flexShrink:0, padding:"10px 12px", border:"none", background:"none", cursor:"pointer", fontSize:13.5, fontWeight:600, color: tab===k? "var(--ink)" : "var(--ink-mute)", borderBottom:"2px solid "+(tab===k? "var(--accent)" : "transparent"), marginBottom:-1}}>{l}</button>)}
         </div>
         {tab==="overview" && <CampOverview year={year} camps={camps} data={data} onOpen={c=>setOpenId(c.id)} run={run}/>}
         {tab==="plan" && <CampPlan year={year} setYear={setYear} camps={camps} data={data} admin={admin} onOpen={c=>setOpenId(c.id)} onNew={newCamp} run={run}/>}
@@ -4396,7 +4405,7 @@ function CampPlan({year, setYear, camps, data, admin, onOpen, onNew, run}){
         {list.map(c=><CampRow key={c.id} c={c} data={data} onOpen={onOpen}/>)}
       </Card>}
       {undated.length>0 && <div>
-        <div style={{fontSize:13, fontWeight:700, margin:"4px 2px 8px"}}>No dates yet <span style={{fontWeight:400, color:"var(--ink-mute)"}}>· open one and set its dates to put it on the plan</span></div>
+        <div style={{fontSize:13, fontWeight:700, margin:"4px 2px 8px"}}>No dates yet</div>
         <Card style={{padding:6}}>{undated.map(c=><CampRow key={c.id} c={c} data={data} onOpen={onOpen}/>)}</Card>
       </div>}
     </div>
@@ -4432,6 +4441,8 @@ function CampaignDetail({camp, camps, data, admin, onBack, saveCamp, toast}){
   const [busy, setBusy] = useState("");
   const [collabOpen, setCollabOpen] = useState(null);
   const [costOpen, setCostOpen] = useState(false);
+  const [detailTab, setDetailTab] = useState("results");
+  const [editing, setEditing] = useState(!!camp.legacy || camp.name==="New campaign");
   const set = patch => { setC(x=>({...x, ...patch})); setDirty(true); };
   const setIn = (key, patch) => set({[key]: {...(c[key]||{}), ...patch}});
   const ro = !admin;
@@ -4496,121 +4507,168 @@ function CampaignDetail({camp, camps, data, admin, onBack, saveCamp, toast}){
   const seasonOptions = [{value:"", label: budget.seasons.length ? "Automatic (by date)" : "No seasons yet — set them in Budget"}, ...budget.seasons.map(s=>({value:s.id, label:s.name}))];
   const check = (on, fn) => <input type="checkbox" checked={!!on} disabled={ro} onChange={e=>fn(e.target.checked)} style={{width:16, height:16, flexShrink:0}}/>;
   const delBtn = fn => !ro && <button onClick={fn} title="Remove" style={{border:"none", background:"none", color:"var(--ink-mute)", cursor:"pointer", fontSize:14, padding:"0 4px"}}>✕</button>;
+  const owner = (USERS.find(u=>u.id===c.owner)||{}).name;
+  const wsProjects = (data.projects||[]).filter(p=>p.campaignId===c.id);
+  const tabsDef = [["results","Results"],["kitchen","Kitchen", dishes.length||null],["tasks","Tasks", (c.tasks||[]).filter(t=>!t.done).length||null],["influencers","Influencers", (c.collabs||[]).length||null],
+    ["costs","Costs", costs.length||null],["posts","Posts & videos", (posts.length+wsProjects.length)||null],["review","Review"]];
+  const T = tab => tab===detailTab;
+  const empty = text => <div style={{fontSize:13, color:"var(--ink-mute)", padding:"8px 0"}}>{text}</div>;
+  const pdfButtons = fn => <div style={{display:"flex", gap:6}}><Button size="sm" icon="download" onClick={()=>fn(false)}>PDF</Button>{share && <Button size="sm" icon="share" onClick={()=>fn(true)}>Share</Button>}</div>;
+  const panelHead = (title, action) => <div style={{display:"flex", alignItems:"center", gap:8, marginBottom:12, minHeight:30}}><span style={{fontWeight:700, fontSize:15, flex:1}}>{title}</span>{action}</div>;
+  const highlight = (label, value, sub, tone) => <div style={{flex:"1 1 120px", minWidth:0, padding:"12px 16px", borderLeft:"1px solid var(--border)"}}>
+    <div style={{fontSize:11.5, color:"var(--ink-mute)", fontWeight:600, textTransform:"uppercase", letterSpacing:".03em"}}>{label}</div>
+    <div style={{fontSize:20, fontWeight:700, margin:"2px 0", color: tone==="neg"? "var(--red)" : tone==="pos"? "var(--green)" : "var(--ink)"}}>{value}</div>
+    <div style={{fontSize:11.5, color:"var(--ink-mute)", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>{sub}</div></div>;
+  const rowLine = {display:"flex", gap:10, alignItems:"center", padding:"9px 0", borderTop:"1px solid var(--border)", fontSize:13, flexWrap:"wrap"};
   return (
-    <div style={{display:"flex", flexDirection:"column", gap:12}}>
+    <div style={{display:"flex", flexDirection:"column", gap:14}}>
       <div style={{display:"flex", alignItems:"center", gap:8, flexWrap:"wrap"}}>
         <Button size="sm" icon="chevronLeft" onClick={onBack}>Campaigns</Button>
         <span style={{flex:1}}/>
         {busy && <span style={{fontSize:12.5, color:"var(--ink-mute)"}}>{busy}</span>}
         {admin && dirty && <Button size="sm" variant="primary" icon="check" onClick={save} disabled={!!busy}>Save changes</Button>}
       </div>
-      <Card style={{padding:16}}>
-        <div style={{display:"flex", gap:8, alignItems:"center", flexWrap:"wrap", marginBottom:8}}><CampPill type={c.type}/><CampStatus status={c.status}/>{c.legacy && <span style={{fontSize:11.5, color:"var(--amber)"}}>Set the dates and save to put it on the plan</span>}</div>
-        {ro ? <h2 style={{margin:"0 0 4px", fontSize:20}}>{c.name}</h2> : <input value={c.name} onChange={e=>set({name:e.target.value})} style={{...campInput, fontSize:18, fontWeight:700, marginBottom:10}}/>}
-        {ro ? <div style={{fontSize:13, color:"var(--ink-mute)"}}>{campRange(c)} · {(c.branches||[]).join(", ")} · {(USERS.find(u=>u.id===c.owner)||{}).name||""}</div> :
-        <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(150px, 1fr))", gap:10}}>
-          <Field label="Type"><Select value={c.type||"other"} onChange={v=>set({type:v})} options={Object.entries(CAMP_TYPES).map(([k,t])=>({value:k, label:t.label}))}/></Field>
-          <Field label="Status"><Select value={c.status||"idea"} onChange={v=>set({status:v})} options={Object.entries(CAMP_STATUS).map(([k,s])=>({value:k, label:s[0]}))}/></Field>
-          <Field label="Starts"><input type="date" value={c.start||""} onChange={e=>set({start:e.target.value, end: !c.end || c.end < e.target.value ? e.target.value : c.end})} style={campInput}/></Field>
-          <Field label="Ends"><input type="date" value={c.end||""} min={c.start||undefined} onChange={e=>set({end:e.target.value})} style={campInput}/></Field>
-          <Field label="Owner"><Select value={c.owner||""} onChange={v=>set({owner:v})} placeholder="Nobody yet" options={ownerOptions}/></Field>
-          <Field label="Budget (£)"><input type="number" min="0" value={c.budget||""} onChange={e=>set({budget:+e.target.value||0})} style={campInput} placeholder="0"/></Field>
-          <Field label="Budget season"><Select value={c.seasonId||""} onChange={v=>set({seasonId:v})} options={seasonOptions}/></Field>
-          <Field label="Branches"><div style={{display:"flex", gap:10, flexWrap:"wrap", paddingTop:6}}>{CAMP_BRANCHES.map(b=><label key={b} style={{display:"flex", gap:4, alignItems:"center", fontSize:12.5}}>{check((c.branches||[]).includes(b), on=>set({branches: on? [...(c.branches||[]), b] : (c.branches||[]).filter(x=>x!==b)}))}{b}</label>)}</div></Field>
+
+      <Card style={{padding:0, overflow:"hidden"}}>
+        <div style={{padding:"16px 18px", display:"flex", gap:14, alignItems:"flex-start", flexWrap:"wrap"}}>
+          <div style={{width:44, height:44, borderRadius:10, background:(CAMP_TYPES[c.type]||CAMP_TYPES.other).s, color:(CAMP_TYPES[c.type]||CAMP_TYPES.other).c, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0}}><Icon name="megaphone" size={22}/></div>
+          <div style={{flex:"1 1 260px", minWidth:0}}>
+            <div style={{fontSize:11.5, color:"var(--ink-mute)", fontWeight:600, textTransform:"uppercase", letterSpacing:".03em"}}>Campaign</div>
+            <h2 style={{margin:"1px 0 6px", fontSize:21, fontWeight:700, lineHeight:1.2}}>{c.name}</h2>
+            <div style={{display:"flex", gap:6, alignItems:"center", flexWrap:"wrap"}}><CampPill type={c.type}/><CampStatus status={c.status}/>{c.legacy && <span style={{fontSize:11.5, color:"var(--amber)", fontWeight:600}}>Add dates to put it on the plan</span>}</div>
+          </div>
+          {admin && <Button size="sm" icon="edit" onClick={()=>setEditing(e=>!e)}>{editing? "Done" : "Edit details"}</Button>}
+        </div>
+        <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(150px, 1fr))", borderTop:"1px solid var(--border)", background:"var(--surface-2)"}}>
+          {[["Dates", campRange(c)], ["Branches", (c.branches||[]).length===3 ? "All three" : (c.branches||[]).join(", ") || "—"], ["Owner", owner || "—"], ["Budget", c.budget? money(c.budget) : "—"]].map(([l,v])=>
+            <div key={l} style={{padding:"9px 18px"}}><div style={{fontSize:11, color:"var(--ink-mute)", fontWeight:600}}>{l}</div><div style={{fontSize:13, fontWeight:600}}>{v}</div></div>)}
+        </div>
+        {(editing && admin) && <div style={{padding:"14px 18px", borderTop:"1px solid var(--border)"}}>
+          <Field label="Name" style={{marginBottom:10}}><input value={c.name} onChange={e=>set({name:e.target.value})} style={{...campInput, fontWeight:600}}/></Field>
+          <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(150px, 1fr))", gap:10}}>
+            <Field label="Type"><Select value={c.type||"other"} onChange={v=>set({type:v})} options={Object.entries(CAMP_TYPES).map(([k,t])=>({value:k, label:t.label}))}/></Field>
+            <Field label="Status"><Select value={c.status||"idea"} onChange={v=>set({status:v})} options={Object.entries(CAMP_STATUS).map(([k,s])=>({value:k, label:s[0]}))}/></Field>
+            <Field label="Starts"><input type="date" value={c.start||""} onChange={e=>set({start:e.target.value, end: !c.end || c.end < e.target.value ? e.target.value : c.end})} style={campInput}/></Field>
+            <Field label="Ends"><input type="date" value={c.end||""} min={c.start||undefined} onChange={e=>set({end:e.target.value})} style={campInput}/></Field>
+            <Field label="Owner"><Select value={c.owner||""} onChange={v=>set({owner:v})} placeholder="Nobody yet" options={ownerOptions}/></Field>
+            <Field label="Budget (£)"><input type="number" min="0" value={c.budget||""} onChange={e=>set({budget:+e.target.value||0})} style={campInput} placeholder="0"/></Field>
+            <Field label="Budget season"><Select value={c.seasonId||""} onChange={v=>set({seasonId:v})} options={seasonOptions}/></Field>
+            <Field label="Branches"><div style={{display:"flex", gap:10, flexWrap:"wrap", paddingTop:6}}>{CAMP_BRANCHES.map(b=><label key={b} style={{display:"flex", gap:4, alignItems:"center", fontSize:12.5}}>{check((c.branches||[]).includes(b), on=>set({branches: on? [...(c.branches||[]), b] : (c.branches||[]).filter(x=>x!==b)}))}{b}</label>)}</div></Field>
+          </div>
+          <Field label="About (offer, rules, codes)" style={{marginTop:10}}><textarea value={c.details||""} onChange={e=>set({details:e.target.value})} rows={2} style={{...campInput, resize:"vertical"}}/></Field>
         </div>}
-        {ro ? (c.details && <div style={{fontSize:13, marginTop:10, whiteSpace:"pre-wrap", lineHeight:1.5}}>{c.details}</div>) :
-          <Field label="What it is (offer, rules, codes — AI Dev + reads this too)" style={{marginTop:10}}><textarea value={c.details||""} onChange={e=>set({details:e.target.value})} rows={2} style={{...campInput, resize:"vertical"}}/></Field>}
+        {!editing && c.details && <div style={{padding:"10px 18px 14px", borderTop:"1px solid var(--border)", fontSize:13, lineHeight:1.5, color:"var(--ink-soft)", whiteSpace:"pre-wrap"}}>{c.details}</div>}
       </Card>
-      <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(130px, 1fr))", gap:8}}>
-        <Stat label="Spent" value={money(spent)} sub={c.budget? (spent>c.budget? money(spent-c.budget)+" over" : "of "+money(c.budget)) : "no budget set"} tone={c.budget && spent>c.budget ? "neg" : null}/>
-        <Stat label="Sold (reports)" value={res.qty? res.qty.toLocaleString("en-GB") : "—"} sub={res.sales? money(res.sales) : res.reportsFound? "no tracked items found" : "no reports for these months"}/>
-        <Stat label="Extra sales" value={extra? money(extra) : "—"} sub="typed in below"/>
-        <Stat label="Return" value={salesForReturn && spent ? (salesForReturn/spent).toFixed(1)+"×" : "—"} sub="sales ÷ spend"/>
-        <Stat label="Lift" value={M.lift==null? (L && L.isNew ? "New" : "—") : (M.lift>0? "+" : "")+M.lift.toFixed(0)+"%"} sub={L && L.isNew ? "not sold the month before" : "vs the month before"} tone={M.lift==null? null : M.lift>=0? "pos" : "neg"}/>
-        <Stat label="Cost per item sold" value={M.perItem!=null? "£"+M.perItem.toFixed(2) : "—"} sub={M.per1k!=null? "£"+M.per1k.toFixed(2)+" per 1k views" : "spend ÷ items"}/>
-        <Stat label="Influencer views" value={views? views.toLocaleString("en-GB") : "—"} sub={(c.collabs||[]).length+" collab"+((c.collabs||[]).length===1?"":"s")}/>
-        <Stat label="Our posts" value={posts.length||"—"} sub={postStats.length? postStats.length+" live · "+ps.views.toLocaleString("en-GB")+" views" : "linked in Create"}/>
-        {postStats.length>0 && <Stat label="Engagement" value={psEng.toFixed(1)+"%"} sub={(ps.likes+ps.comments+ps.shares+ps.saves).toLocaleString("en-GB")+" likes, comments, shares, saves"}/>}
-      </div>
-      <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(300px, 1fr))", gap:12, alignItems:"start"}}>
-        <CampSection title="Kitchen brief" icon="bulb" action={<div style={{display:"flex", gap:6}}><Button size="sm" icon="download" onClick={()=>kitchenPdf(false)}>PDF</Button>{share && <Button size="sm" icon="share" onClick={()=>kitchenPdf(true)}>Share</Button>}</div>}>
-          <div style={{fontSize:11.5, color:"var(--ink-mute)", marginBottom:8}}>For the chefs — send the PDF on WhatsApp.</div>
-          {dishes.map((d,i)=><div key={i} style={{display:"flex", gap:8, alignItems:"center", marginBottom:6}}>
+
+      <Card style={{padding:0, overflow:"hidden"}}>
+        <div style={{display:"flex", flexWrap:"wrap", marginLeft:-1}}>
+          {highlight("Spent", money(spent), c.budget? (spent>c.budget? money(spent-c.budget)+" over budget" : money(c.budget-spent)+" left") : "no budget set", c.budget && spent>c.budget ? "neg" : null)}
+          {highlight("Sold", res.qty? res.qty.toLocaleString("en-GB") : "—", res.sales? money(res.sales) : "from sales reports")}
+          {highlight("Return", salesForReturn && spent ? (salesForReturn/spent).toFixed(1)+"×" : "—", "sales ÷ spend")}
+          {highlight("Lift", M.lift==null? (L && L.isNew ? "New" : "—") : (M.lift>0? "+" : "")+M.lift.toFixed(0)+"%", "vs month before", M.lift==null? null : M.lift>=0? "pos" : "neg")}
+          {highlight("Cost / item", M.perItem!=null? "£"+M.perItem.toFixed(2) : "—", M.per1k!=null? "£"+M.per1k.toFixed(2)+" per 1k views" : "spend ÷ items")}
+          {highlight("Views", (views+ps.views)? (views+ps.views).toLocaleString("en-GB") : "—", postStats.length? psEng.toFixed(1)+"% engagement" : "posts + influencers")}
+        </div>
+      </Card>
+
+      <Card style={{padding:0}}>
+        <div className="cf-noscrollbar" style={{display:"flex", gap:2, overflowX:"auto", borderBottom:"1px solid var(--border)", padding:"0 10px"}}>
+          {tabsDef.map(([k, l, n])=><button key={k} onClick={()=>setDetailTab(k)} style={{flexShrink:0, padding:"12px 10px", border:"none", background:"none", cursor:"pointer", fontSize:13.5, fontWeight:600,
+            color: T(k)? "var(--ink)" : "var(--ink-mute)", borderBottom:"2px solid "+(T(k)? "var(--accent)" : "transparent"), marginBottom:-1}}>{l}{n!=null && <span style={{marginLeft:5, fontSize:11.5, color:"var(--ink-mute)", fontWeight:500}}>{n}</span>}</button>)}
+        </div>
+        <div style={{padding:"16px 18px"}}>
+
+        {T("results") && <>
+          {panelHead("Results", pdfButtons(resultsPdf))}
+          {L && L.anyData && <div style={{display:"grid", gridTemplateColumns:"repeat(3, 1fr)", gap:8, textAlign:"center", padding:"12px", borderRadius:10, background:"var(--surface-2)", marginBottom:14}}>
+            {[["Before", monthLabel(L.before), L.b.has? L.b.qty : null], ["During · avg / month", L.during.length>1? monthLabel(L.during[0])+" – "+monthLabel(L.during[L.during.length-1]) : monthLabel(L.during[0]), L.dAvg.qty], ["After", monthLabel(L.after), L.a.has? L.a.qty : null]].map(([l, m, v], i)=>{
+              const max = Math.max(1, L.b.qty||0, L.dAvg.qty||0, L.a.qty||0);
+              return <div key={l}><div style={{height:64, display:"flex", alignItems:"flex-end", justifyContent:"center"}}><span style={{width:24, height: v? Math.max(3, v/max*60) : 0, borderRadius:"4px 4px 0 0", background: i===1? "var(--viz-1)" : "var(--viz-prev)"}}/></div>
+                <div style={{fontSize:15, fontWeight:700}}>{v==null? "—" : Math.round(v).toLocaleString("en-GB")}</div><div style={{fontSize:11, color:"var(--ink-mute)"}}>{l}<br/>{m}</div></div>; })}
+          </div>}
+          <div style={{fontSize:12, fontWeight:700, color:"var(--ink-mute)", textTransform:"uppercase", letterSpacing:".03em", marginBottom:4}}>From the reports</div>
+          {res.lines.length ? res.lines.map((l,i)=><div key={i} style={rowLine}><b style={{minWidth:90}}>{REPORT_SOURCES[l.source]}</b><span style={{color:"var(--ink-mute)"}}>{monthLabel(l.month)}</span><span style={{flex:1}}/>{l.codes.length>0 && <span style={{color:"var(--ink-mute)"}}>{l.codes.map(x=>x.code+" ×"+x.count).join(", ")}</span>}<b>{l.qty.toLocaleString("en-GB")} sold</b><span>{money(l.sales)}</span></div>)
+            : empty(!c.start ? "Add the dates first." : res.reportsFound ? "No tracked items or codes in "+res.months.map(m=>monthLabel(m)).join(", ")+"." : "No sales reports for "+(res.months.map(m=>monthLabel(m)).join(", ")||"these months")+" yet.")}
+          {res.mail.length>0 && <><div style={{fontSize:12, fontWeight:700, color:"var(--ink-mute)", textTransform:"uppercase", letterSpacing:".03em", margin:"14px 0 4px"}}>Emails</div>
+            {res.mail.map((e,i)=><div key={"m"+i} style={rowLine}><b style={{flex:1}}>{e.name}</b><span>{e.openRate!=null? e.openRate+"% opened" : ""}</span><span>{e.clickRate!=null? e.clickRate+"% clicked" : ""}</span><span>{e.bookings? e.bookings+" bookings" : ""}</span></div>)}</>}
+          {!ro ? <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(200px, 1fr))", gap:10, marginTop:16, paddingTop:14, borderTop:"1px solid var(--border)"}}>
+            <Field label="Items to count"><input value={c.track.items||""} onChange={e=>setIn("track", {items:e.target.value})} placeholder="wagyu roll, prosperity platter" style={campInput}/></Field>
+            <Field label="Promo codes"><input value={c.track.codes||""} onChange={e=>setIn("track", {codes:e.target.value})} placeholder="ANGEL, ANGEL5OFF20" style={campInput}/></Field>
+            <Field label="Emails (blank = all sent during it)"><input value={c.track.emails||""} onChange={e=>setIn("track", {emails:e.target.value})} placeholder="Happy CNY" style={campInput}/></Field>
+            <Field label="Sold (typed in)"><input value={c.results.sold||""} onChange={e=>setIn("results", {sold:e.target.value})} placeholder="1,320 rolls" style={campInput}/></Field>
+            <Field label="Extra sales £"><input type="number" value={c.results.extraSales||""} onChange={e=>setIn("results", {extraSales:+e.target.value||0})} placeholder="vs weeks before" style={campInput}/></Field>
+            <Field label="Notes"><input value={c.results.notes||""} onChange={e=>setIn("results", {notes:e.target.value})} style={campInput}/></Field>
+          </div> : <>{c.results.sold && <div style={{...rowLine}}><b>Sold:</b> {c.results.sold}</div>}{c.results.notes && <div style={{...rowLine}}>{c.results.notes}</div>}</>}
+        </>}
+
+        {T("kitchen") && <>
+          {panelHead("Kitchen brief", pdfButtons(kitchenPdf))}
+          {!dishes.length && empty("No dishes yet.")}
+          {dishes.map((d,i)=><div key={i} style={{...rowLine, borderTop: i? rowLine.borderTop : "none"}}>
             {check(d.done, on=>setDishes(dishes.map((x,j)=>j===i? {...x, done:on} : x)))}
-            {ro ? <span style={{fontSize:13, flex:1}}><b>{d.name}</b>{d.note? " — "+d.note : ""}</span> : <>
-              <input value={d.name} placeholder="Dish" onChange={e=>setDishes(dishes.map((x,j)=>j===i? {...x, name:e.target.value} : x))} style={{...campInput, flex:"1 1 40%"}}/>
-              <input value={d.note||""} placeholder="Note (tasting date, cost…)" onChange={e=>setDishes(dishes.map((x,j)=>j===i? {...x, note:e.target.value} : x))} style={{...campInput, flex:"1 1 50%"}}/></>}
+            {ro ? <span style={{flex:1}}><b>{d.name}</b>{d.note? <span style={{color:"var(--ink-mute)"}}> · {d.note}</span> : ""}</span> : <>
+              <input value={d.name} placeholder="Dish" onChange={e=>setDishes(dishes.map((x,j)=>j===i? {...x, name:e.target.value} : x))} style={{...campInput, flex:"1 1 180px"}}/>
+              <input value={d.note||""} placeholder="Note (tasting date, cost…)" onChange={e=>setDishes(dishes.map((x,j)=>j===i? {...x, note:e.target.value} : x))} style={{...campInput, flex:"2 1 220px"}}/></>}
             {delBtn(()=>setDishes(dishes.filter((_,j)=>j!==i)))}
           </div>)}
-          {!ro && <Button size="sm" icon="plus" onClick={()=>setDishes([...dishes, {name:"", note:"", done:false}])}>Add dish</Button>}
-          {ro ? <>{c.kitchen.dates && <div style={{fontSize:12.5, marginTop:8, whiteSpace:"pre-wrap"}}><b>Dates:</b> {c.kitchen.dates}</div>}{c.kitchen.notes && <div style={{fontSize:12.5, marginTop:4, whiteSpace:"pre-wrap"}}><b>Notes:</b> {c.kitchen.notes}</div>}</> : <>
-            <Field label="Key dates for the kitchen (one per line)" style={{marginTop:10}}><textarea value={c.kitchen.dates||""} onChange={e=>setIn("kitchen", {dates:e.target.value})} rows={2} placeholder={"8 Jan tasting\n12 Jan photo shoot"} style={{...campInput, resize:"vertical"}}/></Field>
-            <Field label="Notes for the chefs" style={{marginTop:8}}><textarea value={c.kitchen.notes||""} onChange={e=>setIn("kitchen", {notes:e.target.value})} rows={2} style={{...campInput, resize:"vertical"}}/></Field></>}
-        </CampSection>
-        <CampSection title="Plan and tasks" icon="check">
-          {(c.tasks||[]).map((t,i)=><div key={i} style={{display:"flex", gap:8, alignItems:"center", marginBottom:6, flexWrap:"wrap"}}>
+          {!ro && <div style={{marginTop:8}}><DishSelect onPick={code=>{ const name = code ? LIB_DISH[code] : (window.prompt("Dish name")||"").trim(); if(name) setDishes([...dishes, {name, note:"", done:false}]); }}/></div>}
+          <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(240px, 1fr))", gap:12, marginTop:16}}>
+            {ro ? <>{c.kitchen.dates && <div style={{fontSize:13, whiteSpace:"pre-wrap"}}><b>Dates</b><br/>{c.kitchen.dates}</div>}{c.kitchen.notes && <div style={{fontSize:13, whiteSpace:"pre-wrap"}}><b>Notes</b><br/>{c.kitchen.notes}</div>}</> : <>
+            <Field label="Key dates (one per line)"><textarea value={c.kitchen.dates||""} onChange={e=>setIn("kitchen", {dates:e.target.value})} rows={3} placeholder={"8 Jan tasting\n12 Jan photo shoot"} style={{...campInput, resize:"vertical"}}/></Field>
+            <Field label="Notes for the chefs"><textarea value={c.kitchen.notes||""} onChange={e=>setIn("kitchen", {notes:e.target.value})} rows={3} style={{...campInput, resize:"vertical"}}/></Field></>}
+          </div>
+        </>}
+
+        {T("tasks") && <>
+          {panelHead("Tasks", !ro && <Button size="sm" icon="plus" onClick={()=>set({tasks:[...(c.tasks||[]), {text:"", who:"", due:"", done:false}]})}>Add task</Button>)}
+          {!(c.tasks||[]).length && empty("No tasks yet. Tasks with a person and a date show in their 10am and 9pm reminders.")}
+          {(c.tasks||[]).map((t,i)=><div key={i} style={{...rowLine, borderTop: i? rowLine.borderTop : "none"}}>
             {check(t.done, on=>listEdit("tasks", i, {done:on}))}
-            {ro ? <span style={{fontSize:13, flex:1, textDecoration:t.done? "line-through" : "none"}}>{t.text}{t.who? " · "+((USERS.find(u=>u.id===t.who)||{}).name||"") : ""}{t.due? " · "+fmtDay(t.due) : ""}</span> : <>
-              <input value={t.text} placeholder="Task" onChange={e=>listEdit("tasks", i, {text:e.target.value})} style={{...campInput, flex:"2 1 140px"}}/>
-              <Select value={t.who||""} onChange={v=>listEdit("tasks", i, {who:v})} placeholder="Who" options={ownerOptions} style={{flex:"1 1 90px"}}/>
-              <input type="date" value={t.due||""} onChange={e=>listEdit("tasks", i, {due:e.target.value})} style={{...campInput, flex:"1 1 110px"}}/></>}
+            {ro ? <span style={{flex:1, textDecoration:t.done? "line-through" : "none"}}>{t.text}<span style={{color:"var(--ink-mute)"}}>{t.who? " · "+((USERS.find(u=>u.id===t.who)||{}).name||"") : ""}{t.due? " · "+fmtDay(t.due) : ""}</span></span> : <>
+              <input value={t.text} placeholder="Task" onChange={e=>listEdit("tasks", i, {text:e.target.value})} style={{...campInput, flex:"3 1 200px"}}/>
+              <Select value={t.who||""} onChange={v=>listEdit("tasks", i, {who:v})} placeholder="Who" options={ownerOptions} style={{flex:"1 1 110px"}}/>
+              <input type="date" value={t.due||""} onChange={e=>listEdit("tasks", i, {due:e.target.value})} style={{...campInput, flex:"1 1 130px"}}/></>}
             {delBtn(()=>listDel("tasks", i))}
           </div>)}
-          {!(c.tasks||[]).length && ro && <div style={{fontSize:12.5, color:"var(--ink-mute)"}}>No tasks yet.</div>}
-          {!ro && <Button size="sm" icon="plus" onClick={()=>set({tasks:[...(c.tasks||[]), {text:"", who:"", due:"", done:false}]})}>Add task</Button>}
-        </CampSection>
-        <CampSection title="Influencer collabs" icon="team" action={!ro && <Button size="sm" icon="plus" onClick={()=>setCollabOpen({})}>Add</Button>}>
-          {!(c.collabs||[]).length ? <div style={{fontSize:12.5, color:"var(--ink-mute)"}}>No influencers on this campaign yet.</div> :
+        </>}
+
+        {T("influencers") && <>
+          {panelHead("Influencers", !ro && <Button size="sm" icon="plus" onClick={()=>setCollabOpen({})}>Add collab</Button>)}
+          {!(c.collabs||[]).length ? empty("No influencers yet.") :
             (c.collabs||[]).map((col,i)=>{ const v = collabViews(col, data.study); return (
-              <div key={col.id||i} style={{display:"flex", gap:8, alignItems:"center", padding:"7px 0", borderTop: i? "1px solid var(--border)" : "none", flexWrap:"wrap"}}>
-                <div style={{flex:"1 1 150px", minWidth:0}}><div style={{fontWeight:700, fontSize:13}}>{col.handle}</div><div style={{fontSize:11.5, color:"var(--ink-mute)"}}>{col.status||"idea"}{col.date? " · "+fmtDay(col.date) : ""}{col.email? " · "+col.email : ""}</div></div>
-                {col.link ? <a href={col.link} target="_blank" rel="noopener noreferrer" style={{fontSize:12, fontWeight:600, color:"var(--accent)"}}>Post ↗</a> : <span style={{fontSize:12, color:"var(--ink-mute)"}}>not posted</span>}
-                <span style={{fontSize:12.5, minWidth:70, textAlign:"right"}}>{v.n? v.n.toLocaleString("en-GB")+" views" : "—"}{v.auto && <span title="Pulled from Instagram through Make" style={{marginLeft:4, fontSize:10, fontWeight:700, color:"var(--green)"}}>auto</span>}</span>
-                <span style={{fontSize:12.5, minWidth:46, textAlign:"right"}}>{money(col.cost)}</span>
-                {!ro && <button onClick={()=>setCollabOpen({...col, index:i})} style={{border:"none", background:"none", color:"var(--ink-mute)", cursor:"pointer"}}><Icon name="edit" size={14}/></button>}
+              <div key={col.id||i} style={{...rowLine, borderTop: i? rowLine.borderTop : "none"}}>
+                <div style={{flex:"1 1 160px", minWidth:0}}><b>{col.handle}</b><div style={{fontSize:11.5, color:"var(--ink-mute)"}}>{col.status||"idea"}{col.date? " · "+fmtDay(col.date) : ""}{col.email? " · "+col.email : ""}</div></div>
+                {col.link ? <a href={col.link} target="_blank" rel="noopener noreferrer" style={{fontWeight:600, color:"var(--accent)"}}>Post ↗</a> : <span style={{color:"var(--ink-mute)"}}>not posted</span>}
+                <span style={{minWidth:90, textAlign:"right"}}>{v.n? v.n.toLocaleString("en-GB")+" views" : "—"}{v.auto && <span title="Updated from Instagram" style={{marginLeft:4, fontSize:10, fontWeight:700, color:"var(--green)"}}>auto</span>}</span>
+                <b style={{minWidth:52, textAlign:"right"}}>{money(col.cost)}</b>
+                {!ro && <button onClick={()=>setCollabOpen({...col, index:i})} title="Edit" style={{border:"none", background:"none", color:"var(--ink-mute)", cursor:"pointer"}}><Icon name="edit" size={14}/></button>}
               </div>); })}
-          <div style={{fontSize:11.5, color:"var(--ink-mute)", marginTop:6}}>Instagram collabs update their views by themselves. For other posts, type the views in.</div>
-        </CampSection>
-        <CampSection title="Costs" icon="file" action={admin && <Button size="sm" icon="plus" onClick={()=>setCostOpen(true)}>Add cost</Button>}>
-          {!costs.length ? <div style={{fontSize:12.5, color:"var(--ink-mute)"}}>No costs yet.</div> : costs.map(x=><CostLine key={x.id} x={x} admin={admin} data={data} toast={toast}/>)}
-          {c.budget>0 && <div style={{fontSize:12.5, marginTop:8, fontWeight:700, color: spent>c.budget? "var(--red)" : "var(--green)"}}>{spent>c.budget? money(spent-c.budget)+" over budget — the season borrows it from the next one" : money(c.budget-spent)+" left"}</div>}
-        </CampSection>
-        <CampSection title="Results" icon="analytics" action={<div style={{display:"flex", gap:6}}><Button size="sm" icon="download" onClick={()=>resultsPdf(false)}>PDF</Button>{share && <Button size="sm" icon="share" onClick={()=>resultsPdf(true)}>Share</Button>}</div>}>
-          {!ro && <div style={{display:"grid", gridTemplateColumns:"1fr", gap:8, marginBottom:10}}>
-            <Field label="Count these items from the sales reports (comma-separated)"><input value={c.track.items||""} onChange={e=>setIn("track", {items:e.target.value})} placeholder="wagyu roll, prosperity platter" style={campInput}/></Field>
-            <Field label="Promo codes"><input value={c.track.codes||""} onChange={e=>setIn("track", {codes:e.target.value})} placeholder="ANGEL, ANGEL5OFF20" style={campInput}/></Field>
-            <Field label="Emails (SevenRooms name — leave empty to take every email sent during the campaign)"><input value={c.track.emails||""} onChange={e=>setIn("track", {emails:e.target.value})} placeholder="Happy CNY" style={campInput}/></Field>
-          </div>}
-          {res.lines.length ? res.lines.map((l,i)=><div key={i} style={{fontSize:12.5, padding:"3px 0"}}><b>{REPORT_SOURCES[l.source]}</b> {l.month}: {l.qty.toLocaleString("en-GB")} sold · {money(l.sales)}{l.codes.length? " · "+l.codes.map(x=>x.code+" ×"+x.count).join(", ") : ""}</div>)
-            : <div style={{fontSize:12.5, color:"var(--ink-mute)"}}>{!c.start ? "Set the dates first." : res.reportsFound ? "Reports found for "+res.months.join(", ")+", but none of the tracked items or codes." : "No sales reports uploaded for "+(res.months.join(", ")||"these months")+" yet (Sales & email reports tab)."}</div>}
-          {L && L.anyData && <div style={{margin:"10px 0", padding:"10px 12px", borderRadius:10, background:"var(--surface-2)"}}>
-            <div style={{fontSize:12, fontWeight:700, marginBottom:6}}>Before · during · after <span style={{fontWeight:400, color:"var(--ink-mute)"}}>(tracked items sold)</span></div>
-            <div style={{display:"grid", gridTemplateColumns:"repeat(3, 1fr)", gap:8, textAlign:"center"}}>
-              {[["Before", monthLabel(L.before), L.b.has? L.b.qty : null], ["During (avg / month)", L.during.length>1? monthLabel(L.during[0])+" – "+monthLabel(L.during[L.during.length-1]) : monthLabel(L.during[0]), L.dAvg.qty], ["After", monthLabel(L.after), L.a.has? L.a.qty : null]].map(([l, m, v], i)=>{
-                const max = Math.max(1, L.b.qty||0, L.dAvg.qty||0, L.a.qty||0);
-                return <div key={l}><div style={{height:70, display:"flex", alignItems:"flex-end", justifyContent:"center"}}><span style={{width:24, height: v? Math.max(3, v/max*66) : 0, borderRadius:"4px 4px 0 0", background: i===1? "var(--viz-1)" : "var(--viz-prev)"}}/></div>
-                  <div style={{fontSize:14, fontWeight:700}}>{v==null? "—" : Math.round(v).toLocaleString("en-GB")}</div><div style={{fontSize:11, color:"var(--ink-mute)"}}>{l}<br/>{m}{v==null? " · no report" : ""}</div></div>; })}
-            </div>
-            {M.lift!=null && <div style={{fontSize:12, marginTop:6, textAlign:"center", fontWeight:700, color: M.lift>=0? "var(--green)" : "var(--red)"}}>{M.lift>=0? "▲" : "▼"} {Math.abs(M.lift).toFixed(0)}% a month while it ran{L.a.has && L.dAvg.qty ? " · after: "+(L.a.qty>=L.b.qty? "stayed up" : "dropped back") : ""}</div>}
-          </div>}
-          {res.mail.map((e,i)=><div key={"m"+i} style={{fontSize:12.5, padding:"3px 0"}}>✉ <b>{e.name}</b>: {e.openRate!=null? e.openRate+"% opened" : ""}{e.clickRate!=null? " · "+e.clickRate+"% clicked" : ""}{e.bookings? " · "+e.bookings+" bookings" : ""}</div>)}
-          {res.months.length>0 && res.lines.length>0 && <div style={{fontSize:11, color:"var(--ink-mute)", marginTop:4}}>Reports are monthly, so a campaign that runs part of a month counts that whole month.</div>}
-          {ro ? <>{c.results.sold && <div style={{fontSize:12.5, marginTop:8}}><b>Sold:</b> {c.results.sold}</div>}{c.results.notes && <div style={{fontSize:12.5, marginTop:4, whiteSpace:"pre-wrap"}}>{c.results.notes}</div>}</> :
-          <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(130px, 1fr))", gap:8, marginTop:10}}>
-            <Field label="Sold (typed in)"><input value={c.results.sold||""} onChange={e=>setIn("results", {sold:e.target.value})} placeholder="e.g. 1,320 rolls" style={campInput}/></Field>
-            <Field label="Extra sales (£)"><input type="number" value={c.results.extraSales||""} onChange={e=>setIn("results", {extraSales:+e.target.value||0})} placeholder="vs the weeks before" style={campInput}/></Field>
-            <Field label="Notes" style={{gridColumn:"1 / -1"}}><textarea value={c.results.notes||""} onChange={e=>setIn("results", {notes:e.target.value})} rows={2} style={{...campInput, resize:"vertical"}}/></Field>
-          </div>}
-        </CampSection>
-        <CampSection title="Linked posts" icon="calendar">
-          {!posts.length ? <div style={{fontSize:12.5, color:"var(--ink-mute)"}}>No posts yet. Pick this campaign in Create (step 1) and they show here.</div> :
-            posts.slice(0, 12).map(p=><button key={p.id} onClick={()=>dispatch({type:"SET_ROUTE", route:"calendar"})} style={{display:"flex", width:"100%", gap:8, alignItems:"center", padding:"5px 0", border:"none", background:"none", cursor:"pointer", textAlign:"left", color:"var(--ink)"}}>
-              <div style={{width:34, height:34, flexShrink:0}}><Thumb item={p} radius={6} iconSize={12}/></div>
-              <span style={{flex:1, fontSize:12.5, minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>{p.title}
-                {(()=>{ const st = postStats.filter(x=>x.contentId===p.id); return st.length ? <span style={{display:"block", fontSize:11, color:"var(--ink-mute)"}}>{st.map(x=>PLATFORM_META[x.platform].label+" "+x.views.toLocaleString("en-GB")+" views · "+x.engagementRate.toFixed(1)+"%").join(" · ")}</span> : null; })()}</span><StatusBadge status={p.status}/></button>)}
-        </CampSection>
-      </div>
-      <CampReview c={c} set={set} setIn={setIn} ro={ro} M={M} res={res} posts={postStats} data={data} toast={toast} dirty={dirty} save={save}/>
+        </>}
+
+        {T("costs") && <>
+          {panelHead("Costs", <div style={{display:"flex", gap:10, alignItems:"center"}}>{c.budget>0 && <span style={{fontSize:12.5, fontWeight:700, color: spent>c.budget? "var(--red)" : "var(--green)"}}>{spent>c.budget? money(spent-c.budget)+" over" : money(c.budget-spent)+" left"}</span>}{admin && <Button size="sm" icon="plus" onClick={()=>setCostOpen(true)}>Add cost</Button>}</div>)}
+          {!costs.length ? empty("No costs yet. Workspace shoots linked to this campaign add their food cost here.") : costs.map(x=><CostLine key={x.id} x={x} admin={admin} data={data} toast={toast}/>)}
+        </>}
+
+        {T("posts") && <>
+          {panelHead("Posts")}
+          {!posts.length ? empty("No posts yet — pick this campaign in Create.") :
+            posts.slice(0, 20).map((p,i)=>{ const st = postStats.filter(x=>x.contentId===p.id); return <div key={p.id} role="button" onClick={()=>dispatch({type:"SET_ROUTE", route:"calendar"})} style={{...rowLine, borderTop: i? rowLine.borderTop : "none", cursor:"pointer"}}>
+              <div style={{width:36, height:36, flexShrink:0}}><Thumb item={p} radius={6} iconSize={12}/></div>
+              <span style={{flex:1, minWidth:0}}><b style={{display:"block", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>{p.title}</b>
+                {st.length>0 && <span style={{fontSize:11.5, color:"var(--ink-mute)"}}>{st.map(x=>PLATFORM_META[x.platform].label+" "+x.views.toLocaleString("en-GB")+" views · "+x.engagementRate.toFixed(1)+"%").join(" · ")}</span>}</span><StatusBadge status={p.status}/></div>; })}
+          <div style={{marginTop:18}}>{panelHead("Workspace videos")}</div>
+          {!wsProjects.length ? empty("No Workspace projects yet — pick this campaign when you create one.") :
+            wsProjects.map((p,i)=><div key={p.id} role="button" onClick={()=>dispatch({type:"SET_ROUTE", route:"workspace", workspaceProject:p.id})} style={{...rowLine, borderTop: i? rowLine.borderTop : "none", cursor:"pointer"}}>
+              <Icon name="film" size={16} style={{color:"var(--ink-mute)"}}/><b style={{flex:1, minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>{p.title}</b>
+              {(p.food||[]).length>0 && <span style={{color:"var(--ink-mute)"}}>{(p.food||[]).reduce((a,f)=>a+(+f.qty||1), 0)} portions · {money(foodTotal(p.food, (data.rawDocs||[]).find(d=>d.kind==="menu")||{prices:{}}))}</span>}
+              <WsStatusBadge status={p.status}/></div>)}
+        </>}
+
+        {T("review") && <CampReview c={c} set={set} setIn={setIn} ro={ro} M={M} res={res} posts={postStats} data={data} toast={toast} dirty={dirty} save={save} bare/>}
+        </div>
+      </Card>
+
       {admin && <div style={{display:"flex", justifyContent:"flex-end"}}><ConfirmButton confirmLabel="Yes, delete this campaign" onConfirm={remove}>Delete campaign</ConfirmButton></div>}
       {collabOpen && <CollabModal col={collabOpen} camp={c} data={data} toast={toast} onClose={()=>setCollabOpen(null)} onSave={col=>{ const i = col.index; delete col.index;
         set({collabs: i!=null ? (c.collabs||[]).map((x,j)=>j===i? col : x) : [...(c.collabs||[]), col]}); setCollabOpen(null); toast("Added — tap “Save changes” to keep it"); }}
@@ -4620,7 +4678,7 @@ function CampaignDetail({camp, camps, data, admin, onBack, saveCamp, toast}){
   );
 }
 /* After the campaign: the team's own review, plus an AI review written from every number on the page. */
-function CampReview({c, set, setIn, ro, M, res, posts, data, toast, dirty, save}){
+function CampReview({c, set, setIn, ro, M, res, posts, data, toast, dirty, save, bare}){
   const [busy, setBusy] = useState(false);
   const r = c.review || {};
   const facts = ()=>[
@@ -4645,15 +4703,16 @@ function CampReview({c, set, setIn, ro, M, res, posts, data, toast, dirty, save}
   }
   const box = (k, label, ph) => ro ? (r[k] ? <div style={{fontSize:12.5, marginBottom:8}}><b>{label}</b><div style={{whiteSpace:"pre-wrap"}}>{r[k]}</div></div> : null)
     : <Field label={label} style={{marginBottom:8}}><textarea value={r[k]||""} onChange={e=>setIn("review", {[k]:e.target.value})} rows={2} placeholder={ph} style={{...campInput, resize:"vertical"}}/></Field>;
-  return <CampSection title="Review" icon="bulb" action={!ro && <Button size="sm" icon="zap" onClick={ai} disabled={busy}>{busy? "Writing…" : r.ai? "Write again" : "AI review"}</Button>}>
-    <div style={{fontSize:11.5, color:"var(--ink-mute)", marginBottom:10}}>Fill this in when the campaign ends, so next year's plan learns from it.</div>
+  const inner = <>
+    <div style={{display:"flex", alignItems:"center", gap:8, marginBottom:12}}><span style={{fontWeight:700, fontSize:15, flex:1}}>Review</span>{!ro && <Button size="sm" icon="zap" onClick={ai} disabled={busy}>{busy? "Writing…" : r.ai? "Write again" : "AI review"}</Button>}</div>
     <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(220px, 1fr))", gap:10}}>
       <div>{box("worked", "What worked", "Queues on launch day, the reel with the chef…")}{box("didnt", "What didn't", "Delivery codes hardly used…")}</div>
       <div>{ro ? (r.again && <div style={{fontSize:12.5}}><b>Do it again?</b> {r.again}</div>) : <Field label="Do it again?"><Select value={r.again||""} onChange={v=>setIn("review", {again:v})} placeholder="Not decided" options={["Yes, same again","Yes, with changes","No"].map(x=>({value:x, label:x}))}/></Field>}
         {r.ai && <div style={{marginTop:10, padding:"10px 12px", borderRadius:10, background:"var(--violet-soft)", fontSize:12.5, lineHeight:1.55, whiteSpace:"pre-wrap"}}><div style={{fontWeight:700, color:"var(--violet)", marginBottom:4}}>AI review{r.aiAt? " · "+fmtDate(r.aiAt) : ""}</div>{r.ai}</div>}
-        {!r.ai && !ro && <div style={{fontSize:12, color:"var(--ink-mute)", marginTop:10}}>“AI review” reads every number on this page (sales before/during/after, spend, influencers, emails, posts) and writes what worked, what didn't and what to do next time.</div>}</div>
+        {!r.ai && !ro && <div style={{fontSize:12, color:"var(--ink-mute)", marginTop:10}}>AI review reads every number here and writes what worked, what didn't and what to try next time.</div>}</div>
     </div>
-  </CampSection>;
+  </>;
+  return bare ? <div>{inner}</div> : <Card style={{padding:14}}>{inner}</Card>;
 }
 function CostLine({x, admin, data, toast, camps}){
   const camp = camps && camps.find(c=>c.id===x.campaignId);
@@ -4662,7 +4721,8 @@ function CostLine({x, admin, data, toast, camps}){
     <span style={{flex:"1 1 160px", minWidth:0}}>{camp? <b>{camp.name} · </b> : null}{x.category}{x.supplier? " · "+x.supplier : ""}{x.note? <span style={{color:"var(--ink-mute)"}}> — {x.note}</span> : null}</span>
     {x.receiptUrl && <a href={x.receiptUrl} target="_blank" rel="noopener noreferrer" style={{color:"var(--accent)", fontWeight:600}}>receipt</a>}
     <b>{money(x.amount)}</b>
-    {admin && <button title="Delete" onClick={async ()=>{ try{ await data.del(x.id); toast("Cost deleted"); }catch(e){ toast(e.message, "danger"); } }} style={{border:"none", background:"none", color:"var(--ink-mute)", cursor:"pointer"}}>✕</button>}
+    {x.virtual ? <span title="From the Workspace plan — change it there" style={{fontSize:11, color:"var(--ink-mute)"}}>Workspace</span>
+      : admin && <button title="Delete" onClick={async ()=>{ try{ await data.del(x.id); toast("Cost deleted"); }catch(e){ toast(e.message, "danger"); } }} style={{border:"none", background:"none", color:"var(--ink-mute)", cursor:"pointer"}}>✕</button>}
   </div>;
 }
 function CostModal({camps, data, toast, preset, onClose}){
@@ -4954,7 +5014,7 @@ function CampOverview({year, camps, data, onOpen, run}){
       </div>
       <Card style={{padding:14}}>
         <div style={{fontWeight:700, fontSize:14, marginBottom:4}}>Compare campaigns · {year} <span style={{fontWeight:400, fontSize:12, color:"var(--ink-mute)"}}>· tap a heading to sort, a name to open</span></div>
-        <div style={{fontSize:11.5, color:"var(--ink-mute)", marginBottom:8}}>Sold and lift come from the items and codes each campaign tracks (Results), in the months it ran. Lift = average month during vs the month before.</div>
+        <div style={{fontSize:11.5, color:"var(--ink-mute)", marginBottom:8}}>Lift = an average month during the campaign vs the month before.</div>
         {!metrics.length ? <div style={{fontSize:12.5, color:"var(--ink-mute)"}}>No campaigns with dates in {year} yet.</div> :
         <div style={{overflowX:"auto"}}><table style={{width:"100%", borderCollapse:"collapse", fontSize:12.5, minWidth:760}}>
           <thead><tr style={{color:"var(--ink-mute)", textAlign:"left"}}>{th("start", "Campaign")}{th("spent", "Spent")}{th("qty", "Sold")}{th("sales", "Sales")}{th("lift", "Lift", "Average month during vs the month before")}{th("perItem", "£ per item", "Spend ÷ items sold")}{th("views", "Views")}{th("per1k", "£ per 1k views")}{th("ret", "Return", "Sales (or extra sales typed in) ÷ spend")}</tr></thead>
@@ -5019,7 +5079,7 @@ function CampBudget({year, camps, data, admin, run, toast}){
           <Button size="sm" icon="download" onClick={pdf}>PDF</Button>
           {admin && dirty && <Button size="sm" variant="primary" icon="check" onClick={save}>Save budget</Button>}
         </div>
-        <div style={{fontSize:11.5, color:"var(--ink-mute)", marginBottom:10}}>Overspend in a season is borrowed from the next season straight away. Money a finished season didn't use moves to the next one, so it can spend more.</div>
+        <div style={{fontSize:11.5, color:"var(--ink-mute)", marginBottom:10}}>Overspend borrows from the next season · unused money moves on when a season ends.</div>
         {!b.seasons.length ? <div style={{fontSize:12.5, color:"var(--ink-mute)"}}>No seasons yet.{admin? " Add your own, or start from the usual ones." : ""}</div> :
         <div style={{overflowX:"auto"}}><table style={{width:"100%", borderCollapse:"collapse", fontSize:12.5, minWidth:640}}>
           <thead><tr style={{color:"var(--ink-mute)", textAlign:"left"}}><th style={{padding:"6px 4px"}}>Season</th><th>Dates</th><th>Budget</th><th>Carried</th><th>Spent</th><th>Balance</th><th style={{width:"28%"}}>What happens</th>{admin && <th/>}</tr></thead>
@@ -5045,9 +5105,38 @@ function CampBudget({year, camps, data, admin, run, toast}){
           {admin && <Button size="sm" variant="primary" icon="plus" onClick={()=>setCostOpen(true)}>Add cost</Button>}</div>
         {!yearCosts.length ? <div style={{fontSize:12.5, color:"var(--ink-mute)"}}>No costs for {year} yet.</div> : yearCosts.map(x=><CostLine key={x.id} x={x} admin={admin} data={data} toast={toast} camps={camps}/>)}
       </Card>
+      <MenuPrices data={data} admin={admin} toast={toast}/>
       {costOpen && <CostModal camps={camps} data={data} toast={toast} preset={{date: String(year)===today.slice(0,4) ? today : year+"-01-01"}} onClose={()=>setCostOpen(false)}/>}
     </div>
   );
+}
+/* Menu prices: used for the food cost of Workspace shoots. Food cost (what it costs us) is optional — the menu price is used without it. */
+function MenuPrices({data, admin, toast}){
+  const saved = ((data.rawDocs||[]).find(d=>d.kind==="menu") || {}).prices || {};
+  const [open, setOpen] = useState(false), [prices, setPrices] = useState(saved), [dirty, setDirty] = useState(false), [q, setQ] = useState("");
+  useEffect(()=>{ if(!dirty) setPrices(saved); }, [JSON.stringify(saved)]);
+  const set = (code, k, v) => { setPrices(p=>({...p, [code]:{...(p[code]||{}), [k]: v==="" ? null : +v}})); setDirty(true); };
+  const filled = Object.values(prices).filter(x=>x && x.price!=null).length;
+  async function save(){ try{ await data.save({kind:"menu", id:"menu", prices}); setDirty(false); loadMenu(true); toast("Menu prices saved"); }catch(e){ toast(e.message, "danger"); } }
+  const inp = {width:"100%", padding:"5px 7px", borderRadius:7, border:"1px solid var(--border)", background:"var(--surface)", color:"var(--ink)", fontSize:12.5, boxSizing:"border-box"};
+  return <Card style={{padding:14}}>
+    <div style={{display:"flex", alignItems:"center", gap:8, flexWrap:"wrap"}}>
+      <button onClick={()=>setOpen(o=>!o)} style={{border:"none", background:"none", padding:0, cursor:"pointer", display:"flex", alignItems:"center", gap:6, color:"var(--ink)", flex:1, textAlign:"left"}}>
+        <Icon name={open? "chevronDown" : "chevronRight"} size={15}/><span style={{fontWeight:700, fontSize:14}}>Menu prices</span><span style={{fontSize:12, color:"var(--ink-mute)"}}>{filled} of {Object.keys(LIB_DISH).length} priced · used for shoot food costs</span></button>
+      {open && <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Find a dish" style={{...inp, width:150}}/>}
+      {admin && dirty && <Button size="sm" variant="primary" icon="check" onClick={save}>Save prices</Button>}
+    </div>
+    {open && <div style={{marginTop:10, display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(300px, 1fr))", gap:"4px 24px"}}>
+      {LIB_DISH_GROUPS.map(([g, dishes])=>{ const rows = Object.entries(dishes).filter(([,n])=>!q || n.toLowerCase().includes(q.toLowerCase())); if(!rows.length) return null; return <div key={g} style={{marginBottom:10}}>
+        <div style={{display:"grid", gridTemplateColumns:"minmax(0,1fr) 72px 72px", gap:6, fontSize:11, fontWeight:700, color:"var(--ink-mute)", padding:"6px 0 3px", borderBottom:"1px solid var(--border)"}}><span>{g}</span><span>Menu £</span><span>Food cost £</span></div>
+        {rows.map(([k, n])=><div key={k} style={{display:"grid", gridTemplateColumns:"minmax(0,1fr) 72px 72px", gap:6, alignItems:"center", padding:"3px 0", fontSize:12.5}}>
+          <span style={{overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}} title={n}>{n}</span>
+          {admin ? <input type="number" min="0" step="0.01" value={(prices[k]||{}).price ?? ""} onChange={e=>set(k, "price", e.target.value)} style={inp}/> : <span>{(prices[k]||{}).price!=null? "£"+(+prices[k].price).toFixed(2) : "—"}</span>}
+          {admin ? <input type="number" min="0" step="0.01" value={(prices[k]||{}).cost ?? ""} onChange={e=>set(k, "cost", e.target.value)} placeholder="optional" style={inp}/> : <span>{(prices[k]||{}).cost!=null? "£"+(+prices[k].cost).toFixed(2) : "—"}</span>}
+        </div>)}
+      </div>; })}
+    </div>}
+  </Card>;
 }
 
 /* ---------- Sales & email reports ---------- */
@@ -5060,7 +5149,7 @@ function CampReports({data, admin, toast}){
   const emails = reports.filter(r=>r.source==="sevenrooms").flatMap(r=>((r.summary||{}).emails||[]).map(e=>({...e, month:r.month}))).sort((a,b)=>String(b.date||b.month).localeCompare(String(a.date||a.month)));
   return (
     <div style={{display:"flex", flexDirection:"column", gap:14}}>
-      <div style={{fontSize:12.5, color:"var(--ink-mute)"}}>Upload each month's report (CSV, Excel or PDF) and AI reads the numbers. Check them, then save. Campaign pages use them to count what each campaign sold. SevenRooms email reports are in the <b>Email marketing</b> tab.</div>
+      <div style={{fontSize:12.5, color:"var(--ink-mute)"}}>Upload each month's report (CSV, Excel or PDF). AI reads it — check, then save.</div>
       <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(160px, 1fr))", gap:10}}>
         {Object.entries(REPORT_SOURCES).filter(([k])=>k!=="sevenrooms").map(([k,l])=>{ const mine = reports.filter(r=>r.source===k); return (
           <Card key={k} style={{padding:14, textAlign:"center"}}>
@@ -5167,7 +5256,7 @@ function CampInfluencers({camps, data, admin, toast, onOpen}){
   const open = rows.find(r=>r.key===openH);
   return (
     <div style={{display:"flex", flexDirection:"column", gap:14}}>
-      <div style={{display:"flex", alignItems:"center", gap:8, flexWrap:"wrap"}}><div style={{fontSize:12.5, color:"var(--ink-mute)", flex:1}}>Everyone we've worked with: contact, every collab, views and cost per 1,000 views. Collab posts from Published Content show here too.</div>
+      <div style={{display:"flex", alignItems:"center", gap:8, flexWrap:"wrap"}}><div style={{fontSize:12.5, color:"var(--ink-mute)", flex:1}}>Everyone we've worked with, their collabs and what they cost per 1,000 views.</div>
         {admin && <Button size="sm" variant="primary" icon="plus" onClick={()=>setEdit({})}>Add influencer</Button>}</div>
       {!rows.length ? <Card><EmptyState icon="team" title="No influencers yet" subtitle="Add one here, or add a collab on a campaign page."/></Card> :
       <Card style={{padding:6}}><div style={{overflowX:"auto"}}><table style={{width:"100%", borderCollapse:"collapse", fontSize:12.5, minWidth:560}}>
@@ -5589,7 +5678,7 @@ function DashboardPage(){
         {ws===null ? <Skeleton h={60}/> : !todo.length ? <div style={{fontSize:13, color:"var(--ink-mute)", padding:"4px 0"}}>✓ Nothing waiting on you — approvals, votes and fixes show up here.</div> : (
           <div className="cf-dash-todo">
             {todo.map(t=>(
-              <div key={t.key} className="cf-todo-row" style={{display:"flex", alignItems:"center", gap:10, padding:"9px 12px", borderRadius:10, border:"1px solid "+(t.urgent? "var(--red)" : "var(--border)"), background: t.urgent? "var(--red-soft)" : "var(--surface)", minWidth:0}}>
+              <div key={t.key} className="cf-todo-row" style={{display:"flex", alignItems:"center", gap:10, padding:"10px 6px", borderBottom:"1px solid var(--border)", borderLeft:"3px solid "+(t.urgent? "var(--red)" : "transparent"), paddingLeft:10, minWidth:0}}>
                 <span style={{fontSize:11, fontWeight:700, padding:"2px 8px", borderRadius:99, background:t.tag[2], color:t.tag[1], whiteSpace:"nowrap", flexShrink:0}}>{t.urgent? "Urgent · " : ""}{t.tag[0]}</span>
                 <div style={{flex:1, minWidth:0}}>
                   <div style={{fontSize:13, fontWeight:600, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>{t.text}</div>
@@ -5680,7 +5769,7 @@ function DashboardPage(){
         @media (max-width:700px){ .cf-glance{grid-template-columns:repeat(4, minmax(0,1fr)); width:100%;} .cf-glance button{padding:6px 6px !important;} .cf-glance .cf-gl-l{font-size:10px !important; white-space:normal !important; overflow:visible !important;} }
         .cf-dash-week{display:grid; grid-template-columns:repeat(7, minmax(0,1fr)); gap:6px; align-items:stretch;}
         .cf-wk-br{display:none;} @media (max-width:600px){ .cf-wk-br{display:inline;} }
-        .cf-dash-todo{display:grid; grid-template-columns:repeat(auto-fill, minmax(min(320px, 100%), 1fr)); gap:8px; max-height:340px; overflow-y:auto;}
+        .cf-dash-todo{display:grid; grid-template-columns:repeat(auto-fill, minmax(min(380px, 100%), 1fr)); column-gap:24px; max-height:360px; overflow-y:auto;}
         .cf-dash-slim{display:flex; gap:10px; flex-wrap:wrap; margin-top:14px;}
         .cf-dash-chip{flex:1 1 220px; min-width:0; display:flex; align-items:center; gap:10px; padding:9px 12px; border-radius:10px; border:1px solid var(--border); background:var(--surface); cursor:pointer; color:var(--ink);}
         .cf-dash-chip:hover{border-color:var(--accent);}
@@ -8228,7 +8317,7 @@ function AddInfluencerPost({post, onClose, onSaved}){
     <Modal open onClose={onClose} width={540}>
       <div style={{padding:20}}>
         <h3 style={{margin:"0 0 4px", fontSize:17}}>{post && post.permalink ? "Edit collab post" : "Add collab post"}</h3>
-        <div style={{fontSize:12.5, color:"var(--ink-mute)", marginBottom:14, lineHeight:1.45}}>For collabs that live on the other account (Instagram only gives us posts our own account owns). Paste the link and who posted it — we fetch the views, likes and comments and refresh them every night.</div>
+        <div style={{fontSize:12.5, color:"var(--ink-mute)", marginBottom:14, lineHeight:1.45}}>A collab posted on their account. Paste the link and who posted it — numbers update every night.</div>
         <div style={{marginBottom:10}}>{lbl("Link to the post")}<input value={f.url} onChange={e=>onUrl(e.target.value)} placeholder="https://www.instagram.com/reel/…" style={input}/></div>
         <div style={{display:"grid", gridTemplateColumns:"1.4fr 1fr", gap:10, marginBottom:10}}>
           <div>{lbl("Who posted it", "(the first name on the post)")}<input value={f.account} onChange={e=>set({account:e.target.value})} placeholder="@invited.app @daniafgx" style={input} autoCapitalize="off" autoCorrect="off"/></div>
@@ -9123,16 +9212,16 @@ function WsProjectForm({open, onClose, onSaved, project}){
   const {state, dispatch} = useApp();
   const post = useWsPost();
   const meUser = USERS.find(u=>u.id===state.currentUserId) || {};
-  const blank = {title:"", branch:"shoreditch", category:"FC", dish:"", creatorId:"", due:"", brief:""};
+  const blank = {title:"", branch:"shoreditch", category:"FC", dish:"", creatorId:"", due:"", brief:"", campaignId:""};
   const [f, setF] = useState(blank);
   const [busy, setBusy] = useState(false);
-  useEffect(()=>{ if(open) setF(project ? {title:project.title, branch:project.branch, category:project.category, dish:(project.dishes||[])[0]||"", creatorId:project.creatorId||"", due:project.due||"", brief:project.brief||""} : blank); }, [open]);
+  useEffect(()=>{ if(open) setF(project ? {title:project.title, branch:project.branch, category:project.category, dish:(project.dishes||[])[0]||"", creatorId:project.creatorId||"", due:project.due||"", brief:project.brief||"", campaignId:project.campaignId||""} : blank); }, [open]);
   const set = patch => setF(x=>({...x, ...patch}));
   async function save(){
     if(!f.title.trim()){ dispatch({type:"ADD_TOAST", message:"Give the project a name", variant:"warn"}); return; }
     setBusy(true);
     try{
-      const d = await post("/project", {id: project && project.id, title:f.title, branch:f.branch, category:f.category, dishes: f.dish? [f.dish] : [], creatorId:f.creatorId||"", due:f.due, brief:f.brief});
+      const d = await post("/project", {id: project && project.id, title:f.title, branch:f.branch, category:f.category, dishes: f.dish? [f.dish] : [], creatorId:f.creatorId||"", due:f.due, brief:f.brief, campaignId:f.campaignId||""});
       dispatch({type:"ADD_TOAST", message: project? "Project updated" : "Project created"});
       onSaved(d.project);
     }catch(e){ dispatch({type:"ADD_TOAST", message:e.message, variant:"danger"}); }
@@ -9143,7 +9232,7 @@ function WsProjectForm({open, onClose, onSaved, project}){
     <Modal open={open} onClose={onClose} width={520}>
       <div style={{padding:20}}>
         <h3 style={{margin:"0 0 4px", fontSize:17}}>{project? "Edit project" : "Create project"}</h3>
-        <div style={{fontSize:12.5, color:"var(--ink-mute)", marginBottom:16}}>Branch, category and dish fill in the file name when the video is approved.</div>
+        <div style={{fontSize:12.5, color:"var(--ink-mute)", marginBottom:16}}>Branch, category and dish make the file name.</div>
         <TextField label="Project name" value={f.title} onChange={v=>set({title:v})} placeholder="Sushi slicing ASMR"/>
         <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:12, marginBottom:14}}>
           <div><label style={label}>Branch</label><Select value={f.branch} onChange={v=>set({branch:v})} options={WS_BRANCH_OPTS}/></div>
@@ -9151,6 +9240,7 @@ function WsProjectForm({open, onClose, onSaved, project}){
           <div><label style={label}>Dish (optional)</label><Select value={f.dish} onChange={v=>set({dish:v})} options={WS_DISH_OPTS}/></div>
           <div><label style={label}>Creator</label><Select value={f.creatorId||""} onChange={v=>set({creatorId:v})} options={[{value:"", label:"Not assigned yet"}, ...activeUsers().map(u=>({value:u.id, label:u.name}))]}/></div>
           <div><label style={label}>Due date (optional)</label><input type="date" value={f.due} onChange={e=>set({due:e.target.value})} style={{width:"100%", borderRadius:10, border:"1px solid var(--border)", padding:"8px 10px", fontSize:13, background:"var(--surface)", color:"var(--ink)"}}/></div>
+          <div style={{gridColumn:"1 / -1"}}><label style={label}>Campaign (optional)</label><Select value={f.campaignId} onChange={v=>set({campaignId:v})} options={[{value:"", label:"No campaign"}, ...state.campaigns.filter(c=>!c.archived || c.id===f.campaignId).map(c=>({value:c.id, label:c.name}))]}/></div>
         </div>
         <TextField label="Brief (optional)" value={f.brief} onChange={v=>set({brief:v})} textarea placeholder="What should this video show and feel like?"/>
         <div style={{display:"flex", justifyContent:"flex-end", gap:8}}>
@@ -9235,6 +9325,8 @@ function WsProject({id, onBack}){
       <div style={{display:"flex", gap:6, flexWrap:"wrap", alignItems:"center", margin:"0 0 18px"}}>
         <WsChip>{branch}</WsChip><WsChip>{LIB_CATEGORY[p.category]}</WsChip>{wsDishLabel(p) && <WsChip>{wsDishLabel(p)}</WsChip>}
         <WsChip>Creator: {wsCreatorName(p)}</WsChip>
+        {p.campaignId && <button onClick={()=>dispatch({type:"SET_ROUTE", route:"campaigns"})} style={{fontSize:11.5, fontWeight:600, padding:"3px 9px", borderRadius:99, border:"none", background:"var(--accent-soft)", color:"var(--accent)", cursor:"pointer", whiteSpace:"nowrap"}}>📣 {campaignLabel(state.campaigns, p.campaignId)}</button>}
+        {(p.food||[]).length>0 && <WsFoodChip food={p.food}/>}
         <span style={{fontSize:12, color:"var(--ink-mute)", marginLeft:4}}>
           Created {wsDay(p.createdAt)} by {wsUser(p.createdBy).name}{p.finishedAt ? " · Finished "+wsDay(p.finishedAt)+" ("+wsDays(p.createdAt, p.finishedAt)+")" : wsDays(p.createdAt)==="same day" ? "" : " · open for "+wsDays(p.createdAt)}{p.due && !p.filed ? " · due "+wsDay(p.due) : ""}
         </span>
@@ -9388,16 +9480,16 @@ function WsIdeas({p, items, act}){
         <Button variant="primary" icon="plus" onClick={add} disabled={busy || !text.trim()}>Add</Button>
       </div>}
       <div style={{display:"flex", alignItems:"center", gap:6, flexWrap:"wrap", marginBottom:14}}>
-        {onlyPicked ? <span style={{fontSize:12, color:"var(--ink-soft)", marginLeft:4, lineHeight:1.5}}><b>These are the ideas the team picked for you</b> — ⭐ Priority first, then the ones {wsNeed(voters)} or more people said Yes to. {waiting>0 && <span style={{color:"var(--ink-mute)"}}>{waiting} more {waiting>1? "are" : "is"} still being voted on.</span>}</span> : <>
+        {onlyPicked ? <span style={{fontSize:12, color:"var(--ink-soft)", marginLeft:4, lineHeight:1.5}}><b>Picked for you</b> · ⭐ Priority first{waiting>0 && <span style={{color:"var(--ink-mute)"}}> · {waiting} still being voted on</span>}</span> : <>
         <span style={{display:"inline-flex", border:"1px solid var(--border)", borderRadius:99, overflow:"hidden", marginRight:4}}>
           {[[false, "All "+all.length], [true, "Picked for the creator "+(all.length-waiting)]].map(([v, l])=><button key={String(v)} onClick={()=>setPickedView(v)} style={{border:"none", padding:"5px 11px", fontSize:12, fontWeight:600, cursor:"pointer", background: pickedView===v? "var(--accent-soft)" : "var(--surface)", color: pickedView===v? "var(--accent-dark)" : "var(--ink-soft)"}}>{l}</button>)}
         </span>
-        <span style={{fontSize:11.5, color:"var(--ink-mute)", marginLeft:4}}>{!p.filed && !voters.includes(me) ? "You're set as this project's creator, so only "+voters.map(v=>wsUser(v).name).join(" and ")+" vote. Not the creator? Edit → Creator → Not assigned yet." : "Vote 👍 or 👎 on each idea — "+voters.map(v=>wsUser(v).name).join(", ")+" vote · "+wsNeed(voters)+" 👍 or ⭐ Priority and the creator sees it · 3 👎 and it's removed"}</span></>}
+        <span style={{fontSize:11.5, color:"var(--ink-mute)", marginLeft:4}}>{!p.filed && !voters.includes(me) ? "You're the creator — "+voters.map(v=>wsUser(v).name).join(" and ")+" vote." : wsNeed(voters)+" 👍 or ⭐ = the creator sees it · 3 👎 = removed"}</span></>}
       </div>
 
       {!visible.length && onlyPicked ? <div style={{fontSize:13, color:"var(--ink-mute)"}}>{all.length ? "The team is still voting on the ideas — they'll show here once they're picked." : "No ideas yet."} You can still check the Plan tab for what to film.</div>
        : !visible.length && pickedView ? <div style={{fontSize:13, color:"var(--ink-mute)"}}>Nothing picked yet. An idea gets here with {wsNeed(voters)} 👍 or when someone taps ⭐ Priority.</div>
-       : !visible.length ? <div style={{fontSize:13, color:"var(--ink-mute)"}}>No ideas yet. Ideas are optional — paste reels you like or write an idea if you want the team's input, or go straight to the plan and the draft.</div> : (
+       : !visible.length ? <div style={{fontSize:13, color:"var(--ink-mute)"}}>No ideas yet — paste a reel or write one. Optional.</div> : (
         <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(min(330px, 100%), 1fr))", gap:12, alignItems:"start"}}>
           {visible.map((it, i)=>{
             const n = noCount(it);
@@ -9419,6 +9511,7 @@ function WsIdeas({p, items, act}){
                   <div style={{display:"flex", alignItems:"center", gap:8, flexWrap:"wrap"}}><WsVoteDots it={it} voters={voters}/>{tag && <span style={{fontSize:11, fontWeight:700, color:tag[1]}}>{tag[0]}</span>}</div>
                   <WsYesNo it={it} act={act} voters={voters} readOnly={!canVote}/>
                   {it.kind==="link" && <a href={it.url} target="_blank" rel="noopener noreferrer" style={{fontSize:12, fontWeight:600, color:"var(--accent)", textDecoration:"none"}}>Doesn't play here? Open on {(wsEmbed(it.url).platform && PLATFORM_META[wsEmbed(it.url).platform]) ? PLATFORM_META[wsEmbed(it.url).platform].label : "the app"} ↗</a>}
+                  <WsIdeaFood it={it} act={act} ro={!!p.filed}/>
                   <WsIdeaThread it={it} items={items} act={act}/>
                   <WsMeta it={it} act={act}/>
                 </div>
@@ -9475,6 +9568,91 @@ function WsPlanMusic({p, act, ro}){
   );
 }
 
+/* Menu prices (Campaigns → Budget → Menu prices): price per portion, and optionally the food cost to us.
+   A shoot's food cost uses the food cost when it's set, otherwise the menu price. */
+let MENU_STORE = {doc:null, at:0, subs:new Set()};
+function loadMenu(force){
+  if(!force && MENU_STORE.doc && Date.now()-MENU_STORE.at < 60000) return Promise.resolve(MENU_STORE.doc);
+  return fetch("/api/camp").then(r=>r.ok? r.json() : {docs:[]}).then(d=>{ MENU_STORE.doc = (d.docs||[]).find(x=>x.kind==="menu") || {kind:"menu", id:"menu", prices:{}}; MENU_STORE.at = Date.now(); MENU_STORE.subs.forEach(f=>f(MENU_STORE.doc)); return MENU_STORE.doc; }).catch(()=>MENU_STORE.doc || {prices:{}});
+}
+function useMenu(){
+  const [doc, setDoc] = useState(MENU_STORE.doc);
+  useEffect(()=>{ MENU_STORE.subs.add(setDoc); loadMenu(); return ()=>{ MENU_STORE.subs.delete(setDoc); }; }, []);
+  return doc || {prices:{}};
+}
+const dishCodeByName = name => Object.keys(LIB_DISH).find(k=>LIB_DISH[k].toLowerCase()===String(name||"").toLowerCase());
+function portionCost(f, menu){
+  if(f.cost!=null && f.cost!=="") return +f.cost;
+  const pr = (menu.prices||{})[f.dish || dishCodeByName(f.name)] || {};
+  return pr.cost!=null && pr.cost!=="" ? +pr.cost : pr.price!=null && pr.price!=="" ? +pr.price : null;
+}
+const foodTotal = (food, menu) => (food||[]).reduce((a,f)=>a + (portionCost(f, menu)||0)*(+f.qty||1), 0);
+function DishSelect({onPick, placeholder="+ Add a dish", exclude=[]}){
+  return <select value="" onChange={e=>{ const v = e.target.value; if(v) onPick(v==="__other" ? null : v); }}
+    style={{padding:"7px 10px", borderRadius:8, border:"1px solid var(--border)", background:"var(--surface)", color:"var(--ink)", fontSize:13, maxWidth:"100%"}}>
+    <option value="">{placeholder}</option>
+    {LIB_DISH_GROUPS.map(([g, dishes])=><optgroup key={g} label={g}>{Object.entries(dishes).filter(([k])=>!exclude.includes(k)).map(([k, n])=><option key={k} value={k}>{n}</option>)}</optgroup>)}
+    <option value="__other">Something else (type it)…</option>
+  </select>;
+}
+/* Food for the shoot: which dishes, how many portions, cost per portion (menu price unless typed) and the total. */
+function WsFoodChip({food}){ const menu = useMenu(); return <WsChip>🍣 Food {money(foodTotal(food, menu))}</WsChip>; }
+function WsPlanFood({p, items, act, ro}){
+  const menu = useMenu();
+  const [food, setFood] = useState(p.food || []);
+  const [dirty, setDirty] = useState(false);
+  useEffect(()=>{ if(!dirty) setFood(p.food || []); }, [JSON.stringify(p.food||[])]);
+  const edit = list => { setFood(list); setDirty(true); };
+  const add = code => { const name = code ? LIB_DISH[code] : (window.prompt("Dish name") || "").trim(); if(!name) return; const i = food.findIndex(f=>f.name===name); edit(i>=0 ? food.map((f,j)=>j===i? {...f, qty:(+f.qty||1)+1} : f) : [...food, {dish:code||null, name, qty:1, cost:null}]); };
+  const fromIdeas = [...new Set(items.filter(i=>(i.kind==="idea"||i.kind==="link") && (i.food||[]).length).flatMap(i=>i.food))].filter(n=>!food.some(f=>f.name===n));
+  const total = foodTotal(food, menu);
+  const missing = food.filter(f=>portionCost(f, menu)==null).length;
+  const inp = {width:"100%", padding:"6px 8px", borderRadius:7, border:"1px solid var(--border)", background:"var(--surface)", color:"var(--ink)", fontSize:13, boxSizing:"border-box"};
+  return (
+    <div>
+      <div style={{display:"flex", alignItems:"center", gap:8, marginBottom:10}}>
+        <span style={{fontWeight:600, fontSize:14, flex:1}}>Food for the shoot</span>
+        <span style={{fontSize:13, fontWeight:700}}>{money(total)}</span>
+      </div>
+      {!food.length && <div style={{fontSize:12.5, color:"var(--ink-mute)", marginBottom:10}}>No dishes yet.</div>}
+      {food.length>0 && <div style={{display:"grid", gridTemplateColumns:"minmax(0,1fr) 64px 76px 64px 20px", gap:"6px 8px", alignItems:"center", fontSize:12.5, marginBottom:10}}>
+        <span style={{color:"var(--ink-mute)", fontSize:11.5, fontWeight:600}}>Dish</span><span style={{color:"var(--ink-mute)", fontSize:11.5, fontWeight:600}}>Portions</span><span style={{color:"var(--ink-mute)", fontSize:11.5, fontWeight:600}}>£ each</span><span style={{color:"var(--ink-mute)", fontSize:11.5, fontWeight:600, textAlign:"right"}}>Total</span><span/>
+        {food.map((f,i)=>{ const pc = portionCost(f, menu); return <React.Fragment key={f.name+i}>
+          <span style={{minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", fontWeight:600}} title={f.name}>{f.name}</span>
+          {ro ? <span>{f.qty}</span> : <input type="number" min="1" max="99" value={f.qty} onChange={e=>edit(food.map((x,j)=>j===i? {...x, qty:Math.max(1, +e.target.value||1)} : x))} style={inp}/>}
+          {ro ? <span>{pc!=null? "£"+pc.toFixed(2) : "—"}</span> : <input type="number" min="0" step="0.01" value={f.cost==null? "" : f.cost} placeholder={pc!=null && f.cost==null ? pc.toFixed(2) : "price?"} onChange={e=>edit(food.map((x,j)=>j===i? {...x, cost: e.target.value==="" ? null : +e.target.value} : x))} style={inp} title="Leave empty to use the menu price"/>}
+          <span style={{textAlign:"right", fontWeight:600}}>{pc!=null? money(pc*(+f.qty||1)) : "—"}</span>
+          {ro ? <span/> : <button onClick={()=>edit(food.filter((_,j)=>j!==i))} title="Remove" style={{border:"none", background:"none", color:"var(--ink-mute)", cursor:"pointer", padding:0}}>✕</button>}
+        </React.Fragment>; })}
+      </div>}
+      {missing>0 && <div style={{fontSize:11.5, color:"var(--amber)", marginBottom:8}}>{missing} dish{missing>1? "es have" : " has"} no price yet — type it, or an admin adds it under Campaigns → Budget → Menu prices.</div>}
+      {!ro && <div style={{display:"flex", gap:8, flexWrap:"wrap", alignItems:"center"}}>
+        <DishSelect onPick={add}/>
+        {fromIdeas.map(n=><button key={n} onClick={()=>{ const code = dishCodeByName(n); if(code) add(code); else edit([...food, {dish:null, name:n, qty:1, cost:null}]); }} style={{border:"1px dashed var(--accent)", background:"var(--accent-soft)", color:"var(--accent)", borderRadius:99, padding:"4px 10px", fontSize:12, fontWeight:600, cursor:"pointer"}}>+ {n}</button>)}
+        <span style={{flex:1}}/>
+        {dirty && <Button size="sm" variant="primary" onClick={async ()=>{ if(await act("/project", {id:p.id, food}, "Food saved")) setDirty(false); }}>Save food</Button>}
+      </div>}
+      {fromIdeas.length>0 && !ro && <div style={{fontSize:11, color:"var(--ink-mute)", marginTop:6}}>Dashed = dishes tagged on the ideas.</div>}
+    </div>
+  );
+}
+/* Dishes an idea shows — a small row under each idea, anyone on the project can add or remove. */
+function WsIdeaFood({it, act, ro}){
+  const food = it.food || [];
+  const save = list => act("/item/food", {id:it.id, food:list});
+  if(ro && !food.length) return null;
+  return <div style={{display:"flex", gap:5, flexWrap:"wrap", alignItems:"center"}}>
+    <span style={{fontSize:11.5, color:"var(--ink-mute)", fontWeight:600}}>🍣</span>
+    {food.map(n=><span key={n} style={{display:"inline-flex", alignItems:"center", gap:4, fontSize:11.5, fontWeight:600, padding:"2px 8px", borderRadius:99, background:"var(--surface-2)"}}>{n}{!ro && <button onClick={()=>save(food.filter(x=>x!==n))} style={{border:"none", background:"none", padding:0, color:"var(--ink-mute)", cursor:"pointer", fontSize:11}}>✕</button>}</span>)}
+    {!ro && <select value="" onChange={e=>{ let v = e.target.value; if(!v) return; if(v==="__other") v = (window.prompt("Dish name")||"").trim(); else v = LIB_DISH[v]; if(v && !food.includes(v)) save([...food, v]); }}
+      style={{border:"1px dashed var(--border)", background:"transparent", color:"var(--ink-mute)", borderRadius:99, padding:"2px 6px", fontSize:11.5, maxWidth:120}}>
+      <option value="">+ Dish</option>
+      {LIB_DISH_GROUPS.map(([g, dishes])=><optgroup key={g} label={g}>{Object.entries(dishes).map(([k, n])=><option key={k} value={k}>{n}</option>)}</optgroup>)}
+      <option value="__other">Something else…</option>
+    </select>}
+  </div>;
+}
+
 // The plan: what the video is (the brief) and the shot list the creator ticks off while filming. Optional.
 function WsPlan({p, items, act}){
   const [brief, setBrief] = useState(p.brief || "");
@@ -9489,7 +9667,7 @@ function WsPlan({p, items, act}){
     <div className="cf-ws-plan">
       <Card style={{padding:16}}>
         <div style={{fontWeight:600, fontSize:14, marginBottom:4}}>The idea</div>
-        <div style={{fontSize:12, color:"var(--ink-mute)", marginBottom:10}}>Hook, dish, where, props, sound, the feeling — whatever the creator needs to know.</div>
+
         {ro ? <div style={{fontSize:13.5, lineHeight:1.55, whiteSpace:"pre-wrap"}}>{p.brief || "No plan was written."}</div> : <>
           <textarea value={brief} onChange={e=>setBrief(e.target.value)} rows={8} placeholder={"Hook: knife on the board, real sound, no music\nDish: Spicy Tuna Roll\nWhere: Shoreditch counter, before service\nEnd: a guest's first bite"}
             style={{width:"100%", borderRadius:10, border:"1px solid var(--border)", padding:11, fontSize:13.5, lineHeight:1.5, fontFamily:"inherit", resize:"vertical", background:"var(--surface)", color:"var(--ink)"}}/>
@@ -9499,13 +9677,14 @@ function WsPlan({p, items, act}){
           <WsPlanMusic p={p} act={act} ro={ro}/>
         </div>
       </Card>
+      <Card style={{padding:16}}><WsPlanFood p={p} items={items} act={act} ro={ro}/></Card>
       <Card style={{padding:16}}>
         <div style={{display:"flex", alignItems:"center", gap:8, marginBottom:10}}>
           <div style={{fontWeight:600, fontSize:14, flex:1}}>Shot list</div>
           {shots.length>0 && <span style={{fontSize:12, fontWeight:700, color: done===shots.length? "var(--green)":"var(--ink-mute)"}}>{done} of {shots.length} filmed</span>}
         </div>
         {shots.length>0 && <div style={{height:5, borderRadius:99, background:"var(--surface-2)", marginBottom:10}}><div style={{height:5, borderRadius:99, width:(done/shots.length*100)+"%", background:"var(--green)", transition:"width .2s"}}/></div>}
-        {!shots.length && <div style={{fontSize:12.5, color:"var(--ink-mute)", marginBottom:10}}>Optional. List the shots, and the creator ticks them off on their phone while filming.</div>}
+        {!shots.length && <div style={{fontSize:12.5, color:"var(--ink-mute)", marginBottom:10}}>No shots yet.</div>}
         {shots.map((s, i)=>(
           <label key={s.id} style={{display:"flex", alignItems:"flex-start", gap:10, padding:"8px 0", borderTop: i? "1px solid var(--border)" : "none", cursor: ro? "default":"pointer"}}>
             <input type="checkbox" checked={!!s.done} disabled={ro} onChange={e=>act("/item/resolve", {id:s.id, resolved:e.target.checked})} style={{marginTop:3, width:16, height:16}}/>

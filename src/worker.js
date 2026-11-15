@@ -2671,6 +2671,13 @@ function wsSummary(p, items, members, me) {
     lastActivity: items.reduce((t, i) => (i.createdAt > t ? i.createdAt : t), p.updatedAt) };
 }
 
+function wsFood(list) {
+  return (Array.isArray(list) ? list : []).slice(0, 40).map((f) => ({
+    dish: WS_DISHES[f && f.dish] ? f.dish : null, name: wsText(f && (f.name || WS_DISHES[f.dish]), 80),
+    qty: Math.max(1, Math.min(99, Math.round(Number(f && f.qty) || 1))),
+    cost: f && f.cost !== "" && f.cost != null && isFinite(Number(f.cost)) ? Math.max(0, Math.round(Number(f.cost) * 100) / 100) : null,
+    note: wsText(f && f.note, 120) })).filter((f) => f.name);
+}
 // Who is acting: the signed-in member, or (with sign-in off, e.g. local testing) whoever the browser says it is.
 async function wsActor(env, viewer, body) {
   const { members } = await listTeam(env);
@@ -2735,6 +2742,9 @@ async function workspaceRoute(request, env, url, viewer, ctx) {
     if (isNew || body.due !== undefined) p.due = /^\d{4}-\d{2}-\d{2}$/.test(body.due || "") ? body.due : null;
     if (isNew || body.brief !== undefined) p.brief = wsText(body.brief, 2000);
     if (body.music !== undefined) p.music = body.music && body.music.title ? wsSong(body.music) : null;
+    // Which campaign the video is for (optional), and the food the shoot needs (dish, how many, cost per portion if not the menu price).
+    if (isNew || body.campaignId !== undefined) p.campaignId = /^[\w-]{1,80}$/.test(String(body.campaignId || "")) ? String(body.campaignId) : null;
+    if (body.food !== undefined) p.food = wsFood(body.food);
     await wsSaveProject(env, p);
     if (isNew) await wsNotify(env, ctx, { actor: me, members, project: p, text: `📁 ${me.name} started a Workspace project: "${p.title}"`, push: { title: "New Workspace project", body: `${me.name}: ${p.title}` } });
     return json({ project: wsSummary(p, await wsItems(env, p.id), members) });
@@ -2792,6 +2802,14 @@ async function workspaceRoute(request, env, url, viewer, ctx) {
     await wsSaveItem(env, it);
     // Ideas, comments, review notes and new drafts stay inside the project — no Team Chat line or phone alert.
     // The team is told about the big moments only (new project, sent for approval, decisions, filed, deleted).
+    return json({ item: it });
+  }
+
+  if (path === "item/food") { // which dishes an idea shows (anyone on the project)
+    const it = await wsItem(env, body.id);
+    if (it.kind !== "idea" && it.kind !== "link") throw new HttpError(400, "Only ideas can have dishes.");
+    it.food = (Array.isArray(body.food) ? body.food : []).map((d) => wsText(d, 60)).filter(Boolean).slice(0, 12);
+    await wsSaveItem(env, it);
     return json({ item: it });
   }
 
@@ -3285,7 +3303,7 @@ async function studyRoute(request, env, url, viewer) {
 
 // ---- Campaigns: plans, budget, costs, influencers and monthly sales / email reports ----
 // One small table of JSON documents. Everyone signed in can read; only admins can change anything.
-const CAMP_KINDS = ["campaign", "budget", "cost", "influencer", "report"];
+const CAMP_KINDS = ["campaign", "budget", "cost", "influencer", "report", "menu"];
 async function ensureCampTable(env) {
   await env.DB.prepare("CREATE TABLE IF NOT EXISTS camp_docs (id TEXT PRIMARY KEY, kind TEXT NOT NULL, data TEXT NOT NULL, updated_at TEXT NOT NULL)").run();
 }

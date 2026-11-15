@@ -4960,7 +4960,11 @@ function CampOverview({year, camps, data, onOpen, run}){
   const em = emailMonth(data.docs, month), emPrev = emailMonth(data.docs, prevKey);
   const viewsIn = key => postStats.filter(p=>String(p.publishedAt||"").startsWith(key)).reduce((a,p)=>a+p.views, 0);
   const aov = m => m.orders ? m.sales/m.orders : null;
-  const rows12 = Array.from({length:12}, (_,i)=>{ const k = monthAdd(month, i-11), a = salesMonth(data.docs, k), b = salesMonth(data.docs, monthAdd(k, -12)); return {key:k, label:fmtDate(k+"-15", {month:"short"}), a: a.has? a.sales : null, b: b.has? b.sales : null}; });
+  // The chart stays on the 12 months up to the latest report; picking a month only highlights it (the window only moves
+  // when the picked month is outside it).
+  const anchor = reportMonths.length ? reportMonths[reportMonths.length-1] : monthAdd(thisMonth, -1);
+  const winEnd = month > anchor ? month : month < monthAdd(anchor, -11) ? monthAdd(month, 11) : anchor;
+  const rows12 = Array.from({length:12}, (_,i)=>{ const k = monthAdd(winEnd, i-11), a = salesMonth(data.docs, k), b = salesMonth(data.docs, monthAdd(k, -12)); return {key:k, label:fmtDate(k+"-15", {month:"short"}).slice(0,3), a: a.has? a.sales : null, b: b.has? b.sales : null}; });
   const channelParts = SALES_SOURCES.filter(s=>now.channels[s]).map(s=>({label:REPORT_SOURCES[s], value:now.channels[s].sales, color:CHANNEL_COLOR[s]}));
   const yearCosts = (data.docs||[]).filter(d=>d.kind==="cost" && String(d.date||"").startsWith(String(year)));
   const cats = {}; yearCosts.forEach(x=>{ const k = x.category || "Other"; cats[k] = (cats[k]||0) + (+x.amount||0); });

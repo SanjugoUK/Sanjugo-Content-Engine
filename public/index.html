@@ -4473,7 +4473,10 @@ function CampaignDetail({camp, camps, data, admin, onBack, saveCamp, toast}){
   const posts = state.contentItems.filter(i=>i.campaign===c.id);
   // Real numbers of the posts made for this campaign (pulled from Instagram, Facebook, YouTube… via Make).
   const realData = useRealAnalytics();
-  const postStats = useMemo(()=>realAnalyticsPosts(realData, state.contentItems).filter(p=>p.campaign===c.id), [realData, state.contentItems, c.id]);
+  const allPosts = useMemo(()=>realAnalyticsPosts(realData, state.contentItems), [realData, state.contentItems]);
+  const postStats = useMemo(()=>allPosts.filter(p=>inCampaign(c, p)), [allPosts, c.id, (c.linkedPosts||[]).join()]);
+  const [linkOpen, setLinkOpen] = useState(false);
+  async function linkPosts(keys){ const next = {...c, linkedPosts:keys}; setC(next); setBusy("Saving…"); try{ const s = await saveCamp(next); setC(x=>({...x, ...s, legacy:false})); setDirty(false); toast(keys.length+" published post"+(keys.length===1?"":"s")+" linked"); }catch(e){ toast(e.message, "danger"); } setBusy(""); setLinkOpen(false); }
   const ps = postStats.reduce((a,p)=>({views:a.views+p.views, likes:a.likes+p.likes, comments:a.comments+p.comments, shares:a.shares+p.shares, saves:a.saves+p.saves}), {views:0, likes:0, comments:0, shares:0, saves:0});
   const psEng = ps.views ? (ps.likes+ps.comments+ps.shares+ps.saves)/ps.views*100 : 0;
   const res = campResults(c, data.docs);
@@ -4530,7 +4533,7 @@ function CampaignDetail({camp, camps, data, admin, onBack, saveCamp, toast}){
   const owner = (USERS.find(u=>u.id===c.owner)||{}).name;
   const wsProjects = (data.projects||[]).filter(p=>p.campaignId===c.id);
   const tabsDef = [["results","Results"],["kitchen","Kitchen", dishes.length||null],["tasks","Tasks", (c.tasks||[]).filter(t=>!t.done).length||null],["influencers","Influencers", (c.collabs||[]).length||null],
-    ["costs","Costs", costs.length||null],["posts","Posts & videos", (posts.length+wsProjects.length)||null],["review","Review"]];
+    ["costs","Costs", costs.length||null],["posts","Posts & videos", (posts.length+(c.linkedPosts||[]).length+wsProjects.length)||null],["review","Review"]];
   const T = tab => tab===detailTab;
   const empty = text => <div style={{fontSize:13, color:"var(--ink-mute)", padding:"8px 0"}}>{text}</div>;
   const pdfButtons = fn => <div style={{display:"flex", gap:6}}><Button size="sm" icon="download" onClick={()=>fn(false)}>PDF</Button>{share && <Button size="sm" icon="share" onClick={()=>fn(true)}>Share</Button>}</div>;
@@ -4670,8 +4673,16 @@ function CampaignDetail({camp, camps, data, admin, onBack, saveCamp, toast}){
         </>}
 
         {T("posts") && <>
-          {panelHead("Posts")}
-          {!posts.length ? empty("No posts yet — pick this campaign in Create.") :
+          {panelHead("Published posts", admin && <Button size="sm" icon="link" onClick={()=>setLinkOpen(true)}>Link published posts</Button>)}
+          {(()=>{ const linked = postStats.filter(p=>(c.linkedPosts||[]).includes(postKey(p))); return !linked.length ? (posts.length? null : empty("None linked yet — link posts that went out for this campaign.")) :
+            linked.map((p,i)=><div key={postKey(p)} style={{...rowLine, borderTop: i? rowLine.borderTop : "none"}}>
+              <div style={{width:36, height:36, flexShrink:0, borderRadius:6, overflow:"hidden"}}><PostThumb post={p} radius={6} iconSize={12}/></div>
+              <PlatformIcon platform={p.platform} size={12}/>
+              <span style={{flex:1, minWidth:0}}><b style={{display:"block", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>{(p.caption||p.contentTitle||"").split("\n")[0] || "Post"}</b><span style={{fontSize:11.5, color:"var(--ink-mute)"}}>{fmtDateTime(p.publishedAt)}</span></span>
+              <span><b>{p.views.toLocaleString("en-GB")}</b> <span style={{color:"var(--ink-mute)"}}>views</span></span><span style={{color:"var(--ink-mute)", minWidth:50, textAlign:"right"}}>{p.engagementRate.toFixed(1)}%</span>
+              {p.permalink && <a href={p.permalink} target="_blank" rel="noopener noreferrer" style={{color:"var(--accent)", fontWeight:600}}>↗</a>}</div>); })()}
+          {posts.length>0 && <div style={{marginTop:14}}>{panelHead("Made in Create")}</div>}
+          {!posts.length ? null :
             posts.slice(0, 20).map((p,i)=>{ const st = postStats.filter(x=>x.contentId===p.id); return <div key={p.id} role="button" onClick={()=>dispatch({type:"SET_ROUTE", route:"calendar"})} style={{...rowLine, borderTop: i? rowLine.borderTop : "none", cursor:"pointer"}}>
               <div style={{width:36, height:36, flexShrink:0}}><Thumb item={p} radius={6} iconSize={12}/></div>
               <span style={{flex:1, minWidth:0}}><b style={{display:"block", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>{p.title}</b>
@@ -4698,8 +4709,36 @@ function CampaignDetail({camp, camps, data, admin, onBack, saveCamp, toast}){
         set({collabs: i!=null ? (c.collabs||[]).map((x,j)=>j===i? col : x) : [...(c.collabs||[]), col]}); setCollabOpen(null); toast("Added — tap “Save changes” to keep it"); }}
         onDelete={collabOpen.index!=null ? ()=>{ listDel("collabs", collabOpen.index); setCollabOpen(null); } : null}/>}
       {costOpen && <CostModal camps={camps} data={data} toast={toast} preset={{campaignId:c.id}} onClose={()=>setCostOpen(false)}/>}
+      {linkOpen && <LinkPostsModal c={c} posts={allPosts} onClose={()=>setLinkOpen(false)} onSave={linkPosts}/>}
     </div>
   );
+}
+/* Pick published posts (from Published Content) that belong to a campaign. Starts near the campaign's dates. */
+function LinkPostsModal({c, posts, onClose, onSave}){
+  const [sel, setSel] = useState(()=>new Set(c.linkedPosts||[]));
+  const [q, setQ] = useState(""), [all, setAll] = useState(false);
+  const from = c.start ? isoDay(new Date(Date.parse(c.start)-14*86400e3)) : "", to = c.end ? isoDay(new Date(Date.parse(c.end)+30*86400e3)) : "";
+  const list = posts.filter(p=>!(p.campaign===c.id)).filter(p=>all || !from || ((p.publishedAt||"").slice(0,10)>=from && (!to || (p.publishedAt||"").slice(0,10)<=to)))
+    .filter(p=>!q || ((p.caption||"")+" "+p.platform).toLowerCase().includes(q.toLowerCase())).sort((a,b)=>String(b.publishedAt).localeCompare(String(a.publishedAt)));
+  const toggle = k => setSel(s=>{ const n = new Set(s); n.has(k)? n.delete(k) : n.add(k); return n; });
+  return <Modal open onClose={onClose} width={600}><div style={{padding:20}}>
+    <h3 style={{margin:"0 0 4px", fontSize:17}}>Link published posts</h3>
+    <div style={{fontSize:12.5, color:"var(--ink-mute)", marginBottom:12}}>Their views and engagement count towards “{c.name}”.</div>
+    <div style={{display:"flex", gap:8, marginBottom:10, flexWrap:"wrap", alignItems:"center"}}>
+      <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search captions" style={{...campInput, flex:"1 1 200px"}}/>
+      {from && <label style={{display:"flex", gap:6, alignItems:"center", fontSize:12.5}}><input type="checkbox" checked={all} onChange={e=>setAll(e.target.checked)}/>Show all dates</label>}
+    </div>
+    <div style={{maxHeight:"52vh", overflowY:"auto", border:"1px solid var(--border)", borderRadius:10}}>
+      {!list.length ? <div style={{padding:16, fontSize:13, color:"var(--ink-mute)"}}>No published posts {from && !all ? "around these dates" : ""} — stats come in through Settings → Stats → Get latest.</div> :
+        list.map(p=>{ const k = postKey(p); return <label key={k} style={{display:"flex", alignItems:"center", gap:10, padding:"9px 12px", borderBottom:"1px solid var(--border)", cursor:"pointer", background: sel.has(k)? "var(--accent-soft)" : "transparent"}}>
+          <input type="checkbox" checked={sel.has(k)} onChange={()=>toggle(k)}/>
+          <div style={{width:36, height:36, flexShrink:0, borderRadius:6, overflow:"hidden"}}><PostThumb post={p} radius={6} iconSize={12}/></div>
+          <PlatformIcon platform={p.platform} size={12}/>
+          <span style={{flex:1, minWidth:0, fontSize:12.5}}><b style={{display:"block", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>{(p.caption||"").split("\n")[0] || "No caption"}</b><span style={{color:"var(--ink-mute)"}}>{fmtDateTime(p.publishedAt)} · {p.views.toLocaleString("en-GB")} views</span></span>
+        </label>; })}
+    </div>
+    <div style={{display:"flex", alignItems:"center", gap:8, marginTop:14}}><span style={{fontSize:12.5, color:"var(--ink-mute)", flex:1}}>{sel.size} selected</span><Button onClick={onClose}>Cancel</Button><Button variant="primary" onClick={()=>onSave([...sel])}>Link {sel.size}</Button></div>
+  </div></Modal>;
 }
 /* After the campaign: the team's own review, plus an AI review written from every number on the page. */
 function CampReview({c, set, setIn, ro, M, res, posts, data, toast, dirty, save, bare}){
@@ -4714,7 +4753,7 @@ function CampReview({c, set, setIn, ro, M, res, posts, data, toast, dirty, save,
     M.ret!=null ? "Return (sales ÷ spend): "+M.ret.toFixed(1)+"x." : "", M.perItem!=null ? "Cost per item sold: £"+M.perItem.toFixed(2)+"." : "", M.per1k!=null ? "Cost per 1,000 views: £"+M.per1k.toFixed(2)+"." : "",
     (c.collabs||[]).length ? "Influencers: "+(c.collabs||[]).map(col=>col.handle+" ("+(col.status||"")+", "+collabViews(col, data.study).n+" views, "+money(col.cost)+")").join("; ")+"." : "No influencers.",
     res.mail.length ? "Emails: "+res.mail.map(e=>e.name+" ("+(e.openRate!=null? e.openRate+"% opened" : "")+(e.clickRate!=null? ", "+e.clickRate+"% clicked" : "")+(e.bookings? ", "+e.bookings+" bookings" : "")+")").join("; ")+"." : "",
-    posts.filter(p=>p.campaign===c.id).length ? "Our social posts: "+posts.filter(p=>p.campaign===c.id).map(p=>p.platform+" "+p.views+" views, "+p.engagementRate.toFixed(1)+"% engagement").join("; ")+"." : "",
+    posts.filter(p=>inCampaign(c, p)).length ? "Our social posts: "+posts.filter(p=>inCampaign(c, p)).map(p=>p.platform+" "+p.views+" views, "+p.engagementRate.toFixed(1)+"% engagement").join("; ")+"." : "",
     c.results && c.results.sold ? "Sold (typed in): "+c.results.sold : "", c.results && c.results.notes ? "Team notes: "+c.results.notes : "",
     r.worked ? "Team says worked: "+r.worked : "", r.didnt ? "Team says didn't work: "+r.didnt : "",
   ].filter(Boolean).join("\n");
@@ -4864,12 +4903,15 @@ function campLift(c, docs){
   const isNew = b.has && !b.qty && dAvg.qty > 0;
   return {before, after, during, b, a, dAvg, dTotal:{qty:d.reduce((s,x)=>s+x.qty, 0), sales:d.reduce((s,x)=>s+x.sales, 0), uses:d.reduce((s,x)=>s+x.uses, 0)}, lift, isNew, anyData: b.has || a.has || d.some(x=>x.has)};
 }
+// A published post belongs to a campaign when it was made for it in Create, or was linked to it on the campaign page.
+const postKey = p => p.platform+":"+p.postId;
+const inCampaign = (c, p) => p.campaign===c.id || (c.linkedPosts||[]).includes(postKey(p));
 /* Everything we know about one campaign, as numbers — used by the comparison table, the year report and the AI review. */
 function campMetrics(c, docs, study, postStats){
   const spent = (docs||[]).filter(d=>d.kind==="cost" && d.campaignId===c.id).reduce((a,x)=>a+(+x.amount||0), 0);
   const L = campLift(c, docs);
   const inflViews = (c.collabs||[]).reduce((a,col)=>a+collabViews(col, study).n, 0);
-  const posts = (postStats||[]).filter(p=>p.campaign===c.id), postViews = posts.reduce((a,p)=>a+p.views, 0);
+  const posts = (postStats||[]).filter(p=>inCampaign(c, p)), postViews = posts.reduce((a,p)=>a+p.views, 0);
   const extra = +(c.results && c.results.extraSales) || 0;
   const qty = L ? L.dTotal.qty : 0, sales = L ? L.dTotal.sales : 0, views = inflViews + postViews;
   const ret = spent ? (extra || sales)/spent : null;

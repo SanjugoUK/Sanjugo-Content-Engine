@@ -4882,8 +4882,8 @@ function salesMonth(docs, key){
 }
 function emailMonth(docs, key){
   const es = (docs||[]).filter(d=>d.kind==="report" && d.source==="sevenrooms" && d.month===key).flatMap(r=>(r.summary||{}).emails||[]);
-  const rates = k => { const v = es.map(e=>e[k]).filter(x=>x!=null && x!=="").map(Number); return v.length ? v.reduce((a,b)=>a+b, 0)/v.length : null; };
-  return {count:es.length, openRate:rates("openRate"), clickRate:rates("clickRate"), bookings: es.reduce((a,e)=>a+(+e.bookings||0), 0), has: es.length>0};
+  const t = emailTotals(es);
+  return {count:es.length, openRate:t.openRate, clickRate:t.clickRate, bookings:t.bookings, covers:t.covers, has: es.length>0};
 }
 /* What a campaign's tracked items / codes sold in one month (from the reports). */
 function trackedMonth(c, docs, key){
@@ -5253,14 +5253,14 @@ function SummaryEditor({s, setS, source}){
     {source!=="sevenrooms" && <div><div style={{fontSize:12, fontWeight:700, marginBottom:4}}>Items ({(s.items||[]).length})</div>{table("items", [["name","Item"],["qty","Qty","number"],["sales","£","number"]])}</div>}
     {source!=="sevenrooms" && (s.codes||[]).length>0 && <div><div style={{fontSize:12, fontWeight:700, marginBottom:4}}>Promo codes</div>{table("codes", [["code","Code"],["count","Used","number"],["discount","Discount £","number"]])}</div>}
     {source!=="sevenrooms" && (s.branches||[]).length>0 && <div><div style={{fontSize:12, fontWeight:700, marginBottom:4}}>Branches</div>{table("branches", [["name","Branch"],["sales","£","number"],["orders","Orders","number"]])}</div>}
-    {(source==="sevenrooms" || (s.emails||[]).length>0) && <div><div style={{fontSize:12, fontWeight:700, marginBottom:4}}>Emails</div>{table("emails", [["name","Email"],["date","Date"],["sent","Sent","number"],["openRate","Open %","number"],["clickRate","Click %","number"],["bookings","Bookings","number"]])}</div>}
+    {(source==="sevenrooms" || (s.emails||[]).length>0) && <div><div style={{fontSize:12, fontWeight:700, marginBottom:4}}>Emails</div>{table("emails", [["name","Email"],["date","Date"],["branch","Branch"],["sent","Sent","number"],["opens","Opens","number"],["openRate","Open %","number"],["clicks","Clicks","number"],["clickRate","Click %","number"],["bookings","Reserv.","number"],["covers","Covers","number"],["revenue","£","number"],["unsubscribed","Unsub.","number"]])}</div>}
     {s.notes && <div style={{fontSize:12, color:"var(--ink-mute)"}}>AI note: {s.notes}</div>}
   </div>;
 }
 function ReportUpload({preset, data, toast, exists, onClose}){
   const [f, setF] = useState(preset); const [file, setFile] = useState(null);
   const [step, setStep] = useState("pick"); const [summary, setSummary] = useState(null); const [msg, setMsg] = useState("");
-  const id = "report_"+f.source+"_"+f.month;
+  const id = "report_"+f.source+"_"+f.month+(f.source==="sevenrooms" && f.branch? "_"+f.branch.toLowerCase() : "");
   async function read(){
     if(!file) return toast("Pick the report file first", "warn");
     setStep("reading");
@@ -5275,7 +5275,8 @@ function ReportUpload({preset, data, toast, exists, onClose}){
   }
   async function save(){
     setStep("saving");
-    try{ const up = await uploadMediaFile(file); await data.save({kind:"report", id, source:f.source, month:f.month, fileName:file.name, fileUrl:up.url, summary}); toast(REPORT_SOURCES[f.source]+" "+f.month+" saved"); onClose(); }
+    try{ const up = await uploadMediaFile(file); const sum2 = f.source==="sevenrooms" && f.branch ? {...summary, emails:(summary.emails||[]).map(e=>({...e, branch: e.branch || f.branch}))} : summary;
+      await data.save({kind:"report", id, source:f.source, month:f.month, ...(f.source==="sevenrooms" && f.branch? {branch:f.branch} : {}), fileName:file.name, fileUrl:up.url, summary:sum2}); toast(REPORT_SOURCES[f.source]+" "+f.month+" saved"); onClose(); }
     catch(e){ toast(e.message, "danger"); setStep("check"); }
   }
   return <Modal open onClose={onClose} width={step==="check"? 720 : 460}><div style={{padding:20}}>
@@ -5283,6 +5284,7 @@ function ReportUpload({preset, data, toast, exists, onClose}){
     <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, marginBottom:12}}>
       <Field label="From"><Select value={f.source} onChange={v=>setF({...f, source:v})} options={Object.entries(REPORT_SOURCES).map(([k,l])=>({value:k, label:l}))}/></Field>
       <Field label="Month"><input type="month" value={f.month} onChange={e=>setF({...f, month:e.target.value})} style={campInput}/></Field>
+      {f.source==="sevenrooms" && <Field label="Branch"><Select value={f.branch||"Shoreditch"} onChange={v=>setF({...f, branch:v})} options={CAMP_BRANCHES.map(b=>({value:b, label:b}))}/></Field>}
     </div>
     {step==="pick" && <>
       <Field label="Report file (CSV, Excel or PDF)"><input type="file" accept=".csv,.tsv,.txt,.xlsx,.xls,.xlsm,.pdf" onChange={e=>setFile(e.target.files[0]||null)} style={{fontSize:12.5}}/></Field>
@@ -5300,7 +5302,7 @@ function ReportUpload({preset, data, toast, exists, onClose}){
 function ReportView({r, admin, data, toast, onClose}){
   const [s, setS] = useState(r.summary||{}); const [dirty, setDirty] = useState(false);
   return <Modal open onClose={onClose} width={720}><div style={{padding:20}}>
-    <div style={{display:"flex", alignItems:"center", gap:8, marginBottom:12, flexWrap:"wrap"}}><h3 style={{margin:0, fontSize:17, flex:1}}>{REPORT_SOURCES[r.source]} · {fmtDate(r.month+"-15", {month:"long", year:"numeric"})}</h3>
+    <div style={{display:"flex", alignItems:"center", gap:8, marginBottom:12, flexWrap:"wrap"}}><h3 style={{margin:0, fontSize:17, flex:1}}>{REPORT_SOURCES[r.source]}{r.branch? " · "+r.branch : ""} · {fmtDate(r.month+"-15", {month:"long", year:"numeric"})}</h3>
       {r.fileUrl && <a href={r.fileUrl} target="_blank" rel="noopener noreferrer" style={{fontSize:12.5, color:"var(--accent)", fontWeight:600}}>Original file ↗</a>}</div>
     {admin ? <SummaryEditor s={s} setS={v=>{ setS(v); setDirty(true); }} source={r.source}/> : <SummaryEditor s={s} setS={()=>{}} source={r.source}/>}
     <div style={{display:"flex", gap:8, marginTop:16}}>{admin && <ConfirmButton confirmLabel="Yes, delete" onConfirm={async ()=>{ try{ await data.del(r.id); toast("Report deleted"); onClose(); }catch(e){ toast(e.message, "danger"); } }}>Delete</ConfirmButton>}
@@ -5375,55 +5377,83 @@ function InfluencerModal({inf, data, toast, onClose}){
 /* ---------- Email marketing (SevenRooms) ----------
    Monthly SevenRooms reports, read by AI like the sales reports: every email with sent / opened / clicked / bookings,
    month-by-month trends, and which campaign each email belonged to. */
+function emailTotals(list){
+  const n = v => v==null || v==="" ? 0 : +v, sum = k => list.reduce((a,e)=>a+n(e[k]), 0);
+  const sent = sum("sent"), withOpens = list.filter(e=>e.opens!=null && e.sent);
+  const rate = (cnt, rk) => { const w = list.filter(e=>e[cnt]!=null && e.sent); if(w.length) { const s2 = w.reduce((a,e)=>a+n(e.sent), 0); return s2 ? w.reduce((a,e)=>a+n(e[cnt]), 0)/s2*100 : null; }
+    const v = list.map(e=>e[rk]).filter(x=>x!=null && x!=="").map(Number); return v.length ? v.reduce((a,b)=>a+b, 0)/v.length : null; };
+  return {count:list.length, sent, opens:sum("opens"), openRate:rate("opens", "openRate"), clickRate:rate("clicks", "clickRate"), bookings:sum("bookings"), covers:sum("covers"), revenue:sum("revenue"), unsubscribed:sum("unsubscribed"), withOpens:withOpens.length};
+}
 function CampEmail({data, camps, admin, toast, onOpen}){
   const [up, setUp] = useState(null), [view, setView] = useState(null);
-  const [sort, setSort] = useState("date");
+  const [sort, setSort] = useState("date"), [branch, setBranch] = useState("all");
   const reports = data.docs.filter(d=>d.kind==="report" && d.source==="sevenrooms").sort((a,b)=>String(b.month).localeCompare(String(a.month)));
   const campOf = e => camps.find(c=>{ const names = splitList(c.track && c.track.emails); const nm = String(e.name||"").toLowerCase();
     return names.length ? names.some(w=>nm.includes(w)) : (e.date && c.start && e.date>=c.start && e.date<=(c.end||c.start) && c.type==="email"); });
-  const emails = reports.flatMap(r=>((r.summary||{}).emails||[]).map(e=>({...e, month:r.month})));
+  const all = reports.flatMap(r=>((r.summary||{}).emails||[]).map(e=>({...e, branch: e.branch || r.branch || "", month:r.month, _r:r})));
+  const branches = CAMP_BRANCHES.filter(b=>all.some(e=>e.branch===b));
+  const emails = branch==="all" ? all : all.filter(e=>e.branch===branch);
   const num = v => v==null || v==="" ? null : +v;
-  const avg = (list, k) => { const v = list.map(e=>num(e[k])).filter(x=>x!=null); return v.length ? v.reduce((a,b)=>a+b, 0)/v.length : null; };
-  const sum = (list, k) => list.reduce((a,e)=>a+(num(e[k])||0), 0);
-  const recent = emails.filter(e=>String(e.date||e.month+"-01") >= isoDay(new Date(Date.now()-365*86400e3)));
+  const yearAgo = isoDay(new Date(Date.now()-365*86400e3));
+  const recent = emails.filter(e=>String(e.date||e.month+"-01") >= yearAgo), T = emailTotals(recent);
   const sorted = [...emails].sort((a,b)=> sort==="date" ? String(b.date||b.month).localeCompare(String(a.date||a.month)) : (num(b[sort])||0)-(num(a[sort])||0));
-  const best = [...recent].filter(e=>num(e.openRate)!=null).sort((a,b)=>num(b.openRate)-num(a.openRate))[0];
+  const best = [...recent].filter(e=>num(e.openRate)!=null && num(e.sent)>=500).sort((a,b)=>num(b.openRate)-num(a.openRate))[0];
   const months = [...new Set(emails.map(e=>e.month))].sort().reverse().slice(0, 12);
   const pct = v => v==null ? "—" : (+v).toFixed(1).replace(/\.0$/, "")+"%";
-  const th = (k, l) => <th style={{padding:"6px 4px", cursor:"pointer", color: sort===k? "var(--accent)" : undefined}} onClick={()=>setSort(k)}>{l}{sort===k? " ↓" : ""}</th>;
+  const int = v => v ? (+v).toLocaleString("en-GB") : "—";
+  const th = (k, l, right) => <th style={{padding:"6px 6px", cursor:"pointer", whiteSpace:"nowrap", textAlign: right? "right" : "left", color: sort===k? "var(--accent)" : undefined}} onClick={()=>setSort(k)}>{l}{sort===k? " ↓" : ""}</th>;
+  const td = {padding:"7px 6px", textAlign:"right", whiteSpace:"nowrap"};
+  const chip = (v, l) => <button key={v} onClick={()=>setBranch(v)} style={{border:"1px solid "+(branch===v? "var(--accent)" : "var(--border)"), background: branch===v? "var(--accent-soft, var(--surface-2))" : "var(--surface)", color: branch===v? "var(--accent)" : "var(--ink-soft)", borderRadius:99, padding:"5px 12px", fontSize:12.5, fontWeight:600, cursor:"pointer"}}>{l}</button>;
   return (
     <div>
-      <div style={{display:"flex", alignItems:"center", gap:8, flexWrap:"wrap", marginBottom:14}}><div style={{fontSize:12.5, color:"var(--ink-mute)", flex:1}}>SevenRooms emails — upload each month's report and see what people opened, clicked and booked.</div>
-        {admin && reports.length>0 && <Button variant="primary" size="sm" icon="upload" onClick={()=>setUp({source:"sevenrooms", month:prevMonth()})}>Upload report</Button>}</div>
+      <div style={{display:"flex", alignItems:"center", gap:8, flexWrap:"wrap", marginBottom:14}}>
+        <div style={{display:"flex", gap:6, flexWrap:"wrap", flex:1}}>{reports.length>0 && [chip("all", "All branches"), ...branches.map(b=>chip(b, b))]}</div>
+        {admin && reports.length>0 && <Button variant="primary" size="sm" icon="upload" onClick={()=>setUp({source:"sevenrooms", month:prevMonth(), branch: branch==="all"? "Shoreditch" : branch})}>Upload report</Button>}</div>
       {!reports.length ? <Card><EmptyState icon="send" title="No email reports yet" subtitle={"In SevenRooms, export last month's email campaign report (CSV, Excel or PDF)"+(admin? " and upload it here. AI reads the numbers; you check them before saving." : ". An admin uploads it here.")}
-        action={admin && <Button variant="primary" icon="upload" onClick={()=>setUp({source:"sevenrooms", month:prevMonth()})}>Upload report</Button>}/></Card> : <div style={{display:"flex", flexDirection:"column", gap:14}}>
-        <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(140px, 1fr))", gap:8}}>
-          <Stat label="Emails (last 12 months)" value={recent.length} sub={sum(recent, "sent")? sum(recent, "sent").toLocaleString("en-GB")+" sent" : null}/>
-          <Stat label="Average opened" value={pct(avg(recent, "openRate"))}/>
-          <Stat label="Average clicked" value={pct(avg(recent, "clickRate"))}/>
-          <Stat label="Bookings from emails" value={sum(recent, "bookings")? sum(recent, "bookings").toLocaleString("en-GB") : "—"} sub={sum(recent, "revenue")? money(sum(recent, "revenue")) : null}/>
-          {best && <Stat label="Best opened" value={pct(best.openRate)} sub={best.name}/>}
+        action={admin && <Button variant="primary" icon="upload" onClick={()=>setUp({source:"sevenrooms", month:prevMonth(), branch:"Shoreditch"})}>Upload report</Button>}/></Card> : <div style={{display:"flex", flexDirection:"column", gap:14}}>
+        <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(130px, 1fr))", gap:8}}>
+          <Stat label="Emails · 12 months" value={T.count} sub={T.sent? T.sent.toLocaleString("en-GB")+" sent" : null}/>
+          <Stat label="Opened" value={pct(T.openRate)} sub={T.opens? T.opens.toLocaleString("en-GB")+" opens" : null}/>
+          <Stat label="Clicked" value={pct(T.clickRate)}/>
+          <Stat label="Reservations" value={int(T.bookings)} sub={T.covers? T.covers.toLocaleString("en-GB")+" covers" : null}/>
+          <Stat label="Revenue" value={T.revenue? money(T.revenue) : "£0"}/>
+          <Stat label="Unsubscribed" value={int(T.unsubscribed)} sub={T.sent && T.unsubscribed? pct(T.unsubscribed/T.sent*100)+" of sent" : null}/>
+          {best && <Stat label="Best opened" value={pct(best.openRate)} sub={best.name+(branch==="all" && best.branch? " · "+best.branch : "")}/>}
         </div>
+        {branch==="all" && branches.length>1 && <Card style={{padding:14}}>
+          <div style={{fontWeight:700, fontSize:14, marginBottom:8}}>By branch <span style={{fontWeight:400, fontSize:12, color:"var(--ink-mute)"}}>· last 12 months</span></div>
+          <div style={{overflowX:"auto"}}><table style={{width:"100%", borderCollapse:"collapse", fontSize:12.5, minWidth:560}}>
+            <thead><tr style={{color:"var(--ink-mute)"}}><th style={{padding:"6px", textAlign:"left"}}>Branch</th>{["Emails","Sent","Opened","Clicked","Reservations","Covers","Revenue"].map(h=><th key={h} style={{padding:"6px", textAlign:"right"}}>{h}</th>)}</tr></thead>
+            <tbody>{branches.map(b=>{ const t = emailTotals(recent.filter(e=>e.branch===b)); return (
+              <tr key={b} style={{borderTop:"1px solid var(--border)", cursor:"pointer"}} onClick={()=>setBranch(b)}><td style={{padding:"7px 6px", fontWeight:700}}>{b}</td><td style={td}>{t.count}</td><td style={td}>{int(t.sent)}</td>
+                <td style={{...td, fontWeight:700}}>{pct(t.openRate)}</td><td style={td}>{pct(t.clickRate)}</td><td style={td}>{int(t.bookings)}</td><td style={td}>{int(t.covers)}</td><td style={td}>{t.revenue? money(t.revenue) : "£0"}</td></tr>); })}</tbody>
+          </table></div>
+        </Card>}
         <Card style={{padding:14}}>
           <div style={{fontWeight:700, fontSize:14, marginBottom:8}}>Month by month</div>
-          <div style={{overflowX:"auto"}}><table style={{width:"100%", borderCollapse:"collapse", fontSize:12.5, minWidth:520}}>
-            <thead><tr style={{color:"var(--ink-mute)", textAlign:"left"}}><th style={{padding:"6px 4px"}}>Month</th><th>Emails</th><th>Sent</th><th>Opened</th><th>Clicked</th><th>Bookings</th><th/></tr></thead>
-            <tbody>{months.map(m=>{ const es = emails.filter(e=>e.month===m), r = reports.find(x=>x.month===m); return (
-              <tr key={m} style={{borderTop:"1px solid var(--border)"}}><td style={{padding:"7px 4px", fontWeight:700}}>{fmtDate(m+"-15", {month:"long", year:"numeric"})}</td><td>{es.length}</td><td>{sum(es, "sent")? sum(es, "sent").toLocaleString("en-GB") : "—"}</td>
-                <td>{pct(avg(es, "openRate"))}</td><td>{pct(avg(es, "clickRate"))}</td><td>{sum(es, "bookings") || "—"}</td>
-                <td>{r && <button onClick={()=>setView(r)} style={{border:"none", background:"none", color:"var(--accent)", fontWeight:600, cursor:"pointer", fontSize:12.5}}>{admin? "Check / edit" : "Open"}</button>}</td></tr>); })}</tbody>
+          <div style={{overflowX:"auto"}}><table style={{width:"100%", borderCollapse:"collapse", fontSize:12.5, minWidth:560}}>
+            <thead><tr style={{color:"var(--ink-mute)"}}><th style={{padding:"6px", textAlign:"left"}}>Month</th>{["Emails","Sent","Opened","Clicked","Reservations","Covers"].map(h=><th key={h} style={{padding:"6px", textAlign:"right"}}>{h}</th>)}<th/></tr></thead>
+            <tbody>{months.map(m=>{ const es = emails.filter(e=>e.month===m), t = emailTotals(es), rs = reports.filter(x=>x.month===m && (branch==="all" || (x.branch||"")===branch || !x.branch)); return (
+              <tr key={m} style={{borderTop:"1px solid var(--border)"}}><td style={{padding:"7px 6px", fontWeight:700}}>{fmtDate(m+"-15", {month:"long", year:"numeric"})}</td><td style={td}>{t.count}</td><td style={td}>{int(t.sent)}</td>
+                <td style={td}>{pct(t.openRate)}</td><td style={td}>{pct(t.clickRate)}</td><td style={td}>{int(t.bookings)}</td><td style={td}>{int(t.covers)}</td>
+                <td style={{textAlign:"right", whiteSpace:"nowrap"}}>{rs.map(r=><button key={r.id} onClick={()=>setView(r)} style={{border:"none", background:"none", color:"var(--accent)", fontWeight:600, cursor:"pointer", fontSize:12}}>{(admin? "Edit" : "Open")+(rs.length>1 && r.branch? " "+r.branch : "")}</button>)}</td></tr>); })}</tbody>
           </table></div>
         </Card>
         <Card style={{padding:14}}>
           <div style={{fontWeight:700, fontSize:14, marginBottom:8}}>Every email <span style={{fontWeight:400, fontSize:12, color:"var(--ink-mute)"}}>· tap a heading to sort</span></div>
-          <div style={{overflowX:"auto"}}><table style={{width:"100%", borderCollapse:"collapse", fontSize:12.5, minWidth:640}}>
-            <thead><tr style={{color:"var(--ink-mute)", textAlign:"left"}}><th style={{padding:"6px 4px"}}>Email</th>{th("date", "Date")}{th("sent", "Sent")}{th("openRate", "Opened")}{th("clickRate", "Clicked")}{th("bookings", "Bookings")}<th>Campaign</th></tr></thead>
-            <tbody>{sorted.slice(0, 100).map((e,i)=>{ const c = campOf(e); return (
-              <tr key={i} style={{borderTop:"1px solid var(--border)"}}><td style={{padding:"7px 4px", fontWeight:600}}>{e.name}</td><td>{e.date? fmtDay(e.date) : e.month}</td><td>{num(e.sent)!=null? (+e.sent).toLocaleString("en-GB") : "—"}</td>
-                <td style={{fontWeight:700, color: num(e.openRate)!=null && avg(recent, "openRate")!=null ? (+e.openRate >= avg(recent, "openRate") ? "var(--green)" : "var(--ink)") : "var(--ink)"}}>{pct(e.openRate)}</td><td>{pct(e.clickRate)}</td><td>{e.bookings||"—"}</td>
-                <td>{c ? <button onClick={()=>onOpen(c)} style={{border:"none", background:"none", padding:0, color:"var(--accent)", fontWeight:600, cursor:"pointer", fontSize:12.5}}>{c.name}</button> : <span style={{color:"var(--ink-mute)"}}>—</span>}</td></tr>); })}</tbody>
+          <div style={{overflowX:"auto"}}><table style={{width:"100%", borderCollapse:"collapse", fontSize:12.5, minWidth:860}}>
+            <thead><tr style={{color:"var(--ink-mute)"}}><th style={{padding:"6px", textAlign:"left"}}>Email</th>{th("date", "Date")}{branch==="all" && <th style={{padding:"6px", textAlign:"left"}}>Branch</th>}{th("sent", "Sent", 1)}{th("openRate", "Opened", 1)}{th("clickRate", "Clicked", 1)}{th("bookings", "Reserv.", 1)}{th("covers", "Covers", 1)}{th("revenue", "Revenue", 1)}{th("unsubscribed", "Unsub.", 1)}<th style={{padding:"6px", textAlign:"left"}}>Campaign</th></tr></thead>
+            <tbody>{sorted.slice(0, 150).map((e,i)=>{ const c = campOf(e), avgOpen = T.openRate; return (
+              <tr key={i} style={{borderTop:"1px solid var(--border)"}}>
+                <td style={{padding:"7px 6px", minWidth:200}}><div style={{fontWeight:600}}>{e.name}</div>{(e.subject || e.audience) && <div style={{fontSize:11.5, color:"var(--ink-mute)"}}>{e.subject}{e.audience? (e.subject? " · " : "")+"To: "+e.audience : ""}</div>}</td>
+                <td style={{padding:"7px 6px", whiteSpace:"nowrap"}}>{e.date? fmtDay(e.date) : e.month}</td>
+                {branch==="all" && <td style={{padding:"7px 6px"}}>{e.branch||"—"}</td>}
+                <td style={td}>{num(e.sent)!=null? (+e.sent).toLocaleString("en-GB") : "—"}</td>
+                <td style={{...td, fontWeight:700, color: num(e.openRate)!=null && avgOpen!=null && +e.openRate >= avgOpen ? "var(--green)" : "var(--ink)"}}>{pct(e.openRate)}</td>
+                <td style={td}>{pct(e.clickRate)}</td><td style={td}>{e.bookings||"—"}</td><td style={td}>{e.covers||"—"}</td><td style={td}>{num(e.revenue)? money(e.revenue) : "—"}</td><td style={td}>{e.unsubscribed||"—"}</td>
+                <td style={{padding:"7px 6px"}}>{c ? <button onClick={()=>onOpen(c)} style={{border:"none", background:"none", padding:0, color:"var(--accent)", fontWeight:600, cursor:"pointer", fontSize:12.5, textAlign:"left"}}>{c.name}</button> : <span style={{color:"var(--ink-mute)"}}>—</span>}</td></tr>); })}</tbody>
           </table></div>
-          <div style={{fontSize:11.5, color:"var(--ink-mute)", marginTop:8}}>An email is linked to a campaign when its name is listed under that campaign's Results → "Emails", or when it was sent during an Email-type campaign.</div>
+          <div style={{fontSize:11.5, color:"var(--ink-mute)", marginTop:8}}>Green = opened better than average. An email joins a campaign when its name is in that campaign's Results → "Emails".</div>
         </Card>
       </div>}
       {up && <ReportUpload preset={up} data={data} toast={toast} exists={id=>reports.some(r=>r.id===id)} onClose={()=>setUp(null)}/>}

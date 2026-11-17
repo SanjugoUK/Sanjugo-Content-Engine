@@ -9365,12 +9365,30 @@ function WsProject({id, onBack}){
   const [naming, setNaming] = useState(false);
   const [showDetails, setShowDetails] = useState(false);
   const autoNamed = useRef(false);
-  const load = useCallback(()=> wsGet("/project?id="+encodeURIComponent(id)).then(d=>{ setData(d); setError(null); return d; }).catch(e=>setError(e.message)), [id]);
+  // Only the newest reload is used, and none while a change is still being sent — so an older reload can't undo a vote on screen.
+  const seq = useRef(0), pending = useRef(0), queue = useRef(Promise.resolve());
+  const load = useCallback(()=>{ const n = ++seq.current;
+    return wsGet("/project?id="+encodeURIComponent(id)).then(d=>{ if(n===seq.current && !pending.current){ setData(d); setError(null); } return d; }).catch(e=>{ if(n===seq.current) setError(e.message); }); }, [id]);
   useEffect(()=>{ load(); const t = setInterval(()=>{ if(!document.hidden) load(); }, 20000); return ()=>clearInterval(t); }, [load]);
-  const act = useCallback(async (path, body, ok)=>{
-    try{ const d = await post(path, {projectId:id, ...body}); if(ok) dispatch({type:"ADD_TOAST", message:ok}); await load(); return d; }
-    catch(e){ dispatch({type:"ADD_TOAST", message:e.message, variant:"danger"}); return null; }
-  }, [post, id, load, dispatch]);
+  const act = useCallback((path, body, ok)=>{
+    // Votes and ⭐ show straight away; the server's answer replaces them a moment later.
+    const meId = state.currentUserId, fix = it => {
+      if(path==="/item/vote"){ const yes = (it.yes||[]).filter(x=>x!==meId), no = (it.no||[]).filter(x=>x!==meId); if(body.vote==="yes") yes.push(meId); if(body.vote==="no") no.push(meId); return {...it, yes, no}; }
+      if(path==="/item/priority") return {...it, priority: body.on===false ? null : {by:meId, at:new Date().toISOString()}};
+      return it; };
+    if(body && body.id && (path==="/item/vote" || path==="/item/priority")) setData(d=> d ? {...d, items:d.items.map(x=>x.id===body.id ? fix(x) : x)} : d);
+    pending.current++;
+    // One change at a time, in the order they were tapped.
+    const run = queue.current.then(async ()=>{
+      try{ const d = await post(path, {projectId:id, ...body}); if(ok) dispatch({type:"ADD_TOAST", message:ok});
+        if(d && d.item && d.item.projectId===id && !d.item.deleted) setData(x=> x ? {...x, items:x.items.map(i=>i.id===d.item.id ? d.item : i)} : x);
+        return d; }
+      catch(e){ dispatch({type:"ADD_TOAST", message:e.message, variant:"danger"}); return null; }
+      finally{ pending.current--; if(!pending.current) await load(); }
+    });
+    queue.current = run.catch(()=>{});
+    return run;
+  }, [post, id, load, dispatch, state.currentUserId]);
 
   const p = data && data.project;
   const items = (data && data.items) || [];
@@ -9584,9 +9602,22 @@ function WsIdeas({p, items, act}){
   const [busy, setBusy] = useState(false);
 
   const onlyPicked = wsOnlyPicked(p, me);
-  const all = wsRank(items.filter(i=>(i.kind==="link"||i.kind==="idea") && !wsIsRemoved(i, voters)), voters);
+  const ideasAll = items.filter(i=>i.kind==="link"||i.kind==="idea");
+  // Each idea keeps its own number (the order it was added), so "#14" is always the same idea.
+  const numOf = useMemo(()=>{ const m = {}; [...ideasAll].sort((a,b)=>String(a.createdAt).localeCompare(String(b.createdAt))).forEach((it, i)=>{ m[it.id] = i+1; }); return m; }, [ideasAll.map(i=>i.id).join()]);
+  // The order is fixed while the page is open — voting never moves a card from under your finger. New ideas go at the end;
+  // the list re-sorts (⭐ first, then most Yes) the next time the project is opened. An idea that gets 3 No's stays,
+  // faded, until then — so you can still take your vote back.
+  const order = useRef(null), seen = useRef(new Set());
+  const live = ideasAll.filter(i=>!wsIsRemoved(i, voters) || seen.current.has(i.id));
+  if(!order.current) order.current = wsRank(live, voters).map(i=>i.id);
+  else { const have = new Set(order.current); order.current = order.current.filter(x=>live.some(i=>i.id===x)).concat(live.filter(i=>!have.has(i.id)).map(i=>i.id)); }
+  const byId = Object.fromEntries(live.map(i=>[i.id, i]));
+  const shown = order.current.map(x=>byId[x]).filter(Boolean);
+  shown.forEach(i=>seen.current.add(i.id));
+  const all = shown.filter(i=>!wsIsRemoved(i, voters));
   const [pickedView, setPickedView] = useState(false);
-  const visible = onlyPicked || pickedView ? all.filter(i=>wsPicked(i, voters)) : all;
+  const visible = onlyPicked || pickedView ? shown.filter(i=>wsPicked(i, voters)) : shown;
   const waiting = all.length - all.filter(i=>wsPicked(i, voters)).length;
   const canStar = !onlyPicked && !p.filed;
   const unvoted = it=> canVote && !(it.yes||[]).includes(me) && !(it.no||[]).includes(me);
@@ -9622,13 +9653,14 @@ function WsIdeas({p, items, act}){
           {visible.map((it, i)=>{
             const n = noCount(it);
             const yes = wsYes(it, voters), picked = wsPicked(it, voters);
-            const tag = voters.length && yes===voters.length ? ["Everyone said yes", "var(--green)"] : yes>=wsNeed(voters) ? [yes+" of "+voters.length+" said yes", "var(--green)"] : n===1 ? ["1 No", "var(--amber)"] : n>1 ? ["2 No's", "var(--red)"] : null;
+            const gone = wsIsRemoved(it, voters);
+            const tag = gone ? ["Removed — "+n+" No's (gone next time you open this)", "var(--red)"] : voters.length && yes===voters.length ? ["Everyone said yes", "var(--green)"] : yes>=wsNeed(voters) ? [yes+" of "+voters.length+" said yes", "var(--green)"] : n===1 ? ["1 No", "var(--amber)"] : n>1 ? [n+" No's", "var(--red)"] : null;
             return (
-              <div key={it.id} style={{border:(it.priority? "2px solid var(--amber)" : "1px solid "+(unvoted(it)? "var(--accent)" : "var(--border)")), borderRadius:12, overflow:"hidden", background:"var(--surface)", display:"flex", flexDirection:"column"}}>
+              <div key={it.id} style={{opacity: gone? .55 : 1, border:(it.priority? "2px solid var(--amber)" : "1px solid "+(unvoted(it)? "var(--accent)" : "var(--border)")), borderRadius:12, overflow:"hidden", background:"var(--surface)", display:"flex", flexDirection:"column"}}>
                 <div style={{position:"relative"}}>
                   <WsIdeaMedia it={it} height={it.kind==="link" ? 280 : 150}/>
                   <span style={{position:"absolute", top:8, left:8, display:"flex", gap:5, pointerEvents:"none"}}>
-                    <span style={{fontSize:11, fontWeight:700, padding:"2px 8px", borderRadius:99, background:"rgba(0,0,0,.62)", color:"#fff"}}>#{i+1}</span>
+                    <span style={{fontSize:11, fontWeight:700, padding:"2px 8px", borderRadius:99, background:"rgba(0,0,0,.62)", color:"#fff"}}>#{numOf[it.id] || i+1}</span>
                     {unvoted(it) && <span style={{fontSize:11, fontWeight:700, padding:"2px 8px", borderRadius:99, background:"var(--accent)", color:"#fff"}}>Your vote?</span>}
                     {!onlyPicked && picked && !it.priority && <span style={{fontSize:11, fontWeight:700, padding:"2px 8px", borderRadius:99, background:"var(--green)", color:"#fff"}}>✓ Creator sees it</span>}
                   </span>

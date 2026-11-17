@@ -2627,6 +2627,20 @@ async function wsItem(env, id) {
   if (!row) throw new HttpError(404, "That item doesn't exist any more.");
   return JSON.parse(row.data);
 }
+// Change one item safely when several people tap at once: read it, apply the change, and only write if nobody else
+// changed it in between (otherwise read again and redo the change). Stops two votes at the same moment overwriting each other.
+async function wsUpdateItem(env, id, change) {
+  for (let i = 0; i < 8; i++) {
+    const row = await env.DB.prepare("SELECT data FROM ws_items WHERE id = ?1").bind(String(id || "")).first();
+    if (!row) throw new HttpError(404, "That item doesn't exist any more.");
+    const it = JSON.parse(row.data);
+    await change(it);
+    const res = await env.DB.prepare("UPDATE ws_items SET data = ?1, project_id = ?2, kind = ?3 WHERE id = ?4 AND data = ?5")
+      .bind(JSON.stringify(it), it.projectId, it.kind, it.id, row.data).run();
+    if (res.meta && res.meta.changes > 0) return it;
+  }
+  throw new HttpError(409, "Lots of changes at once — please try again.");
+}
 async function wsSaveItem(env, it) {
   await env.DB.prepare("INSERT INTO ws_items (id, project_id, kind, data, created_at) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(id) DO UPDATE SET data = excluded.data, project_id = excluded.project_id, kind = excluded.kind")
     .bind(it.id, it.projectId, it.kind, JSON.stringify(it), it.createdAt).run();
@@ -2820,34 +2834,39 @@ async function workspaceRoute(request, env, url, viewer, ctx) {
   }
 
   if (path === "item/food") { // which dishes an idea shows (anyone on the project)
-    const it = await wsItem(env, body.id);
-    if (it.kind !== "idea" && it.kind !== "link") throw new HttpError(400, "Only ideas can have dishes.");
-    it.food = (Array.isArray(body.food) ? body.food : []).map((d) => wsText(d, 60)).filter(Boolean).slice(0, 12);
-    await wsSaveItem(env, it);
+    const it = await wsUpdateItem(env, body.id, (it) => {
+      if (it.kind !== "idea" && it.kind !== "link") throw new HttpError(400, "Only ideas can have dishes.");
+      it.food = (Array.isArray(body.food) ? body.food : []).map((d) => wsText(d, 60)).filter(Boolean).slice(0, 12);
+    });
     return json({ item: it });
   }
 
   if (path === "item/priority") { // anyone who votes can push an idea straight to the creator
-    const it = await wsItem(env, body.id);
-    const p = await wsProject(env, it.projectId);
-    if (it.kind !== "link" && it.kind !== "idea") throw new HttpError(400, "Only ideas and reels can be marked priority.");
+    const it0 = await wsItem(env, body.id);
+    const p = await wsProject(env, it0.projectId);
+    if (it0.kind !== "link" && it0.kind !== "idea") throw new HttpError(400, "Only ideas and reels can be marked priority.");
     if (me.id === p.creatorId || me.role === "video") throw new HttpError(403, "The team marks priority — the creator films what's picked.");
-    it.priority = body.on === false ? null : { by: me.id, at: now };
-    await wsSaveItem(env, it);
+    const it = await wsUpdateItem(env, body.id, (it) => { it.priority = body.on === false ? null : { by: me.id, at: now }; });
     return json({ item: it });
   }
 
   if (path === "item/vote" || path === "item/resolve" || path === "item/delete") {
-    const it = await wsItem(env, body.id);
-    const p = await wsProject(env, it.projectId);
+    const it0 = await wsItem(env, body.id);
+    const p = await wsProject(env, it0.projectId);
     if (path === "item/vote") {
-      if (it.kind !== "link" && it.kind !== "idea") throw new HttpError(400, "Only ideas and reels take votes.");
+      if (it0.kind !== "link" && it0.kind !== "idea") throw new HttpError(400, "Only ideas and reels take votes.");
       if (me.id === p.creatorId || me.role === "video") throw new HttpError(403, "The project's creator doesn't vote — the rest of the team decides.");
+      if (p.filed) throw new HttpError(409, "This project is finished — voting is closed.");
       const v = body.vote === "yes" || body.vote === "no" ? body.vote : null;
-      it.yes = (it.yes || []).filter((x) => x !== me.id);
-      it.no = (it.no || []).filter((x) => x !== me.id);
-      if (v) it[v].push(me.id);
-    } else if (path === "item/resolve") {
+      const saved = await wsUpdateItem(env, body.id, (it) => {
+        it.yes = (it.yes || []).filter((x) => x !== me.id);
+        it.no = (it.no || []).filter((x) => x !== me.id);
+        if (v) it[v].push(me.id);
+      });
+      return json({ item: saved });
+    }
+    const it = it0;
+    if (path === "item/resolve") {
       if (it.kind === "note") it.resolved = body.resolved === false ? null : { by: me.id, at: now };
       else if (it.kind === "shot") it.done = body.resolved === false ? null : { by: me.id, at: now };
       else throw new HttpError(400, "Only notes and shots can be ticked off.");

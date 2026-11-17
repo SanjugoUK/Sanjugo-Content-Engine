@@ -2628,7 +2628,7 @@ async function wsItem(env, id) {
   return JSON.parse(row.data);
 }
 async function wsSaveItem(env, it) {
-  await env.DB.prepare("INSERT INTO ws_items (id, project_id, kind, data, created_at) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(id) DO UPDATE SET data = excluded.data")
+  await env.DB.prepare("INSERT INTO ws_items (id, project_id, kind, data, created_at) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(id) DO UPDATE SET data = excluded.data, project_id = excluded.project_id, kind = excluded.kind")
     .bind(it.id, it.projectId, it.kind, JSON.stringify(it), it.createdAt).run();
   return it;
 }

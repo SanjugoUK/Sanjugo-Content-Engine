@@ -6356,7 +6356,7 @@ const LIB_DISH = Object.assign({}, ...LIB_DISH_GROUPS.map(g=>g[1]));
 // How library codes map onto Creator Studio's own fields when a file is turned into a post.
 const LIB_PILLAR = {FC:"Product", AV:"Behind the Scenes", CH:"Education", CM:"UGC", PO:"Promotion"};
 const LIB_PLATFORMS = {IS:["instagram"], IV:["instagram"], TK:["tiktok"], YT:["youtube"], AL:["instagram","tiktok","facebook"]};
-const LIB_NAME_RE = /^(\d{8})_([A-Z]{2})_([A-Z]{2})(?:_([A-Z0-9]{2}))?_([A-Z]{3})_v[\w]+?_([A-Z]\d{3})/;
+const LIB_NAME_RE = /^(\d{8})_([A-Z]{2})_([A-Z]{2})(?:_([A-Z0-9]{2}))?_([A-Z]{3})_v[\w]+?_([A-Z]\d{3,4})/;
 const RAW_EXT = /\.(arw|cr2|cr3|nef|dng|raf|orf|rw2)$/i;
 
 function parseLibraryName(name){
@@ -6377,7 +6377,7 @@ function enrichLibrary(files){
 function searchLibrary(files, query){
   const q = (query||"").trim().toLowerCase();
   if(!q) return [...files].sort((a,b)=> (b.date||"").localeCompare(a.date||""));
-  const code = /^[a-z]\d{1,3}$/i.test(q) ? q.toUpperCase() : null;
+  const code = /^[a-z]\d{1,4}$/i.test(q) ? q.toUpperCase() : null;
   const terms = q.split(/\s+/);
   const out = [];
   for(const f of files){
@@ -9188,10 +9188,10 @@ function wsUpload(file, onProgress){
 const RAW_MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 const rawToday = ()=>{ const d = new Date(); return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); };
 const rawClean = s=>String(s||"").replace(/[\\/:*?"<>|#]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 90);
-function rawPath(date, label, branch){
-  const b = WS_BRANCH_OPTS.find(o=>o.value===branch);
-  return [date.slice(0,7)+" "+RAW_MONTHS[Number(date.slice(5,7))-1], rawClean(date+" "+(rawClean(label)||"Shoot")+(branch && branch!=="all" && b ? " ("+b.label+")" : ""))];
-}
+// Same folder style as the Content Library: <Branch> / Videos|Photos / 2026-11-19_Christmas-Content
+const libSlug = t=>String(t||"Shoot").normalize("NFKD").replace(/[^\w\s-]/g, "").trim().replace(/[\s_]+/g, "-").replace(/-+/g, "-").slice(0, 60) || "Shoot";
+function rawPath(date, label){ return date+"_"+libSlug(rawClean(label)||"Shoot"); }
+const rawBranchFolder = b=> b==="all" || !b ? "All-Branches" : (WS_BRANCH_OPTS.find(o=>o.value===b)||{}).label;
 function rawPut(url, blob, onProgress){
   return new Promise((resolve, reject)=>{
     const x = new XMLHttpRequest();
@@ -9227,7 +9227,7 @@ function RawUploadModal({project, onClose, onDone}){
   const {state, dispatch} = useApp();
   const post = useWsPost();
   const [files, setFiles] = useState([]); // {file, status, sent, error}
-  const [f, setF] = useState({label: project ? project.title : "", projectId: project ? project.id : "", branch: project ? project.branch : "shoreditch", shootDate: rawToday(), note:""});
+  const [f, setF] = useState({label: project ? project.title : "", projectId: project ? project.id : "", branch: project ? project.branch : "shoreditch", shootDate: rawToday(), note:"", category: project ? project.category||"FC" : "FC", dish: project ? (project.dishes||[])[0]||"" : ""});
   const [projects, setProjects] = useState(project ? [project] : []);
   const [info, setInfo] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -9238,7 +9238,7 @@ function RawUploadModal({project, onClose, onDone}){
     wsGet("/raw").then(setInfo).catch(e=>setInfo({error:e.message}));
   }, []);
   const set = patch=>setF(x=>({...x, ...patch}));
-  const path = rawPath(f.shootDate || rawToday(), f.label, f.branch);
+  const path = rawPath(f.shootDate || rawToday(), f.label);
   const total = files.reduce((t,x)=>t+x.file.size, 0), sent = files.reduce((t,x)=>t+(x.status==="done"? x.file.size : x.sent||0), 0);
   const doneN = files.filter(x=>x.status==="done").length;
   const letter = WS_BRANCH_LETTER[f.branch] || "G";
@@ -9250,14 +9250,14 @@ function RawUploadModal({project, onClose, onDone}){
     if(!files.length) return;
     setBusy(true); stop.current = false;
     let lock = null; try{ lock = navigator.wakeLock && await navigator.wakeLock.request("screen"); }catch(e){}
-    const meta = {label:f.label, projectId:f.projectId || null, branch:f.branch, shootDate:f.shootDate, note:f.note};
+    const meta = {label:f.label, projectId:f.projectId || null, branch:f.branch, shootDate:f.shootDate, note:f.note, category:f.category, dish:f.dish};
     let ok = 0;
     for(let i=0; i<files.length; i++){
       if(stop.current) break;
       if(files[i].status==="done") continue;
       const upd = patch=>setFiles(x=>x.map((y,j)=>j===i? {...y, ...patch} : y));
       upd({status:"uploading", sent:0, error:null});
-      try{ await rawUploadOne(files[i].file, meta, state.currentUserId, post, n=>upd({sent:n}), ()=>stop.current); upd({status:"done"}); ok++; }
+      try{ const r = await rawUploadOne(files[i].file, meta, state.currentUserId, post, n=>upd({sent:n}), ()=>stop.current); upd({status:"done", result:r}); ok++; }
       catch(e){ upd({status:"error", error:e.message}); if(/reconnect Google Drive/i.test(e.message)) break; }
     }
     try{ lock && lock.release(); }catch(e){}
@@ -9271,18 +9271,20 @@ function RawUploadModal({project, onClose, onDone}){
     <Modal open onClose={busy? ()=>{ if(confirm("Stop uploading? Files already finished stay in Drive.")){ stop.current = true; } } : onClose} width={600}>
       <div style={{padding:20}}>
         <h3 style={{margin:"0 0 4px", fontSize:17}}>Upload raw files</h3>
-        <div style={{fontSize:12.5, color:"var(--ink-mute)", marginBottom:14}}>Photos and videos straight from your phone to Google Drive → Man Man RAW Files, sorted by month and shoot.</div>
+        <div style={{fontSize:12.5, color:"var(--ink-mute)", marginBottom:14}}>Photos and videos straight from your phone to Google Drive → Man Man RAW Files, sorted by branch and shoot. Each file gets its own barcode and appears in the Content Library.</div>
         {cantUpload && <div style={{padding:12, borderRadius:10, background:"var(--amber-soft)", color:"var(--amber)", fontSize:13, fontWeight:600, marginBottom:14}}>One-time step: an admin needs to press “Reconnect Google Drive” in Settings, so Creator Studio is allowed to save into the RAW files folder.</div>}
         <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:12, marginBottom:12}} className="cf-raw-grid">
           <div style={{gridColumn:"1 / -1"}}><label style={label}>Shoot name</label><input value={f.label} disabled={busy} onChange={e=>set({label:e.target.value})} placeholder="e.g. Christmas dishes, Wagyu roll close-ups" style={inp}/></div>
           <div><label style={label}>Shoot date</label><input type="date" value={f.shootDate} disabled={busy} onChange={e=>set({shootDate:e.target.value})} style={inp}/></div>
           <div><label style={label}>Branch</label><Select value={f.branch} onChange={v=>!busy && set({branch:v})} options={WS_BRANCH_OPTS}/></div>
-          <div style={{gridColumn:"1 / -1"}}><label style={label}>Workspace project (optional)</label><Select value={f.projectId} onChange={v=>{ if(busy) return; const p = projects.find(x=>x.id===v); set({projectId:v, ...(p && (!f.label || projects.some(x=>x.title===f.label)) ? {label:p.title, branch:p.branch} : {})}); }} options={[{value:"", label:"No project"}, ...projects.map(p=>({value:p.id, label:p.title}))]}/></div>
+          <div style={{gridColumn:"1 / -1"}}><label style={label}>Workspace project (optional)</label><Select value={f.projectId} onChange={v=>{ if(busy) return; const p = projects.find(x=>x.id===v); set({projectId:v, ...(p && (!f.label || projects.some(x=>x.title===f.label)) ? {label:p.title, branch:p.branch, category:p.category||"FC", dish:(p.dishes||[])[0]||""} : {})}); }} options={[{value:"", label:"No project"}, ...projects.map(p=>({value:p.id, label:p.title}))]}/></div>
+          <div><label style={label}>Category</label><Select value={f.category} onChange={v=>!busy && set({category:v})} options={WS_CATEGORY_OPTS}/></div>
+          <div><label style={label}>Dish (optional)</label><Select value={f.dish} onChange={v=>!busy && set({dish:v})} options={WS_DISH_OPTS}/></div>
           <div style={{gridColumn:"1 / -1"}}><label style={label}>Note (optional)</label><input value={f.note} disabled={busy} onChange={e=>set({note:e.target.value})} placeholder="What's in these? e.g. B-roll of the pass, chef plating" style={inp}/></div>
         </div>
         <div style={{fontSize:12, color:"var(--ink-soft)", padding:"9px 11px", borderRadius:10, background:"var(--surface-2)", marginBottom:12, lineHeight:1.5}}>
-          <b>Saves to:</b> Man Man RAW Files › {path[0]} › {path[1]}<br/>
-          <span style={{color:"var(--ink-mute)"}}>Each file is named {(f.shootDate||rawToday()).replace(/-/g,"")}_{letter}_RAW_<i>original name</i></span>
+          <b>Saves to:</b> Man Man RAW Files › {rawBranchFolder(f.branch)} › Videos / Photos › {path}<br/>
+          <span style={{color:"var(--ink-mute)"}}>Each file gets its own barcode and a filing-system name, e.g. <span style={{fontFamily:'ui-monospace, "SF Mono", Menlo, monospace'}}>{[(f.shootDate||rawToday()).replace(/-/g,""), "AL", f.category, ...(f.dish? [f.dish] : []), "RAW", "v1234", letter+"###"].join("_")}.mov</span> — and shows up in the Content Library.</span>
         </div>
         <input ref={fileRef} type="file" multiple accept="image/*,video/*" onChange={add} style={{display:"none"}}/>
         {files.length>0 && <div style={{display:"flex", flexDirection:"column", gap:6, maxHeight:260, overflowY:"auto", marginBottom:12}}>
@@ -9291,7 +9293,7 @@ function RawUploadModal({project, onClose, onDone}){
               <div style={{width:38, height:38, borderRadius:7, overflow:"hidden", background:"var(--surface-2)", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0, color:"var(--ink-mute)"}}>{x.thumb ? <img src={x.thumb} style={{width:"100%", height:"100%", objectFit:"cover"}}/> : <Icon name={/^video\//.test(x.file.type)? "film" : "file"} size={17}/>}</div>
               <div style={{flex:1, minWidth:0}}>
                 <div style={{fontSize:12.5, fontWeight:600, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>{x.file.name}</div>
-                <div style={{fontSize:11.5, color: x.status==="error"? "var(--red)" : x.status==="done"? "var(--green)" : "var(--ink-mute)"}}>{fmtBytes(x.file.size)} · {x.status==="done"? "✓ In Drive" : x.status==="uploading"? Math.round((x.sent||0)/x.file.size*100)+"%" : x.status==="error"? x.error : "Ready"}</div>
+                <div style={{fontSize:11.5, color: x.status==="error"? "var(--red)" : x.status==="done"? "var(--green)" : "var(--ink-mute)"}}>{fmtBytes(x.file.size)} · {x.status==="done"? <>✓ In Drive{x.result && x.result.barcode ? <> as <b>{x.result.barcode}</b></> : null}</> : x.status==="uploading"? Math.round((x.sent||0)/x.file.size*100)+"%" : x.status==="error"? x.error : "Ready"}</div>
                 {x.status==="uploading" && <div style={{height:4, borderRadius:99, background:"var(--surface-2)", marginTop:4}}><div style={{height:4, width:Math.round((x.sent||0)/x.file.size*100)+"%", borderRadius:99, background:"var(--accent)"}}/></div>}
               </div>
               {!busy && x.status!=="done" && <IconButton icon="x" title="Remove" onClick={()=>setFiles(l=>l.filter((_,j)=>j!==i))}/>}
@@ -9323,7 +9325,7 @@ function RawFilesList({reloadKey}){
   useEffect(()=>{ load(); }, [load, reloadKey]);
   if(!data) return <Card style={{padding:16}}><Skeleton h={16} w="40%"/><div style={{height:10}}/><Skeleton h={60}/></Card>;
   const s = q.trim().toLowerCase();
-  const files = (data.files||[]).filter(r=>!s || [r.name, r.driveName, r.label, r.projectTitle, r.note, wsUser(r.by).name, ...(r.folderPath||[])].join(" ").toLowerCase().includes(s));
+  const files = (data.files||[]).filter(r=>!s || [r.name, r.driveName, r.barcode, r.label, r.projectTitle, r.note, wsUser(r.by).name, ...(r.folderPath||[])].join(" ").toLowerCase().includes(s));
   const groups = [];
   for(const r of files){ const k = r.folderId; let g = groups.find(x=>x.k===k); if(!g){ g = {k, r, list:[]}; groups.push(g); } g.list.push(r); }
   const driveLink = r=> r.link || (r.driveId ? "https://drive.google.com/file/d/"+r.driveId+"/view" : null);
@@ -9344,7 +9346,7 @@ function RawFilesList({reloadKey}){
             <div style={{display:"flex", alignItems:"center", gap:10, flexWrap:"wrap", cursor:"pointer"}} onClick={()=>setOpen(o=>({...o, [g.k]:!o[g.k]}))}>
               <Icon name={isOpen? "chevronDown" : "chevronRight"} size={15}/>
               <div style={{flex:"1 1 220px", minWidth:0}}>
-                <div style={{fontWeight:600, fontSize:13.5}}>{(g.r.folderPath||[])[1] || g.r.label}</div>
+                <div style={{fontWeight:600, fontSize:13.5}}>{g.r.label || (g.r.folderPath||[]).slice(-1)[0]} <span style={{fontWeight:500, color:"var(--ink-mute)", fontSize:12}}>· {wsDay(g.r.shootDate || g.r.createdAt)}</span></div>
                 <div style={{fontSize:11.5, color:"var(--ink-mute)"}}>{[vids && vids+" video"+(vids>1?"s":""), pics && pics+" photo"+(pics>1?"s":""), fmtBytes(size), "by "+[...new Set(g.list.map(r=>wsUser(r.by).name))].join(", "), g.r.projectTitle && "📁 "+g.r.projectTitle].filter(Boolean).join(" · ")}</div>
               </div>
               <Button size="sm" icon="external" onClick={e=>{ e.stopPropagation(); window.open("https://drive.google.com/drive/folders/"+g.k, "_blank", "noopener"); }}>Open folder</Button>
@@ -9352,12 +9354,13 @@ function RawFilesList({reloadKey}){
             {isOpen && <div style={{marginTop:10, display:"flex", flexDirection:"column", gap:4}}>
               {g.list.map(r=><div key={r.id} style={{display:"flex", alignItems:"center", gap:8, fontSize:12.5, padding:"5px 0", borderTop:"1px solid var(--border)"}}>
                 <Icon name={/^video/.test(r.mime)? "film" : "file"} size={14} style={{color:"var(--ink-mute)", flexShrink:0}}/>
+                {r.barcode && <button title="Open in the Content Library" onClick={()=>{ LIBRARY_CACHE = null; dispatch({type:"SET_ROUTE", route:"library", libraryQuery:r.barcode}); }} style={{border:"none", background:"none", padding:0, cursor:"pointer"}}><BarcodeChip code={r.barcode}/></button>}
                 <span className="num" style={{flex:1, minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", fontFamily:'ui-monospace, "SF Mono", Menlo, monospace', fontSize:12}} title={r.note || r.driveName}>{r.driveName}</span>
                 <span style={{color:"var(--ink-mute)", fontSize:11.5, whiteSpace:"nowrap"}}>{fmtBytes(r.size)} · {wsAgo(r.createdAt)}</span>
                 {driveLink(r) && <a href={driveLink(r)} target="_blank" rel="noopener" style={{fontSize:12, fontWeight:600, color:"var(--accent)"}}>Open</a>}
                 {(r.by===me.id || me.role==="admin") && <button title="Remove from this list (stays in Drive)" onClick={async()=>{ if(!confirm("Remove “"+r.driveName+"” from this list? The file stays in Google Drive.")) return; try{ await post("/raw/remove", {id:r.id}); load(); }catch(e){ dispatch({type:"ADD_TOAST", message:e.message, variant:"danger"}); } }} style={{border:"none", background:"none", cursor:"pointer", color:"var(--ink-mute)", padding:2}}><Icon name="x" size={13}/></button>}
               </div>)}
-              {g.r.note && <div style={{fontSize:12, color:"var(--ink-mute)", marginTop:4}}>Note: {g.r.note}</div>}
+              <div style={{fontSize:12, color:"var(--ink-mute)", marginTop:4}}>📁 Man Man RAW Files › {(g.r.folderPath||[]).join(" › ")}{g.r.note ? " · Note: "+g.r.note : ""}</div>
             </div>}
           </Card>
         );
@@ -10355,7 +10358,7 @@ function WsApprovalStage({p, draft, items, act, onName}){
           </div>
           {approved ? <>
             <div style={{padding:12, borderRadius:10, background:"var(--green-soft)", color:"var(--green)", fontSize:13, fontWeight:600}}>✓ Approved by {wsUser(draft.approval.by).name} {wsAgo(draft.approval.at)}{draft.approval.note? " — "+draft.approval.note : ""}</div>
-            <div style={{fontSize:13, color:"var(--ink-soft)", lineHeight:1.5}}>Next: {isUploader? "check" : wsUser(draft.author).name+" checks"} the file name, then the video is saved to Google Drive and added to the Content Library.</div>
+            <WsFilingSteps draft={draft} who={isUploader? "You" : wsUser(draft.author).name}/>
             <div style={{display:"flex", gap:8, flexWrap:"wrap"}}>
               <Button variant="primary" icon="file" onClick={onName}>Confirm file name</Button>
               {(draft.approval.by===me.id || me.role==="admin") && <Button icon="undo" onClick={()=>dAct("/unapprove", {}, "Approval undone")}>Undo approval</Button>}
@@ -10404,7 +10407,7 @@ function WsNameModal({p, draft, onClose, onFiled}){
   const letter = WS_BRANCH_LETTER[p.branch] || "G";
   const checks = [
     [!!dt && dt.getMonth()+1===+d.slice(4,6) && dt.getDate()===+d.slice(6,8), "Date is a real date in YYYYMMDD format"],
-    [/^[SAVG]\d{3}$/.test(barcode), "Barcode is a branch letter (S, A, V or G) plus 3 digits"],
+    [/^[SAVG]\d{3,4}$/.test(barcode), "Barcode is a branch letter (S, A, V or G) plus 3 or 4 digits"],
     [!used || !used.has(barcode), used ? "Barcode "+barcode+" isn't used anywhere in the Content Library" : "Checking the barcode against the Content Library…"],
     [!x.dish2 || x.dish2!==x.dish1, "Dish codes aren't repeated"],
     [true, "Every code comes from the SANJUGO filing system rule book"],
@@ -10414,7 +10417,7 @@ function WsNameModal({p, draft, onClose, onFiled}){
   const ok = checks.every(c=>c[0]) && used;
   async function save(){
     setBusy(true); setErr(null);
-    try{ await post("/file", {projectId:p.id, draftId:draft.id, name}); dispatch({type:"ADD_TOAST", message:"Saved to Google Drive as "+barcode+" — it's in the Content Library now"}); onFiled(); }
+    try{ await post("/file", {projectId:p.id, draftId:draft.id, name}); LIBRARY_CACHE = null; dispatch({type:"ADD_TOAST", message:"Saved to Google Drive as "+barcode+" — it's in the Content Library now"}); onFiled(); }
     catch(e){ setErr(e.message); }
     setBusy(false);
   }
@@ -10434,14 +10437,19 @@ function WsNameModal({p, draft, onClose, onFiled}){
           {field("Second dish", <Select value={x.dish2} onChange={v=>set({dish2:v})} options={WS_DISH_OPTS.map(o=>o.value? o : {...o, label:"None"})}/>)}
           {field("Stage", <Select value={x.stage} onChange={v=>set({stage:v})} options={WS_STAGE_OPTS}/>)}
           {field("Version", <Select value={x.version} onChange={v=>set({version:v})} options={Array.from({length:Math.max(9, +String(x.version).slice(1))}, (_,i)=>({value:"v"+(i+1), label:"v"+(i+1)}))}/>)}
-          {field("Barcode", <input value={x.barcode} onChange={e=>set({barcode:e.target.value.toUpperCase().replace(/[^A-Z0-9]/g,"").slice(0,4)})} style={inp}/>)}
+          {field("Barcode", <input value={x.barcode} onChange={e=>set({barcode:e.target.value.toUpperCase().replace(/[^A-Z0-9]/g,"").slice(0,5)})} style={inp}/>)}
           {field("File type", <input value={"."+x.ext} disabled style={{...inp, opacity:.7}}/>)}
         </div>
         <div style={{display:"flex", flexDirection:"column", gap:5, marginBottom:14}}>
           {checks.map(([pass, text])=><div key={text} style={{display:"flex", alignItems:"center", gap:7, fontSize:12.5, color: pass? "var(--green)":"var(--red)"}}><Icon name={pass? "check":"warn"} size={14} strokeWidth={2.4}/>{text}</div>)}
           {warn && <div style={{display:"flex", alignItems:"center", gap:7, fontSize:12.5, color:"var(--amber)"}}><Icon name="warn" size={14}/>{warn}</div>}
         </div>
-        <div style={{fontSize:12, color:"var(--ink-mute)", marginBottom:14}}>Saves to Google Drive → Creator Studio Projects → {(WS_BRANCH_OPTS.find(b=>b.value===p.branch)||{}).label==="All branches"? "All-Branches" : (WS_BRANCH_OPTS.find(b=>b.value===p.branch)||{}).label}, and adds it to the Content Library.</div>
+        <div style={{fontSize:12.5, color:"var(--ink-soft)", padding:"9px 11px", borderRadius:10, background:"var(--surface-2)", marginBottom:14, lineHeight:1.5}}>
+          <b>Saves to Google Drive:</b> {(sug.folder||[]).join(" › ")}<br/><span style={{color:"var(--ink-mute)"}}>Then it's in the Content Library straight away (search <b>{barcode}</b>), ready for “Create post from this”.</span>
+        </div>
+        {busy && <div style={{display:"flex", flexDirection:"column", gap:5, marginBottom:12, fontSize:12.5}}>
+          {["Uploading the video to Google Drive", "Adding it to the Content Library"].map((t, i)=><div key={t} style={{display:"flex", alignItems:"center", gap:7, color: i===0? "var(--accent)" : "var(--ink-mute)", fontWeight: i===0? 600 : 400}}>{i===0? <span style={{width:12, height:12, border:"2px solid currentColor", borderRightColor:"transparent", borderRadius:99, display:"inline-block", animation:"cf-spin .8s linear infinite"}}/> : <span style={{width:12}}/>}{t}{i===0? "… (big videos take a minute — keep this open)" : ""}</div>)}
+        </div>}
         {err && <div style={{fontSize:13, color:"var(--red)", marginBottom:12}}>{err}</div>}
         <div style={{display:"flex", justifyContent:"flex-end", gap:8, flexWrap:"wrap"}}>
           <Button onClick={onClose} disabled={busy}>Not now</Button>
@@ -10453,6 +10461,19 @@ function WsNameModal({p, draft, onClose, onFiled}){
   );
 }
 
+// What happens after a draft is approved, as numbered steps: approved → name checked → saved to Drive → in the library.
+function WsFilingSteps({draft, who}){
+  const steps = [
+    [true, "Approved by "+wsUser(draft.approval.by).name],
+    [false, who+" confirm"+(who==="You"? "" : "s")+" the file name — Creator Studio fills it in from the filing system and gives it the next free barcode"],
+    [false, "The video is saved to Google Drive → Creator Studio Projects › branch › Videos › month_project › Final"],
+    [false, "It's in the Content Library (search by barcode) — then “Create post from this” sends it to the Approval Queue for posting"],
+  ];
+  return <div style={{display:"flex", flexDirection:"column", gap:7}}>
+    {steps.map(([done, t], i)=><div key={i} style={{display:"flex", gap:9, alignItems:"flex-start", fontSize:12.5, lineHeight:1.45, color: done? "var(--green)" : i===1? "var(--ink)" : "var(--ink-mute)", fontWeight: i===1? 600 : 400}}>
+      <span style={{flexShrink:0, width:20, height:20, borderRadius:99, display:"inline-flex", alignItems:"center", justifyContent:"center", fontSize:11, fontWeight:700, background: done? "var(--green)" : i===1? "var(--accent)" : "var(--surface-2)", color: done || i===1? "#fff" : "var(--ink-mute)"}}>{done? "✓" : i+1}</span>{t}</div>)}
+  </div>;
+}
 // Every draft of this project that's in the Content Library — one row each (a project can have several angles).
 function WsFiled({p, drafts}){
   const {state, dispatch} = useApp();
@@ -10465,11 +10486,12 @@ function WsFiled({p, drafts}){
           <div key={d.id} style={{borderTop: i? "1px solid var(--border)" : "none", paddingTop: i? 12 : 0}}>
             <div style={{display:"flex", alignItems:"center", gap:8, flexWrap:"wrap", marginBottom:6}}><b style={{fontSize:13.5}}>Draft {d.cut}</b><BarcodeChip code={f.barcode}/></div>
             <div className="num" style={{fontFamily:'ui-monospace, "SF Mono", Menlo, monospace', fontSize:12.5, padding:"8px 10px", borderRadius:8, background:"var(--surface-2)", wordBreak:"break-all", marginBottom:6}}>{f.name}</div>
-            <div style={{fontSize:12, color:"var(--ink-mute)", marginBottom:8}}>{d.approval ? "Approved by "+wsUser(d.approval.by).name+" · " : ""}saved by {wsUser(f.by).name} on {wsDay(f.at)}</div>
+            <div style={{fontSize:12, color:"var(--ink-mute)", marginBottom:8}}>{d.approval ? "Approved by "+wsUser(d.approval.by).name+" · " : ""}saved by {wsUser(f.by).name} on {wsDay(f.at)}{f.folderPath ? <><br/>📁 {f.folderPath.join(" › ")}</> : null}</div>
             <div style={{display:"flex", gap:8, flexWrap:"wrap"}}>
               {PERMS[me.role].create && <Button size="sm" variant="primary" icon="create" onClick={()=>wsCreatePost(dispatch, p, f)}>Create post from this</Button>}
               <Button size="sm" icon="grid" onClick={()=>dispatch({type:"SET_ROUTE", route:"library", libraryQuery:f.barcode})}>Open in Content Library</Button>
               <Button size="sm" icon="external" onClick={()=>window.open(driveFileUrl(f.driveId), "_blank", "noopener")}>Open in Drive</Button>
+              {f.folderId && <Button size="sm" icon="folder" onClick={()=>window.open("https://drive.google.com/drive/folders/"+f.folderId, "_blank", "noopener")}>Open folder</Button>}
             </div>
           </div>
         ); })}

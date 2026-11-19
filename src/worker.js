@@ -611,6 +611,10 @@ async function refreshLibrary(env) {
   const wsRoot = await kvGet(env, "ws_drive_folder");
   if (wsRoot && wsRoot.id && wsRoot.id !== root) folders.set(wsRoot.id, { name: null, parent: null });
   // Published post uploads moved to Drive ("Creator Studio Archive") are part of the library too.
+  // "Man Man RAW Files" (raw footage uploaded from Workspace) — its branch folders sit beside the library's too.
+  const rawSaved = (await kvGet(env, "raw_drive_folder")) || {};
+  const rawRootId = rawSaved.id || (rawSaved.folders && Object.keys(rawSaved.folders).length ? RAW_ROOT_DEFAULT : null);
+  if (rawRootId && rawRootId !== root && !folders.has(rawRootId)) folders.set(rawRootId, { name: null, parent: null, rawRoot: true });
   const archiveRoot = await kvGet(env, "archive_folder_id");
   if (archiveRoot && archiveRoot !== root && !folders.has(archiveRoot)) folders.set(archiveRoot, { name: null, parent: null, archive: true });
   const roots = [...folders.keys()];
@@ -656,10 +660,13 @@ async function refreshLibrary(env) {
     }
     return names;
   };
+  const rootOf = (folderId) => { let id = folderId; for (let g = 0; id && !roots.includes(id) && g < 25; g++) id = (folders.get(id) || {}).parent; return id; };
   const files = items.map((it) => {
     const path = pathOf(it.parent);
     const inArchive = it.parent === archiveRoot;
-    const f = { id: it.id, name: it.name, mime: it.mimeType, size: it.size ? Number(it.size) : null, branch: inArchive ? "All-Branches" : path[0] || "Unsorted", path: inArchive ? ["Creator Studio Archive"] : path.slice(1), modified: it.modifiedTime };
+    const inRaw = rawRootId && rootOf(it.parent) === rawRootId;
+    const f = { id: it.id, name: it.name, mime: it.mimeType, size: it.size ? Number(it.size) : null, branch: inArchive ? "All-Branches" : path[0] || "Unsorted",
+      path: inArchive ? ["Creator Studio Archive"] : inRaw ? ["Man Man RAW Files", ...path.slice(1)] : path.slice(1), modified: it.modifiedTime };
     if (it.description) f.note = it.description;
     return f;
   });
@@ -1064,8 +1071,9 @@ async function runCleanup(env, { trigger }) {
         }
         archivesLeft--;
         if (!used) used = await wsUsedBarcodes(env, null);
-        const n = archiveName(a.item, a.key, used, a.publishedAt);
+        let n = archiveName(a.item, a.key, used, a.publishedAt);
         used.add(n.barcode);
+        for (let g = 0; g < 20 && !(await claimThisBarcode(env, n.barcode, "archive", a.key)); g++) { n = archiveName(a.item, a.key, used, a.publishedAt); used.add(n.barcode); }
         const driveId = await archiveToDrive(env, token, folderId, a, n.name, n.description);
         if (!driveId) continue;
         await env.DB.prepare("INSERT OR REPLACE INTO media_archive (key, drive_id, size, title, archived_at, name) VALUES (?1, ?2, ?3, ?4, ?5, ?6)")
@@ -1130,6 +1138,7 @@ async function renameArchive(env, { limit = 50 } = {}) {
     });
     if (!res.ok) { if (res.status === 404) await env.DB.prepare("UPDATE media_archive SET name = ?2 WHERE key = ?1").bind(r.key, "(missing in Drive)").run(); continue; }
     used.add(n.barcode);
+    await claimThisBarcode(env, n.barcode, "archive", r.key).catch(() => {});
     await env.DB.prepare("UPDATE media_archive SET name = ?2 WHERE key = ?1").bind(r.key, n.name).run();
     await wsAddToLibraryIndex(env, null, { id: r.drive_id, name: n.name, mime: null, size: r.size, branch: n.branch, path: ["Creator Studio Archive"], modified: r.archived_at, note: n.description }).catch(() => {});
     renamed++;
@@ -2586,7 +2595,7 @@ const WS_DISHES = { YK: "Chicken Yakitori", ED: "Edamame", FD: "Fried Dumplings"
   GT: "Grilled Sake Teriyaki", SB: "Grilled Shioyaki Saba", MN: "Misoni Saba", ND: "Nasu Dengaku", PB: "Panko Prawn Bao", CB: "Spicy Chicken Bao", TB: "Teriyaki Bao", VB: "Vegetable Bao",
   KC: "Chicken Katsu Curry Don", PC: "Prawn Katsu Curry Don", CD: "Chilli Chicken Don", TN: "Tonkatsu Don", GB: "Genki Beef Don", UD: "Unagi Don", SD: "Salmon Don", BC: "Bara Chirashi Don",
   GH: "Gohan", HR: "Hijiki Rice", MC: "Marinated Chilli Chicken", VC: "Vegetable Croquette" };
-const WS_NAME_RE = /^(\d{8})_([A-Z]{2})_([A-Z]{2})((?:_[A-Z0-9]{2})*)_([A-Z]{3})_v(\d{1,2})_([A-Z])(\d{3})\.([a-z0-9]{2,5})$/;
+const WS_NAME_RE = /^(\d{8})_([A-Z]{2})_([A-Z]{2})((?:_[A-Z0-9]{2})*)_([A-Z]{3})_v(\d{1,5})_([A-Z])(\d{3,4})\.([a-z0-9]{2,5})$/;
 const WS_ITEM_KINDS = ["link", "idea", "comment", "draft", "note", "shot"];
 // Ideas and reference reels get a Yes or No from everyone except the project's creator; enough No's and it's dropped.
 // Video Creators don't vote: they film what the team picked.
@@ -2603,6 +2612,8 @@ async function ensureWsTables(env) {
     env.DB.prepare("CREATE TABLE IF NOT EXISTS ws_items (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, kind TEXT NOT NULL, data TEXT NOT NULL, created_at TEXT NOT NULL)"),
     env.DB.prepare("CREATE INDEX IF NOT EXISTS ws_items_project ON ws_items(project_id)"),
     env.DB.prepare("CREATE TABLE IF NOT EXISTS ws_raw (id TEXT PRIMARY KEY, data TEXT NOT NULL, created_at TEXT NOT NULL)"),
+    // Every barcode Creator Studio hands out, claimed here first so two uploads at the same moment never get the same one.
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS ws_barcodes (code TEXT PRIMARY KEY, kind TEXT, ref TEXT, at TEXT NOT NULL)"),
   ]);
   await wsMigrateMulti(env);
   wsTablesReady = true;
@@ -3015,17 +3026,38 @@ async function wsUsedBarcodes(env, request) {
     if (r.ok) files = (await r.json().catch(() => ({}))).files || [];
   }
   const used = new Set();
-  for (const f of files) { const m = /_([A-Z]\d{3})(?:\.[^.]+)?$/.exec(f.name || ""); if (m) used.add(m[1]); }
+  for (const f of files) { const m = /_([A-Z]\d{3,4})(?:\.[^.]+)?$/.exec(f.name || ""); if (m) used.add(m[1]); }
   const { results } = await env.DB.prepare("SELECT data FROM ws_projects").all();
   for (const r of results || []) { const p = JSON.parse(r.data); const f = p.filed || p.legacyFiled; if (f && f.barcode) used.add(f.barcode); }
   const { results: dr } = await env.DB.prepare("SELECT json_extract(data, '$.filed.barcode') AS b FROM ws_items WHERE kind = 'draft' AND json_extract(data, '$.filed.barcode') IS NOT NULL").all();
   for (const r of dr || []) used.add(r.b);
+  try { const { results: bc } = await env.DB.prepare("SELECT code FROM ws_barcodes").all(); for (const r of bc || []) used.add(r.code); } catch (e) { /* table not there yet */ }
   try {
     await ensureStorageTables(env);
     const { results: arch } = await env.DB.prepare("SELECT name FROM media_archive WHERE name IS NOT NULL").all();
-    for (const a of arch || []) { const m = /_([A-Z]\d{3})\.[^.]+$/.exec(a.name || ""); if (m) used.add(m[1]); }
+    for (const a of arch || []) { const m = /_([A-Z]\d{3,4})\.[^.]+$/.exec(a.name || ""); if (m) used.add(m[1]); }
   } catch (e) { /* archive table not there yet */ }
   return used;
+}
+// Claim the next free barcode for this branch letter (S/A/V/G + 3 digits, 4 digits after 999).
+async function claimBarcode(env, request, letter, kind, ref, used) {
+  await ensureWsTables(env);
+  used = used || await wsUsedBarcodes(env, request);
+  for (let i = 0; i < 50; i++) {
+    const code = wsNextBarcode(letter, used);
+    const r = await env.DB.prepare("INSERT OR IGNORE INTO ws_barcodes (code, kind, ref, at) VALUES (?1, ?2, ?3, ?4)").bind(code, kind, ref, new Date().toISOString()).run();
+    used.add(code);
+    if (r.meta && r.meta.changes > 0) return code;
+  }
+  throw new HttpError(409, "Couldn't find a free barcode — try again.");
+}
+// Claim one particular barcode (the one in a confirmed file name). False if someone else already has it.
+async function claimThisBarcode(env, code, kind, ref) {
+  await ensureWsTables(env);
+  const r = await env.DB.prepare("INSERT OR IGNORE INTO ws_barcodes (code, kind, ref, at) VALUES (?1, ?2, ?3, ?4)").bind(code, kind, ref, new Date().toISOString()).run();
+  if (r.meta && r.meta.changes > 0) return true;
+  const row = await env.DB.prepare("SELECT ref FROM ws_barcodes WHERE code = ?1").bind(code).first();
+  return !!row && row.ref === ref;
 }
 function wsNextBarcode(letter, used) {
   let max = 0;
@@ -3046,7 +3078,9 @@ async function wsNameSuggestion(env, request, p, items, draftId) {
   const branch = WS_BRANCHES[p.branch] || WS_BRANCHES.all;
   const parts = { date: londonDate(), social: "AL", category: p.category || "FC", dishes: p.dishes || [], stage: "FIN", version: "v" + d.cut,
     barcode: wsNextBarcode(branch.letter, used), ext: wsExtOf(d.media && d.media.fileUrl) };
-  return { draftId: d.id, cut: d.cut, approval: d.approval, parts, name: wsBuildName(parts), branchLetter: branch.letter, usedBarcodes: [...used].filter((c) => c[0] === branch.letter).length,
+  const ld = londonDate();
+  const folder = ["Creator Studio Projects", branch.folder, "Videos", ld.slice(0, 4) + "-" + ld.slice(4, 6) + "_" + libSlug(p.title), "Final"];
+  return { draftId: d.id, cut: d.cut, approval: d.approval, folder, parts, name: wsBuildName(parts), branchLetter: branch.letter, usedBarcodes: [...used].filter((c) => c[0] === branch.letter).length,
     codes: { social: WS_SOCIAL, categories: WS_CATEGORIES, dishes: WS_DISHES, stages: WS_STAGES } };
 }
 function wsBuildName(x) {
@@ -3070,7 +3104,9 @@ function wsCheckName(name, used, ext) {
   return { ok: !problems.length, problems, barcode: letter + num };
 }
 
-async function wsDriveFolder(env, token, branchKey) {
+// "Christmas Content!" → "Christmas-Content" (the library's folder style).
+const libSlug = (t) => String(t || "Project").normalize("NFKD").replace(/[^\w\s-]/g, "").trim().replace(/[\s_]+/g, "-").replace(/-+/g, "-").slice(0, 60) || "Project";
+async function wsDriveFolder(env, token, branchKey, sub = []) {
   const branch = WS_BRANCHES[branchKey] || WS_BRANCHES.all;
   const headers = { Authorization: "Bearer " + token, "Content-Type": "application/json" };
   const alive = async (id) => {
@@ -3093,8 +3129,12 @@ async function wsDriveFolder(env, token, branchKey) {
   }
   saved.branches = saved.branches || {};
   if (!(await alive(saved.branches[branchKey]))) saved.branches[branchKey] = await make(branch.folder, saved.id, "");
+  const cache = { folders: saved.folders || {} };
+  let folderId = saved.branches[branchKey];
+  for (const name of sub) folderId = await rawSubfolder(env, token, folderId, name, cache);
+  saved.folders = cache.folders;
   await kvSet(env, "ws_drive_folder", saved);
-  return { rootId: saved.id, folderId: saved.branches[branchKey], branch };
+  return { rootId: saved.id, folderId, branch, path: sub };
 }
 
 async function wsFile(env, request, ctx, body, me, members) {
@@ -3120,23 +3160,25 @@ async function wsFile(env, request, ctx, body, me, members) {
     if (x.filing && Date.now() - Date.parse(x.filing.at) < 5 * 60e3) throw new HttpError(409, "This video is already being saved to Drive — give it a minute.");
     x.filing = { at: new Date().toISOString(), by: me.id, barcode: check.barcode };
   });
-  const { results: busy } = await env.DB.prepare("SELECT id FROM ws_items WHERE kind = 'draft' AND id != ?1 AND json_extract(data, '$.filing.barcode') = ?2").bind(d.id, check.barcode).all();
-  if ((busy || []).length) { await wsUpdateItem(env, d.id, (x) => { delete x.filing; }); throw new HttpError(409, `Barcode ${check.barcode} is being used for another video right now — pick the next number.`); }
+  if (!(await claimThisBarcode(env, check.barcode, "workspace", d.id))) { await wsUpdateItem(env, d.id, (x) => { delete x.filing; }); throw new HttpError(409, `Barcode ${check.barcode} was just given to another file — pick the next number.`); }
   let filed;
   try {
     const token = await getGoogleToken(env);
-    const { rootId, folderId, branch } = await wsDriveFolder(env, token, p.branch);
+    // Same layout as the rest of the Content Library: <Branch> / Videos / YYYY-MM_Project-Name / Final
+    const shoot = londonDate().slice(0, 4) + "-" + londonDate().slice(4, 6) + "_" + libSlug(p.title);
+    const { rootId, folderId, branch, path } = await wsDriveFolder(env, token, p.branch, ["Videos", shoot, "Final"]);
     const approver = (members.find((m) => m.id === d.approval.by) || {}).name || "the team";
     const creator = (members.find((m) => m.id === d.author) || {}).name || "the creator";
     const song = d.media && d.media.music;
     const description = `Workspace project: ${p.title}. Filmed by ${creator}, draft ${d.cut}, approved by ${approver} on ${d.approval.at.slice(0, 10)}.` + (song ? ` Music: ${song.credit || song.title + " by " + song.artist} (mixed in).` : "") + (p.brief ? " Brief: " + p.brief.slice(0, 400) : "");
     const driveId = await driveUploadFromR2(env, token, key, name, folderId, description);
-    filed = { driveId, name, barcode: check.barcode, by: me.id, at: new Date().toISOString(), folderId, rootId, draftId: d.id, cut: d.cut, ...(song ? { music: song } : {}) };
+    filed = { driveId, name, barcode: check.barcode, by: me.id, at: new Date().toISOString(), folderId, rootId, folderPath: ["Creator Studio Projects", branch.folder, ...path], draftId: d.id, cut: d.cut, ...(song ? { music: song } : {}) };
     await wsUpdateItem(env, d.id, (x) => { x.filed = filed; delete x.filing; });
     await wsSaveProject(env, p); // bumps the project's "updated" time
-    await wsAddToLibraryIndex(env, request, { id: driveId, name, mime: obj.httpMetadata && obj.httpMetadata.contentType || d.media.mime, size: obj.size, branch: branch.folder, path: [], modified: filed.at, note: description });
+    await wsAddToLibraryIndex(env, request, { id: driveId, name, mime: obj.httpMetadata && obj.httpMetadata.contentType || d.media.mime, size: obj.size, branch: branch.folder, path, modified: filed.at, note: description });
   } catch (e) {
     await wsUpdateItem(env, d.id, (x) => { delete x.filing; }).catch(() => {});
+    if (!filed) await env.DB.prepare("DELETE FROM ws_barcodes WHERE code = ?1 AND ref = ?2").bind(check.barcode, d.id).run().catch(() => {});
     throw e;
   }
   await wsNotify(env, ctx, { actor: me, members, project: p, text: `📚 Draft ${d.cut} of "${p.title}" is in the Content Library as ${name} (barcode ${check.barcode}). Use "Create post from this" in the Workspace when you want to publish it.`, push: { title: `In the library: ${p.title}`, body: `Draft ${d.cut} saved to Drive as ${check.barcode}` }, eventId: "ws_filed_" + d.id });
@@ -3681,29 +3723,38 @@ async function rawRoute(request, env, url, viewer, path) {
     let project = null;
     if (body.projectId) { try { project = await wsProject(env, body.projectId); } catch (e) { project = null; } }
     const label = rawFolderName(body.label || (project && project.title) || "Shoot");
-    const shootFolder = rawFolderName(`${date} ${label}` + (branchKey === "all" ? "" : ` (${branch.folder})`));
-    const monthFolder = `${date.slice(0, 7)} ${RAW_MONTHS[Number(date.slice(5, 7)) - 1]}`;
+    // Same layout as the Content Library: <Branch> / Videos|Photos / YYYY-MM-DD_Shoot-Name
+    const kindFolder = /^image\//.test(mime) ? "Photos" : "Videos";
+    const shootFolder = date + "_" + libSlug(label);
     const original = wsText(body.name, 160).replace(/[\\/:*?"<>|]+/g, "_") || "file";
-    const driveName = `${date.replace(/-/g, "")}_${branch.letter}_RAW_${original}`;
+    // SANJUGO filing-system name with its own barcode: DATE_AL_CATEGORY_[DISH]_RAW_v<camera number>_BARCODE.ext
+    const category = WS_CATEGORIES[body.category] ? body.category : (project && project.category) || "FC";
+    const dish = WS_DISHES[body.dish] ? body.dish : (project && (project.dishes || [])[0]) || null;
+    const camNo = (/(\d{1,5})(?!.*\d)/.exec(original.replace(/\.[^.]+$/, "")) || [])[1];
+    const ext = ((/\.([a-z0-9]{2,5})$/i.exec(original) || [])[1] || (/^image/.test(mime) ? "jpg" : "mp4")).toLowerCase();
+    const rawId = wsId("raw");
+    const barcode = await claimBarcode(env, request, branch.letter, "raw", rawId);
+    const driveName = [date.replace(/-/g, ""), "AL", category, ...(dish ? [dish] : []), "RAW", "v" + String(Number(camNo || 1)), barcode].join("_") + "." + ext;
 
     const token = await getGoogleToken(env);
     const root = await rawRoot(env);
-    const monthId = await rawSubfolder(env, token, root.id, monthFolder, root);
-    const shootId = await rawSubfolder(env, token, monthId, shootFolder, root);
+    const branchId = await rawSubfolder(env, token, root.id, branch.folder, root);
+    const kindId = await rawSubfolder(env, token, branchId, kindFolder, root);
+    const shootId = await rawSubfolder(env, token, kindId, shootFolder, root);
     await kvSet(env, "raw_drive_folder", { id: root.id, folders: root.folders });
 
     const note = wsText(body.note, 500);
     const description = `Raw ${/^video/.test(mime) ? "video" : /^image/.test(mime) ? "photo" : "file"} uploaded by ${me.name} via Creator Studio on ${new Date().toISOString().slice(0, 10)}.` +
-      (project ? ` Workspace project: ${project.title}.` : "") + ` Branch: ${branch.folder}. Original name: ${original}.` + (note ? " Note: " + note : "");
+        (project ? ` Workspace project: ${project.title}.` : "") + ` Shoot: ${label}. Branch: ${branch.folder}. Original name: ${original}.` + (note ? " Note: " + note : "");
     const init = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&supportsAllDrives=true&fields=id,name,webViewLink,thumbnailLink", {
       method: "POST",
       headers: { Authorization: "Bearer " + token, "Content-Type": "application/json; charset=UTF-8", "X-Upload-Content-Type": mime, "X-Upload-Content-Length": String(size) },
       body: JSON.stringify({ name: driveName, parents: [shootId], description }),
     });
     const session = init.headers.get("location");
-    if (!init.ok || !session) throw new HttpError(502, "Google Drive upload couldn't start (" + init.status + ")");
-    const r = { id: wsId("raw"), session, name: original, driveName, size, mime, shootDate: date, branch: branchKey, projectId: project ? project.id : null, projectTitle: project ? project.title : null,
-      label, note, folderPath: [monthFolder, shootFolder], folderId: shootId, by: me.id, createdAt: new Date().toISOString(), status: "uploading", received: 0 };
+    if (!init.ok || !session) { await env.DB.prepare("DELETE FROM ws_barcodes WHERE code = ?1 AND ref = ?2").bind(barcode, rawId).run(); throw new HttpError(502, "Google Drive upload couldn't start (" + init.status + ")"); }
+    const r = { id: rawId, session, name: original, driveName, barcode, category, dish, size, mime, shootDate: date, branch: branchKey, projectId: project ? project.id : null, projectTitle: project ? project.title : null,
+      label, note, folderPath: [branch.folder, kindFolder, shootFolder], folderId: shootId, by: me.id, createdAt: new Date().toISOString(), status: "uploading", received: 0 };
     await rawSave(env, r);
     return json({ upload: rawPublic(r), chunk: RAW_CHUNK });
   }
@@ -3739,6 +3790,9 @@ async function rawAfterPut(env, r, up) {
     r.status = "done"; r.received = r.size; r.driveId = d.id || null; r.doneAt = new Date().toISOString();
     if (d.webViewLink) r.link = d.webViewLink;
     await rawSave(env, r);
+    // In the Content Library straight away (the next full refresh finds it in Drive too).
+    if (r.driveId) await wsAddToLibraryIndex(env, null, { id: r.driveId, name: r.driveName, mime: r.mime, size: r.size, branch: WS_BRANCHES[r.branch].folder,
+      path: ["Man Man RAW Files", ...r.folderPath.slice(1)], modified: r.doneAt, note: `Raw ${r.label}${r.note ? " — " + r.note : ""} (uploaded by Creator Studio)` }).catch((e) => console.error("raw library", e));
     return { file: rawPublic(r), received: r.size, done: true };
   }
   if (up.status === 404 || up.status === 410) { r.status = "expired"; await rawSave(env, r); throw new HttpError(410, "The upload expired — start this file again."); }

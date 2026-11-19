@@ -1389,7 +1389,7 @@ function Sidebar({open, onClose}){
     let alive = true;
     const check = ()=>{ if(document.hidden) return; fetch("/api/workspace", {cache:"no-store"}).then(r=>r.ok? r.json() : null).then(d=>{
       if(!alive || !d) return;
-      setWsWaiting((d.projects||[]).filter(p=> (p.status==="waiting" && p.submitted && p.submitted.by!==user.id) || (p.status==="approved" && p.submitted && p.submitted.by===user.id)).length);
+      setWsWaiting((d.projects||[]).filter(p=> (p.waiting||[]).some(r=>r.author!==user.id) || (p.approved||[]).some(r=>r.author===user.id)).length);
     }).catch(()=>{}); };
     check(); const t = setInterval(check, 60000);
     return ()=>{ alive = false; clearInterval(t); };
@@ -5687,8 +5687,8 @@ function DashboardPage(){
     todo.push({key:"f"+it.id, urgent:true, rank:0, tag:["Failed", "var(--red)", "var(--red-soft)"], text:it.title, sub: where? where+" didn't post" : "didn't post", btn:"Fix", on:()=>openDetails(it)});
   });
   projects.forEach(p=>{
-    if(p.status==="waiting" && p.submitted && p.submitted.by!==me.id) todo.push({key:"w"+p.id, rank:2, tag:["Approve draft", "var(--blue)", "var(--blue-soft)"], text:p.title, sub:"draft "+p.submitted.cut+" · waiting "+wsDays(p.submitted.at), btn:"Watch", on:()=>openProject(p.id)});
-    if(p.status==="approved" && p.submitted && p.submitted.by===me.id) todo.push({key:"n"+p.id, rank:2, tag:["Name file", "var(--violet)", "var(--violet-soft)"], text:p.title, sub:"approved — confirm the file name", btn:"Name", on:()=>openProject(p.id)});
+    (p.waiting||[]).filter(r=>r.author!==me.id && me.role!=="video").forEach(r=>todo.push({key:"w"+r.draftId, rank:2, tag:["Approve draft", "var(--blue)", "var(--blue-soft)"], text:p.title, sub:"draft "+r.cut+" · waiting "+wsDays(r.submitted.at), btn:"Watch", on:()=>openProject(p.id)}));
+    (p.approved||[]).filter(r=>r.author===me.id).forEach(r=>todo.push({key:"n"+r.draftId, rank:2, tag:["Name file", "var(--violet)", "var(--violet-soft)"], text:p.title, sub:"draft "+r.cut+" approved — confirm the file name", btn:"Name", on:()=>openProject(p.id)}));
     if(p.counts && p.counts.toVote>0) todo.push({key:"v"+p.id, rank:3, tag:["Vote", "var(--amber)", "var(--amber-soft)"], text:p.title, sub:p.counts.toVote+" idea"+(p.counts.toVote>1?"s":"")+" to vote on", btn:"Vote", on:()=>openProject(p.id)});
   });
   // Occasions: big ones (Christmas, Valentine's…) two weeks ahead, the rest three days ahead — until someone says Done or Not for us.
@@ -5756,10 +5756,11 @@ function DashboardPage(){
 
   // ---- Workspace and approved videos not posted yet ----
   const stageCount = s=>projects.filter(p=>p.status===s).length;
-  const stuck = projects.filter(p=>p.status==="waiting" && p.submitted).sort((a,b)=>a.submitted.at.localeCompare(b.submitted.at))[0];
+  const stuck = projects.filter(p=>(p.waiting||[]).length).map(p=>({...p, submitted:p.waiting[0].submitted})).sort((a,b)=>a.submitted.at.localeCompare(b.submitted.at))[0];
   const used = new Set(items.map(i=>i.libraryRef && i.libraryRef.id).filter(Boolean));
   const usedMarks = useUsedMarks();
-  const ready = projects.filter(p=>p.filed && !used.has(p.filed.driveId) && !usedMarks[p.filed.driveId]);
+  // One entry per filed video (a project can have several), each with its own project for "Create post from this".
+  const ready = projects.flatMap(p=>(p.filedList||[]).filter(f=>f.driveId && !used.has(f.driveId) && !usedMarks[f.driveId]).map(f=>({...p, filed:f})));
 
   const hour = new Date().getHours();
   const hello = (hour<12? "Good morning" : hour<18? "Good afternoon" : "Good evening")+", "+me.name.split(" ")[0];
@@ -6856,10 +6857,10 @@ function DriveSettings({canManage=true}){
   if(!st) return <Skeleton h={44}/>;
   const code = {fontFamily:'ui-monospace, Menlo, monospace', fontSize:12, background:"var(--surface-2)", border:"1px solid var(--border)", borderRadius:5, padding:"1px 5px"};
   if(st.connected) return (
-    <SettingRow first on label="Google Drive" hint={(st.serviceEmail || "Connected")+(st.lastRefresh ? " · refreshed "+fmtDateTime(st.lastRefresh) : "")}>
+    <SettingRow first on label="Google Drive" hint={(st.serviceEmail || "Connected")+(st.lastRefresh ? " · refreshed "+fmtDateTime(st.lastRefresh) : "")+(st.method==="google_signin" && !st.canRaw ? " · reconnect once to allow raw-file uploads" : "")}>
       <Button size="sm" icon="refresh" onClick={()=>refresh()} disabled={busy}>{busy? "Refreshing…" : "Refresh"}</Button>
       {st.rootFolderId && <a href={driveFolderUrl(st.rootFolderId)} target="_blank" rel="noopener noreferrer" style={{textDecoration:"none"}}><Button size="sm" icon="external">Open</Button></a>}
-      {canManage && st.method==="google_signin" && <a href="/api/google/connect" style={{textDecoration:"none"}}><Button size="sm" variant={st.canArchive? "subtle" : "primary"}>Reconnect</Button></a>}
+      {canManage && st.method==="google_signin" && <a href="/api/google/connect" style={{textDecoration:"none"}}><Button size="sm" variant={st.canArchive && st.canRaw? "subtle" : "primary"}>Reconnect</Button></a>}
       {canManage && st.method==="google_signin" && <ConfirmButton disabled={busy} confirmLabel="Disconnect?" onConfirm={disconnect}>Disconnect</ConfirmButton>}
     </SettingRow>
   );
@@ -9181,15 +9182,217 @@ function wsUpload(file, onProgress){
   });
 }
 
+/* Raw footage → Google Drive "Man Man RAW Files". Files are sorted automatically into
+   <month> / <shoot date> <shoot name> (<branch>) / YYYYMMDD_<branch letter>_RAW_<original name>, and every upload is listed in
+   Workspace → Raw files. Big videos go in 16 MB pieces, so a dropped connection only repeats one piece. */
+const RAW_MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+const rawToday = ()=>{ const d = new Date(); return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); };
+const rawClean = s=>String(s||"").replace(/[\\/:*?"<>|#]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 90);
+function rawPath(date, label, branch){
+  const b = WS_BRANCH_OPTS.find(o=>o.value===branch);
+  return [date.slice(0,7)+" "+RAW_MONTHS[Number(date.slice(5,7))-1], rawClean(date+" "+(rawClean(label)||"Shoot")+(branch && branch!=="all" && b ? " ("+b.label+")" : ""))];
+}
+function rawPut(url, blob, onProgress){
+  return new Promise((resolve, reject)=>{
+    const x = new XMLHttpRequest();
+    x.open("PUT", url);
+    x.upload.onprogress = e=>{ if(e.lengthComputable && onProgress) onProgress(e.loaded); };
+    x.onload = ()=>{ let d = {}; try{ d = JSON.parse(x.responseText); }catch(e){} x.status<300 ? resolve(d) : reject(Object.assign(new Error(d.error || "Upload failed ("+x.status+")"), {status:x.status})); };
+    x.onerror = ()=>reject(new Error("Connection dropped"));
+    x.send(blob);
+  });
+}
+async function rawUploadOne(file, meta, userId, post, onProgress, stopped){
+  const {upload, chunk} = await post("/raw/start", {...meta, name:file.name, size:file.size, mime:file.type || ""});
+  let offset = 0, fails = 0;
+  while(offset < file.size){
+    if(stopped()) throw new Error("Stopped");
+    const end = Math.min(offset + chunk, file.size);
+    try{
+      const r = await rawPut("/api/workspace/raw/chunk?id="+encodeURIComponent(upload.id)+"&offset="+offset+"&userId="+encodeURIComponent(userId), file.slice(offset, end), n=>onProgress(offset+n));
+      if(r.done) return r.file;
+      offset = r.received; fails = 0;
+    }catch(e){
+      if(e.status===410 || e.status===403 || ++fails > 5) throw e;
+      await new Promise(res=>setTimeout(res, 1500*fails));
+      try{ const st = await post("/raw/status", {id:upload.id}); if(st.done) return st.file; offset = st.received; }catch(err){ /* try the piece again */ }
+    }
+    onProgress(offset);
+  }
+  const st = await post("/raw/status", {id:upload.id});
+  return st.file;
+}
+
+function RawUploadModal({project, onClose, onDone}){
+  const {state, dispatch} = useApp();
+  const post = useWsPost();
+  const [files, setFiles] = useState([]); // {file, status, sent, error}
+  const [f, setF] = useState({label: project ? project.title : "", projectId: project ? project.id : "", branch: project ? project.branch : "shoreditch", shootDate: rawToday(), note:""});
+  const [projects, setProjects] = useState(project ? [project] : []);
+  const [info, setInfo] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const stop = useRef(false);
+  const fileRef = useRef(null);
+  useEffect(()=>{
+    wsGet("").then(d=>setProjects(d.projects||[])).catch(()=>{});
+    wsGet("/raw").then(setInfo).catch(e=>setInfo({error:e.message}));
+  }, []);
+  const set = patch=>setF(x=>({...x, ...patch}));
+  const path = rawPath(f.shootDate || rawToday(), f.label, f.branch);
+  const total = files.reduce((t,x)=>t+x.file.size, 0), sent = files.reduce((t,x)=>t+(x.status==="done"? x.file.size : x.sent||0), 0);
+  const doneN = files.filter(x=>x.status==="done").length;
+  const letter = WS_BRANCH_LETTER[f.branch] || "G";
+  function add(e){
+    const list = [...(e.target.files||[])]; e.target.value = "";
+    setFiles(x=>[...x, ...list.filter(n=>!x.some(o=>o.file.name===n.name && o.file.size===n.size)).map(file=>({file, status:"ready", sent:0, thumb: /^image\//.test(file.type) ? URL.createObjectURL(file) : null}))]);
+  }
+  async function start(){
+    if(!files.length) return;
+    setBusy(true); stop.current = false;
+    let lock = null; try{ lock = navigator.wakeLock && await navigator.wakeLock.request("screen"); }catch(e){}
+    const meta = {label:f.label, projectId:f.projectId || null, branch:f.branch, shootDate:f.shootDate, note:f.note};
+    let ok = 0;
+    for(let i=0; i<files.length; i++){
+      if(stop.current) break;
+      if(files[i].status==="done") continue;
+      const upd = patch=>setFiles(x=>x.map((y,j)=>j===i? {...y, ...patch} : y));
+      upd({status:"uploading", sent:0, error:null});
+      try{ await rawUploadOne(files[i].file, meta, state.currentUserId, post, n=>upd({sent:n}), ()=>stop.current); upd({status:"done"}); ok++; }
+      catch(e){ upd({status:"error", error:e.message}); if(/reconnect Google Drive/i.test(e.message)) break; }
+    }
+    try{ lock && lock.release(); }catch(e){}
+    setBusy(false);
+    if(ok){ dispatch({type:"ADD_TOAST", message:ok+" file"+(ok>1?"s":"")+" saved to Google Drive"}); onDone && onDone(); }
+  }
+  const label = {fontSize:12.5, fontWeight:700, display:"block", marginBottom:6};
+  const inp = {width:"100%", borderRadius:10, border:"1px solid var(--border)", padding:"8px 10px", fontSize:13, background:"var(--surface)", color:"var(--ink)"};
+  const cantUpload = info && !info.error && !info.canUpload;
+  return (
+    <Modal open onClose={busy? ()=>{ if(confirm("Stop uploading? Files already finished stay in Drive.")){ stop.current = true; } } : onClose} width={600}>
+      <div style={{padding:20}}>
+        <h3 style={{margin:"0 0 4px", fontSize:17}}>Upload raw files</h3>
+        <div style={{fontSize:12.5, color:"var(--ink-mute)", marginBottom:14}}>Photos and videos straight from your phone to Google Drive → Man Man RAW Files, sorted by month and shoot.</div>
+        {cantUpload && <div style={{padding:12, borderRadius:10, background:"var(--amber-soft)", color:"var(--amber)", fontSize:13, fontWeight:600, marginBottom:14}}>One-time step: an admin needs to press “Reconnect Google Drive” in Settings, so Creator Studio is allowed to save into the RAW files folder.</div>}
+        <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:12, marginBottom:12}} className="cf-raw-grid">
+          <div style={{gridColumn:"1 / -1"}}><label style={label}>Shoot name</label><input value={f.label} disabled={busy} onChange={e=>set({label:e.target.value})} placeholder="e.g. Christmas dishes, Wagyu roll close-ups" style={inp}/></div>
+          <div><label style={label}>Shoot date</label><input type="date" value={f.shootDate} disabled={busy} onChange={e=>set({shootDate:e.target.value})} style={inp}/></div>
+          <div><label style={label}>Branch</label><Select value={f.branch} onChange={v=>!busy && set({branch:v})} options={WS_BRANCH_OPTS}/></div>
+          <div style={{gridColumn:"1 / -1"}}><label style={label}>Workspace project (optional)</label><Select value={f.projectId} onChange={v=>{ if(busy) return; const p = projects.find(x=>x.id===v); set({projectId:v, ...(p && (!f.label || projects.some(x=>x.title===f.label)) ? {label:p.title, branch:p.branch} : {})}); }} options={[{value:"", label:"No project"}, ...projects.map(p=>({value:p.id, label:p.title}))]}/></div>
+          <div style={{gridColumn:"1 / -1"}}><label style={label}>Note (optional)</label><input value={f.note} disabled={busy} onChange={e=>set({note:e.target.value})} placeholder="What's in these? e.g. B-roll of the pass, chef plating" style={inp}/></div>
+        </div>
+        <div style={{fontSize:12, color:"var(--ink-soft)", padding:"9px 11px", borderRadius:10, background:"var(--surface-2)", marginBottom:12, lineHeight:1.5}}>
+          <b>Saves to:</b> Man Man RAW Files › {path[0]} › {path[1]}<br/>
+          <span style={{color:"var(--ink-mute)"}}>Each file is named {(f.shootDate||rawToday()).replace(/-/g,"")}_{letter}_RAW_<i>original name</i></span>
+        </div>
+        <input ref={fileRef} type="file" multiple accept="image/*,video/*" onChange={add} style={{display:"none"}}/>
+        {files.length>0 && <div style={{display:"flex", flexDirection:"column", gap:6, maxHeight:260, overflowY:"auto", marginBottom:12}}>
+          {files.map((x, i)=>(
+            <div key={x.file.name+x.file.size} style={{display:"flex", alignItems:"center", gap:10, padding:"6px 8px", borderRadius:10, border:"1px solid var(--border)"}}>
+              <div style={{width:38, height:38, borderRadius:7, overflow:"hidden", background:"var(--surface-2)", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0, color:"var(--ink-mute)"}}>{x.thumb ? <img src={x.thumb} style={{width:"100%", height:"100%", objectFit:"cover"}}/> : <Icon name={/^video\//.test(x.file.type)? "film" : "file"} size={17}/>}</div>
+              <div style={{flex:1, minWidth:0}}>
+                <div style={{fontSize:12.5, fontWeight:600, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>{x.file.name}</div>
+                <div style={{fontSize:11.5, color: x.status==="error"? "var(--red)" : x.status==="done"? "var(--green)" : "var(--ink-mute)"}}>{fmtBytes(x.file.size)} · {x.status==="done"? "✓ In Drive" : x.status==="uploading"? Math.round((x.sent||0)/x.file.size*100)+"%" : x.status==="error"? x.error : "Ready"}</div>
+                {x.status==="uploading" && <div style={{height:4, borderRadius:99, background:"var(--surface-2)", marginTop:4}}><div style={{height:4, width:Math.round((x.sent||0)/x.file.size*100)+"%", borderRadius:99, background:"var(--accent)"}}/></div>}
+              </div>
+              {!busy && x.status!=="done" && <IconButton icon="x" title="Remove" onClick={()=>setFiles(l=>l.filter((_,j)=>j!==i))}/>}
+            </div>
+          ))}
+        </div>}
+        {busy && <div style={{fontSize:12, color:"var(--ink-mute)", marginBottom:10}}>Uploading {doneN+1} of {files.length} · {fmtBytes(sent)} of {fmtBytes(total)} — keep this screen open until it finishes.</div>}
+        <div style={{display:"flex", gap:8, flexWrap:"wrap", justifyContent:"flex-end"}}>
+          <Button icon="plus" onClick={()=>fileRef.current && fileRef.current.click()} disabled={busy}>{files.length? "Add more" : "Choose photos & videos"}</Button>
+          <span style={{flex:1}}/>
+          {busy ? <Button onClick={()=>{ stop.current = true; }}>Stop</Button> : <Button onClick={onClose}>{doneN? "Done" : "Cancel"}</Button>}
+          <Button variant="primary" icon="upload" onClick={start} disabled={busy || !files.some(x=>x.status!=="done") || cantUpload || !f.shootDate}>{busy? "Uploading…" : files.some(x=>x.status==="error")? "Try again" : "Upload "+(files.filter(x=>x.status!=="done").length || "")+" to Drive"}</Button>
+        </div>
+      </div>
+      <style>{`@media (max-width:520px){ .cf-raw-grid{ grid-template-columns:1fr !important; } }`}</style>
+    </Modal>
+  );
+}
+
+// Workspace → Raw files: everything uploaded, grouped by shoot, newest first.
+function RawFilesList({reloadKey}){
+  const {state, dispatch} = useApp();
+  const post = useWsPost();
+  const me = USERS.find(u=>u.id===state.currentUserId) || {};
+  const [data, setData] = useState(null);
+  const [q, setQ] = useState("");
+  const [open, setOpen] = useState({});
+  const load = useCallback(()=>wsGet("/raw").then(setData).catch(e=>setData({error:e.message, files:[]})), []);
+  useEffect(()=>{ load(); }, [load, reloadKey]);
+  if(!data) return <Card style={{padding:16}}><Skeleton h={16} w="40%"/><div style={{height:10}}/><Skeleton h={60}/></Card>;
+  const s = q.trim().toLowerCase();
+  const files = (data.files||[]).filter(r=>!s || [r.name, r.driveName, r.label, r.projectTitle, r.note, wsUser(r.by).name, ...(r.folderPath||[])].join(" ").toLowerCase().includes(s));
+  const groups = [];
+  for(const r of files){ const k = r.folderId; let g = groups.find(x=>x.k===k); if(!g){ g = {k, r, list:[]}; groups.push(g); } g.list.push(r); }
+  const driveLink = r=> r.link || (r.driveId ? "https://drive.google.com/file/d/"+r.driveId+"/view" : null);
+  return (
+    <div>
+      {data.error && <Card style={{padding:14, marginBottom:12, color:"var(--red)", fontSize:13}}>{data.error}</Card>}
+      {data.canUpload===false && <Card style={{padding:12, marginBottom:12, fontSize:13, color:"var(--amber)", background:"var(--amber-soft)", fontWeight:600}}>One-time step: an admin needs to press “Reconnect Google Drive” in Settings before raw files can be uploaded.</Card>}
+      <div style={{display:"flex", gap:8, alignItems:"center", flexWrap:"wrap", marginBottom:12}}>
+        <div style={{fontSize:12.5, color:"var(--ink-mute)", flex:1}}>{(data.files||[]).length} file{(data.files||[]).length===1?"":"s"} in {data.rootId ? <a href={"https://drive.google.com/drive/folders/"+data.rootId} target="_blank" rel="noopener" style={{color:"var(--accent)", fontWeight:600}}>Man Man RAW Files ↗</a> : "Man Man RAW Files"}</div>
+        <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search shoots, files, notes" style={{width:"min(100%, 240px)", borderRadius:10, border:"1px solid var(--border)", padding:"7px 10px", fontSize:13, background:"var(--surface)", color:"var(--ink)"}}/>
+      </div>
+      {!groups.length ? <Card><EmptyState icon="upload" title={s? "Nothing matches" : "No raw files yet"} subtitle={s? "Try another search." : "Use “Upload raw files” to send photos and videos from your phone into Drive, sorted by shoot."}/></Card>
+      : <div style={{display:"flex", flexDirection:"column", gap:10}}>{groups.map(g=>{
+        const vids = g.list.filter(r=>/^video/.test(r.mime)).length, pics = g.list.filter(r=>/^image/.test(r.mime)).length;
+        const size = g.list.reduce((t,r)=>t+(r.size||0), 0), isOpen = open[g.k];
+        return (
+          <Card key={g.k} style={{padding:12}}>
+            <div style={{display:"flex", alignItems:"center", gap:10, flexWrap:"wrap", cursor:"pointer"}} onClick={()=>setOpen(o=>({...o, [g.k]:!o[g.k]}))}>
+              <Icon name={isOpen? "chevronDown" : "chevronRight"} size={15}/>
+              <div style={{flex:"1 1 220px", minWidth:0}}>
+                <div style={{fontWeight:600, fontSize:13.5}}>{(g.r.folderPath||[])[1] || g.r.label}</div>
+                <div style={{fontSize:11.5, color:"var(--ink-mute)"}}>{[vids && vids+" video"+(vids>1?"s":""), pics && pics+" photo"+(pics>1?"s":""), fmtBytes(size), "by "+[...new Set(g.list.map(r=>wsUser(r.by).name))].join(", "), g.r.projectTitle && "📁 "+g.r.projectTitle].filter(Boolean).join(" · ")}</div>
+              </div>
+              <Button size="sm" icon="external" onClick={e=>{ e.stopPropagation(); window.open("https://drive.google.com/drive/folders/"+g.k, "_blank", "noopener"); }}>Open folder</Button>
+            </div>
+            {isOpen && <div style={{marginTop:10, display:"flex", flexDirection:"column", gap:4}}>
+              {g.list.map(r=><div key={r.id} style={{display:"flex", alignItems:"center", gap:8, fontSize:12.5, padding:"5px 0", borderTop:"1px solid var(--border)"}}>
+                <Icon name={/^video/.test(r.mime)? "film" : "file"} size={14} style={{color:"var(--ink-mute)", flexShrink:0}}/>
+                <span className="num" style={{flex:1, minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", fontFamily:'ui-monospace, "SF Mono", Menlo, monospace', fontSize:12}} title={r.note || r.driveName}>{r.driveName}</span>
+                <span style={{color:"var(--ink-mute)", fontSize:11.5, whiteSpace:"nowrap"}}>{fmtBytes(r.size)} · {wsAgo(r.createdAt)}</span>
+                {driveLink(r) && <a href={driveLink(r)} target="_blank" rel="noopener" style={{fontSize:12, fontWeight:600, color:"var(--accent)"}}>Open</a>}
+                {(r.by===me.id || me.role==="admin") && <button title="Remove from this list (stays in Drive)" onClick={async()=>{ if(!confirm("Remove “"+r.driveName+"” from this list? The file stays in Google Drive.")) return; try{ await post("/raw/remove", {id:r.id}); load(); }catch(e){ dispatch({type:"ADD_TOAST", message:e.message, variant:"danger"}); } }} style={{border:"none", background:"none", cursor:"pointer", color:"var(--ink-mute)", padding:2}}><Icon name="x" size={13}/></button>}
+              </div>)}
+              {g.r.note && <div style={{fontSize:12, color:"var(--ink-mute)", marginTop:4}}>Note: {g.r.note}</div>}
+            </div>}
+          </Card>
+        );
+      })}</div>}
+    </div>
+  );
+}
+
+// [label, colour, background] for a draft's own approval state.
+const WS_DRAFT_STATE = {waiting:["Waiting", "var(--blue)", "var(--blue-soft)"], approved:["Approved", "var(--green)", "var(--green-soft)"], filed:["In Library", "var(--emerald)", "var(--green-soft)"], changes:["Changes", "var(--amber)", "var(--amber-soft)"]};
 function WsStatusBadge({status}){ const m = WS_STATUS[status] || WS_STATUS.ideas; return <Badge label={m.label} color={m.color} soft={m.soft}/>; }
 function WsChip({children}){ return <span style={{fontSize:11.5, fontWeight:600, padding:"3px 9px", borderRadius:99, background:"var(--surface-2)", color:"var(--ink-soft)", whiteSpace:"nowrap"}}>{children}</span>; }
 
+// If anything in the Workspace fails to draw, say so (with a way back) instead of leaving a blank screen.
+class WsErrorBoundary extends React.Component {
+  constructor(props){ super(props); this.state = {err:null}; }
+  static getDerivedStateFromError(err){ return {err}; }
+  componentDidCatch(err, info){ console.error("Workspace error", err, info); }
+  render(){
+    if(!this.state.err) return this.props.children;
+    return <Card style={{padding:20}}>
+      <div style={{fontWeight:600, marginBottom:6}}>Something went wrong showing this page</div>
+      <div style={{fontSize:12.5, color:"var(--ink-mute)", marginBottom:12}}>{String(this.state.err && this.state.err.message || this.state.err)}</div>
+      <div style={{display:"flex", gap:8}}><Button onClick={()=>{ this.setState({err:null}); this.props.onBack && this.props.onBack(); }}>Back to Workspace</Button><Button variant="primary" onClick={()=>location.reload()}>Reload</Button></div>
+    </Card>;
+  }
+}
 function WorkspacePage(){
   const {state} = useApp();
   const [openId, setOpenId] = useState(state.workspaceProject || null);
   useEffect(()=>{ window.scrollTo(0,0); }, [openId]);
   return <>
-    {openId ? <WsProject id={openId} onBack={()=>setOpenId(null)}/> : <WsHome onOpen={setOpenId}/>}
+    <WsErrorBoundary key={openId||"home"} onBack={()=>setOpenId(null)}>
+      {openId ? <WsProject key={openId} id={openId} onBack={()=>setOpenId(null)}/> : <WsHome onOpen={setOpenId}/>}
+    </WsErrorBoundary>
     <style>{`
       @media (max-width:600px){ .cf-ws-cover{height:104px !important;} }
       .cf-ws-review{display:grid; grid-template-columns:minmax(0, 1.15fr) minmax(0, 1fr); gap:18px; align-items:start;}
@@ -9200,6 +9403,7 @@ function WorkspacePage(){
   </>;
 }
 
+let WS_HOME_CACHE = null, WS_PROJECT_CACHE = {};
 function WsHome({onOpen}){
   const {state, dispatch} = useApp();
   const [projects, setProjects] = useState(null);
@@ -9207,33 +9411,39 @@ function WsHome({onOpen}){
   const [tab, setTab] = useState("active");
   const [q, setQ] = useState("");
   const [creating, setCreating] = useState(false);
-  const load = useCallback(()=>{ wsGet("").then(d=>{ setProjects(d.projects); setError(null); }).catch(e=>setError(e.message)); }, []);
+  const [rawOpen, setRawOpen] = useState(false), [rawKey, setRawKey] = useState(0);
+  // The list is remembered between visits, so coming back from a project shows it at once (then refreshes).
+  useEffect(()=>{ if(WS_HOME_CACHE && !projects) setProjects(WS_HOME_CACHE); }, []);
+  const load = useCallback(()=>{ wsGet("").then(d=>{ WS_HOME_CACHE = d.projects; setProjects(d.projects); setError(null); }).catch(e=>setError(e.message)); }, []);
   useEffect(()=>{ load(); const t = setInterval(()=>{ if(!document.hidden) load(); }, 30000); return ()=>clearInterval(t); }, [load]);
-  const list = (projects||[]).filter(p=> tab==="all" || (tab==="filed" ? p.status==="filed" : p.status!=="filed"))
-    .filter(p=>{ const s = q.trim().toLowerCase(); return !s || [p.title, p.brief, wsUser(p.creatorId).name, wsDishLabel(p), p.filed && p.filed.barcode, p.filed && p.filed.name].join(" ").toLowerCase().includes(s); });
-  const counts = {active:(projects||[]).filter(p=>p.status!=="filed").length, filed:(projects||[]).filter(p=>p.status==="filed").length};
+  const list = (projects||[]).filter(p=> tab==="all" || (tab==="filed" ? (p.filedList||[]).length>0 : p.status!=="filed"))
+    .filter(p=>{ const s = q.trim().toLowerCase(); return !s || [p.title, p.brief, wsUser(p.creatorId).name, wsDishLabel(p), ...(p.filedList||[]).map(f=>f.barcode+" "+f.name)].join(" ").toLowerCase().includes(s); });
+  const counts = {active:(projects||[]).filter(p=>p.status!=="filed").length, filed:(projects||[]).filter(p=>(p.filedList||[]).length>0).length};
   return (
     <div>
       <PageHeader title="Workspace" subtitle="Plan each video together — references, ideas, cuts and notes — then approve it into the Content Library."
-        action={<Button variant="primary" icon="plus" onClick={()=>setCreating(true)}>Create project</Button>}/>
+        action={<div style={{display:"flex", gap:8, flexWrap:"wrap"}}><Button icon="upload" onClick={()=>setRawOpen(true)}>Upload raw files</Button><Button variant="primary" icon="plus" onClick={()=>setCreating(true)}>Create project</Button></div>}/>
       <div style={{display:"flex", gap:10, alignItems:"center", flexWrap:"wrap", marginBottom:16}}>
         <div style={{display:"flex", gap:4, background:"var(--surface-2)", padding:3, borderRadius:10}}>
-          {[["active","Active",counts.active],["filed","In Library",counts.filed],["all","All",null]].map(([k,l,n])=>(
+          {[["active","Active",counts.active],["filed","In Library",counts.filed],["all","All",null],["raw","Raw files",null]].map(([k,l,n])=>(
             <button key={k} onClick={()=>setTab(k)} style={{border:"none", cursor:"pointer", padding:"6px 12px", borderRadius:8, fontSize:13, fontWeight:600, background: tab===k? "var(--surface)":"transparent", color: tab===k? "var(--ink)":"var(--ink-mute)", boxShadow: tab===k? "var(--shadow-sm)":"none"}}>{l}{n!=null && <span style={{marginLeft:6, color:"var(--ink-mute)", fontWeight:500}}>{n}</span>}</button>
           ))}
         </div>
         <div style={{flex:1}}/>
-        <div className="cf-search" style={{position:"relative", width:"min(100%, 280px)"}}>
+        <div className="cf-search" style={{position:"relative", width:"min(100%, 280px)", display: tab==="raw"? "none" : undefined}}>
           <Icon name="search" size={15} style={{position:"absolute", left:10, top:10, color:"var(--ink-mute)"}}/>
           <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search projects, dishes, barcodes" style={{width:"100%", borderRadius:10, border:"1px solid var(--border)", padding:"8px 10px 8px 32px", fontSize:13, background:"var(--surface)", color:"var(--ink)"}}/>
         </div>
       </div>
+      {tab==="raw" ? <RawFilesList reloadKey={rawKey}/> : <>
       {error && <Card style={{padding:14, marginBottom:14, color:"var(--red)", fontSize:13}}>{error} <Button size="sm" onClick={load}>Try again</Button></Card>}
       {!projects && !error ? <div className="cf-ws-grid">{[0,1,2].map(i=><Card key={i} style={{padding:12}}><Skeleton h={150} r={10}/><div style={{height:10}}/><Skeleton h={14} w="70%"/></Card>)}</div>
         : !list.length ? <Card><EmptyState icon="workspace" title={projects && projects.length? "No projects here" : "Start your first project"}
             subtitle={projects && projects.length? "Try another tab or search." : "A project holds everything for one video: reference reels, ideas, the creator's cuts and everyone's notes."}
             action={!(projects && projects.length) && <Button variant="primary" icon="plus" onClick={()=>setCreating(true)}>Create project</Button>}/></Card>
         : <div className="cf-ws-grid">{list.map(p=><WsCard key={p.id} p={p} onOpen={()=>onOpen(p.id)}/>)}</div>}
+      </>}
+      {rawOpen && <RawUploadModal onClose={()=>setRawOpen(false)} onDone={()=>setRawKey(k=>k+1)}/>}
       <WsProjectForm open={creating} onClose={()=>setCreating(false)} onSaved={p=>{ setCreating(false); onOpen(p.id); }}/>
       <style>{`.cf-ws-grid{display:grid; grid-template-columns:repeat(auto-fill, minmax(230px, 1fr)); gap:14px;} @media (max-width:600px){ .cf-ws-grid{grid-template-columns:1fr 1fr; gap:10px;} }`}</style>
     </div>
@@ -9242,16 +9452,17 @@ function WsHome({onOpen}){
 
 // The song travels with "Create post from this": already mixed into the approved video (credit goes in the caption),
 // picked in the plan but not mixed in yet (step 4 opens ready to fit it), or an Instagram song added from the phone.
-function wsMusicPrefill(p){
-  const mixed = p.filed && p.filed.music;
+function wsMusicPrefill(p, f){
+  const mixed = (f || p.filed) && (f || p.filed).music;
   if(mixed) return {music:{title: mixed.title+" — "+mixed.artist, url: mixed.page, baked:true, credit: mixed.needsCredit ? mixed.credit : ""}};
   if(p.music && p.music.track) return {plannedTrack: p.music.track};
   if(cleanMusic(p.music)) return {music: cleanMusic(p.music)};
   return {};
 }
-function wsCreatePost(dispatch, p){
+function wsCreatePost(dispatch, p, f){
+  f = f || p.filed;
   LIBRARY_CACHE = null;
-  dispatch({type:"SET_ROUTE", route:"create", createPrefill:{libraryBarcode: p.filed.barcode, wsFresh:true, title: p.title, ...wsMusicPrefill(p)}});
+  dispatch({type:"SET_ROUTE", route:"create", createPrefill:{libraryBarcode: f.barcode, wsFresh:true, title: p.title, ...wsMusicPrefill(p, f)}});
 }
 // "31 Oct" (and the year when it isn't this year).
 function wsDay(iso){ const d = new Date(iso); return fmtDate(iso, d.getFullYear()===new Date().getFullYear() ? {day:"numeric", month:"short"} : {day:"numeric", month:"short", year:"numeric"}); }
@@ -9295,10 +9506,10 @@ function WsCard({p, onOpen}){
         <div style={{fontWeight:600, fontSize:14, lineHeight:1.3}}>{p.title}</div>
         <div style={{fontSize:12, color:"var(--ink-mute)", marginTop:2}}>{(WS_BRANCH_OPTS.find(b=>b.value===p.branch)||{}).label} · {p.creatorId ? wsUser(p.creatorId).name : "No creator yet"}</div>
       </div>
-      <div style={{display:"flex", alignItems:"center", gap:6, flexWrap:"wrap"}}><WsStatusBadge status={p.status}/>{p.filed && <BarcodeChip code={p.filed.barcode}/>}</div>
+      <div style={{display:"flex", alignItems:"center", gap:6, flexWrap:"wrap"}}><WsStatusBadge status={p.status}/>{(p.filedList||[]).map(f=><BarcodeChip key={f.barcode} code={f.barcode}/>)}{c0.waiting>0 && p.status!=="waiting" && <Badge label={c0.waiting+" waiting"} color="var(--blue)" soft="var(--blue-soft)"/>}{c0.waiting>1 && p.status==="waiting" && <span style={{fontSize:11.5, fontWeight:700, color:"var(--blue)"}}>{c0.waiting} drafts</span>}</div>
       <div style={{fontSize:12, color:"var(--ink-mute)", lineHeight:1.5}}>
-        Created {wsDay(p.createdAt)}{p.finishedAt ? <> · Finished {wsDay(p.finishedAt)} <span style={{color:"var(--ink-soft)"}}>({wsDays(p.createdAt, p.finishedAt)})</span></> : p.due ? " · due "+wsDay(p.due) : ""}
-        {!p.filed && bits.length>0 && <div>{bits.join(" · ")}</div>}
+        Created {wsDay(p.createdAt)}{p.finishedAt && p.status==="filed" ? <> · Finished {wsDay(p.finishedAt)} <span style={{color:"var(--ink-soft)"}}>({wsDays(p.createdAt, p.finishedAt)})</span></> : p.due ? " · due "+wsDay(p.due) : ""}
+        {p.status!=="filed" && bits.length>0 && <div>{bits.join(" · ")}</div>}
       </div>
       {p.status==="filed" && (
         <div style={{display:"flex", gap:6, flexWrap:"wrap"}} onClick={e=>e.stopPropagation()}>
@@ -9358,17 +9569,20 @@ function WsProject({id, onBack}){
   const {state, dispatch} = useApp();
   const post = useWsPost();
   const me = USERS.find(u=>u.id===state.currentUserId);
-  const [data, setData] = useState(null);
+  // Shown at once from the last visit (if any) while the fresh copy loads — no blank screen when switching projects.
+  const [data, setData] = useState(()=>WS_PROJECT_CACHE[id] || null);
   const [error, setError] = useState(null);
   const [tab, setTab] = useState(null);
   const [editing, setEditing] = useState(false);
-  const [naming, setNaming] = useState(false);
+  const [rawOpen, setRawOpen] = useState(false);
+  const [naming, setNaming] = useState(null); // draft id whose file name is being checked
   const [showDetails, setShowDetails] = useState(false);
-  const autoNamed = useRef(false);
+  const [stageSel, setStageSel] = useState(null);
+  const autoNamed = useRef(new Set());
   // Only the newest reload is used, and none while a change is still being sent — so an older reload can't undo a vote on screen.
   const seq = useRef(0), pending = useRef(0), queue = useRef(Promise.resolve());
   const load = useCallback(()=>{ const n = ++seq.current;
-    return wsGet("/project?id="+encodeURIComponent(id)).then(d=>{ if(n===seq.current && !pending.current){ setData(d); setError(null); } return d; }).catch(e=>{ if(n===seq.current) setError(e.message); }); }, [id]);
+    return wsGet("/project?id="+encodeURIComponent(id)).then(d=>{ if(n===seq.current && !pending.current){ WS_PROJECT_CACHE[id] = d; setData(d); setError(null); } return d; }).catch(e=>{ if(n===seq.current) setError(e.message); }); }, [id]);
   useEffect(()=>{ load(); const t = setInterval(()=>{ if(!document.hidden) load(); }, 20000); return ()=>clearInterval(t); }, [load]);
   const act = useCallback((path, body, ok)=>{
     // Votes and ⭐ show straight away; the server's answer replaces them a moment later.
@@ -9393,12 +9607,13 @@ function WsProject({id, onBack}){
   const p = data && data.project;
   const items = (data && data.items) || [];
   const drafts = items.filter(i=>i.kind==="draft");
-  const stageDraftId = p && ((p.approval && p.approval.draftId) || (p.submitted && p.submitted.draftId));
-  const stageDraft = drafts.find(d=>d.id===stageDraftId);
-  // The person who uploaded the approved cut gets the file-name check straight away.
-  useEffect(()=>{
-    if(p && p.status==="approved" && stageDraft && stageDraft.author===me.id && !autoNamed.current){ autoNamed.current = true; setNaming(true); }
-  }, [p && p.status, stageDraft && stageDraft.id, me.id]);
+  // Every draft waiting for approval or approved (still to be named) gets its own approval view — a project can have several.
+  const stageDrafts = drafts.filter(d=>(d.submitted || d.approval) && !d.filed);
+  const stageDraft = stageDrafts.find(d=>d.id===stageSel) || stageDrafts[0] || null;
+  const filedDrafts = drafts.filter(d=>d.filed);
+  // The person who uploaded an approved draft gets its file-name check straight away (once per draft).
+  const toName = stageDrafts.find(d=>d.approval && d.author===me.id && !autoNamed.current.has(d.id));
+  useEffect(()=>{ if(toName && !naming){ autoNamed.current.add(toName.id); setNaming(toName.id); } }, [toName && toName.id]);
 
   if(error && !data) return <div><Button icon="chevronLeft" onClick={onBack}>Workspace</Button><Card style={{padding:20, marginTop:14, color:"var(--red)"}}>{error}</Card></div>;
   if(!data) return <div><Skeleton h={28} w="40%"/><div style={{height:14}}/><Skeleton h={300} r={14}/></div>;
@@ -9415,8 +9630,8 @@ function WsProject({id, onBack}){
     ["draft", "film", "Draft review", drafts.length ? "draft "+drafts.length : null, openNotes ? openNotes+" to-do"+(openNotes>1?"s":"") : null],
   ];
   const branch = (WS_BRANCH_OPTS.find(b=>b.value===p.branch)||{}).label;
-  const canDelete = !p.filed && (me.role==="admin" || p.createdBy===me.id);
-  const stage = (p.status==="waiting" || p.status==="approved") && stageDraft;
+  const canDelete = !filedDrafts.length && (me.role==="admin" || p.createdBy===me.id);
+  const stage = stageDraft;
   const body = (
     <div>
       <div className="cf-noscrollbar" style={{display:"flex", gap:4, overflowX:"auto", borderBottom:"1px solid var(--border)", marginBottom:16}}>
@@ -9439,7 +9654,8 @@ function WsProject({id, onBack}){
         <IconButton icon="chevronLeft" title="Back to Workspace" onClick={onBack}/>
         <h1 style={{fontSize:22, margin:0, fontWeight:600, flex:"1 1 200px", minWidth:0}}>{p.title}</h1>
         <WsStatusBadge status={p.status}/>
-        {!p.filed && <Button size="sm" icon="edit" onClick={()=>setEditing(true)}>Edit</Button>}
+        <Button size="sm" icon="upload" onClick={()=>setRawOpen(true)}>Raw files</Button>
+        <Button size="sm" icon="edit" onClick={()=>setEditing(true)}>Edit</Button>
         {canDelete && <ConfirmButton confirmLabel="Delete project?" onConfirm={async()=>{ if(await act("/project/delete", {id:p.id}, "Project deleted")) onBack(); }}>Delete</ConfirmButton>}
       </div>
       <div style={{display:"flex", gap:6, flexWrap:"wrap", alignItems:"center", margin:"0 0 18px"}}>
@@ -9448,22 +9664,26 @@ function WsProject({id, onBack}){
         {p.campaignId && <button onClick={()=>dispatch({type:"SET_ROUTE", route:"campaigns"})} style={{fontSize:11.5, fontWeight:600, padding:"3px 9px", borderRadius:99, border:"none", background:"var(--accent-soft)", color:"var(--accent)", cursor:"pointer", whiteSpace:"nowrap"}}>📣 {campaignLabel(state.campaigns, p.campaignId)}</button>}
         {(p.food||[]).length>0 && <WsFoodChip food={p.food}/>}
         <span style={{fontSize:12, color:"var(--ink-mute)", marginLeft:4}}>
-          Created {wsDay(p.createdAt)} by {wsUser(p.createdBy).name}{p.finishedAt ? " · Finished "+wsDay(p.finishedAt)+" ("+wsDays(p.createdAt, p.finishedAt)+")" : wsDays(p.createdAt)==="same day" ? "" : " · open for "+wsDays(p.createdAt)}{p.due && !p.filed ? " · due "+wsDay(p.due) : ""}
+          Created {wsDay(p.createdAt)} by {wsUser(p.createdBy).name}{p.finishedAt && p.status==="filed" ? " · Finished "+wsDay(p.finishedAt)+" ("+wsDays(p.createdAt, p.finishedAt)+")" : wsDays(p.createdAt)==="same day" ? "" : " · open for "+wsDays(p.createdAt)}{p.due && !p.finishedAt ? " · due "+wsDay(p.due) : ""}
         </span>
       </div>
 
-      {p.filed ? <>
-        <WsFiled p={p}/>
-        <div style={{margin:"18px 0 10px"}}><Button size="sm" icon={showDetails? "chevronDown":"chevronRight"} onClick={()=>setShowDetails(v=>!v)}>{showDetails? "Hide" : "Show"} ideas, plan and cuts</Button></div>
-        {showDetails && body}
-      </> : stage ? <>
-        <WsApprovalStage p={p} draft={stageDraft} items={items} act={act} onName={()=>setNaming(true)}/>
-        <div style={{margin:"18px 0 10px"}}><Button size="sm" icon={showDetails? "chevronDown":"chevronRight"} onClick={()=>setShowDetails(v=>!v)}>{showDetails? "Hide" : "Show"} ideas, plan and cuts</Button></div>
+      {stage && <>
+        {stageDrafts.length>1 && <div style={{display:"flex", alignItems:"center", gap:6, flexWrap:"wrap", marginBottom:10}}>
+          <span style={{fontSize:12.5, fontWeight:700, color:"var(--ink-soft)", marginRight:2}}>{stageDrafts.length} drafts in approval:</span>
+          {stageDrafts.map(d=><button key={d.id} onClick={()=>setStageSel(d.id)} style={{padding:"5px 12px", borderRadius:99, fontSize:12.5, fontWeight:600, cursor:"pointer", border:"1px solid "+(d.id===stageDraft.id? "var(--accent)":"var(--border)"), background: d.id===stageDraft.id? "var(--accent-soft)":"var(--surface)", color: d.id===stageDraft.id? "var(--accent-dark)":"var(--ink-soft)"}}>Draft {d.cut} · {d.approval? "approved" : "waiting"}</button>)}
+        </div>}
+        <WsApprovalStage key={stageDraft.id} p={p} draft={stageDraft} items={items} act={act} onName={()=>setNaming(stageDraft.id)}/>
+      </>}
+      {filedDrafts.length>0 && <div style={{marginTop: stage? 16 : 0}}><WsFiled p={p} drafts={filedDrafts}/></div>}
+      {(stage || filedDrafts.length>0) ? <>
+        <div style={{margin:"18px 0 10px"}}><Button size="sm" icon={showDetails? "chevronDown":"chevronRight"} onClick={()=>setShowDetails(v=>!v)}>{showDetails? "Hide" : "Show"} ideas, plan and drafts</Button></div>
         {showDetails && body}
       </> : body}
 
       <WsProjectForm open={editing} project={p} onClose={()=>setEditing(false)} onSaved={()=>{ setEditing(false); load(); }}/>
-      {naming && p.status==="approved" && <WsNameModal p={p} onClose={()=>setNaming(false)} onFiled={()=>{ setNaming(false); LIBRARY_CACHE = null; load(); }}/>}
+      {rawOpen && <RawUploadModal project={p} onClose={()=>setRawOpen(false)}/>}
+      {naming && drafts.some(d=>d.id===naming && d.approval && !d.filed) && <WsNameModal p={p} draft={drafts.find(d=>d.id===naming)} onClose={()=>setNaming(null)} onFiled={()=>{ setNaming(null); LIBRARY_CACHE = null; load(); }}/>}
     </div>
   );
 }
@@ -9484,7 +9704,7 @@ function WsMove({it, act}){
   const me = USERS.find(u=>u.id===state.currentUserId) || {};
   const [open, setOpen] = useState(false), [list, setList] = useState(null), [to, setTo] = useState("");
   if(me.role==="video" && it.author!==me.id) return null;
-  async function show(){ setOpen(true); try{ const d = await fetch("/api/workspace").then(r=>r.json()); setList((d.projects||[]).filter(p=>p.id!==it.projectId && !p.filed)); }catch(e){ setList([]); } }
+  async function show(){ setOpen(true); try{ const d = await fetch("/api/workspace").then(r=>r.json()); setList((d.projects||[]).filter(p=>p.id!==it.projectId)); }catch(e){ setList([]); } }
   async function move(){ const p = list.find(x=>x.id===to); if(await act("/item/move", {id:it.id, projectId:to}, "Moved to “"+(p? p.title : "the other project")+"”")) setOpen(false); }
   return <>
     <button title="Move to another project" onClick={show} style={{border:"none", background:"none", padding:2, cursor:"pointer", color:"var(--ink-mute)", marginLeft:"auto", fontSize:11.5, fontWeight:600, display:"inline-flex", alignItems:"center", gap:3}}><Icon name="folder" size={13}/>Move</button>
@@ -9597,7 +9817,7 @@ function WsIdeas({p, items, act}){
   const {state} = useApp();
   const me = state.currentUserId;
   const voters = p.voters || [];
-  const canVote = voters.includes(me) && !p.filed;
+  const canVote = voters.includes(me);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -9619,7 +9839,7 @@ function WsIdeas({p, items, act}){
   const [pickedView, setPickedView] = useState(false);
   const visible = onlyPicked || pickedView ? shown.filter(i=>wsPicked(i, voters)) : shown;
   const waiting = all.length - all.filter(i=>wsPicked(i, voters)).length;
-  const canStar = !onlyPicked && !p.filed;
+  const canStar = !onlyPicked;
   const unvoted = it=> canVote && !(it.yes||[]).includes(me) && !(it.no||[]).includes(me);
   async function add(){
     const t = text.trim(); if(!t) return;
@@ -9633,7 +9853,7 @@ function WsIdeas({p, items, act}){
 
   return (
     <div>
-      {!p.filed && <div style={{display:"flex", gap:8, marginBottom:14}}>
+      {<div style={{display:"flex", gap:8, marginBottom:14}}>
         <input value={text} onChange={e=>setText(e.target.value)} onKeyDown={e=>{ if(e.key==="Enter") add(); }} placeholder="Paste a reel link (Instagram, TikTok, YouTube) or write an idea"
           style={{flex:1, minWidth:0, borderRadius:10, border:"1px solid var(--border)", padding:"9px 11px", fontSize:13, background:"var(--surface)", color:"var(--ink)"}}/>
         <Button variant="primary" icon="plus" onClick={add} disabled={busy || !text.trim()}>Add</Button>
@@ -9643,7 +9863,7 @@ function WsIdeas({p, items, act}){
         <span style={{display:"inline-flex", border:"1px solid var(--border)", borderRadius:99, overflow:"hidden", marginRight:4}}>
           {[[false, "All "+all.length], [true, "Picked for the creator "+(all.length-waiting)]].map(([v, l])=><button key={String(v)} onClick={()=>setPickedView(v)} style={{border:"none", padding:"5px 11px", fontSize:12, fontWeight:600, cursor:"pointer", background: pickedView===v? "var(--accent-soft)" : "var(--surface)", color: pickedView===v? "var(--accent-dark)" : "var(--ink-soft)"}}>{l}</button>)}
         </span>
-        <span style={{fontSize:11.5, color:"var(--ink-mute)", marginLeft:4}}>{!p.filed && !voters.includes(me) ? "You're the creator — "+voters.map(v=>wsUser(v).name).join(" and ")+" vote." : wsNeed(voters)+" 👍 or ⭐ = the creator sees it · 3 👎 = removed"}</span></>}
+        <span style={{fontSize:11.5, color:"var(--ink-mute)", marginLeft:4}}>{!voters.includes(me) ? "You're the creator — "+voters.map(v=>wsUser(v).name).join(" and ")+" vote." : wsNeed(voters)+" 👍 or ⭐ = the creator sees it · 3 👎 = removed"}</span></>}
       </div>
 
       {!visible.length && onlyPicked ? <div style={{fontSize:13, color:"var(--ink-mute)"}}>{all.length ? "The team is still voting on the ideas — they'll show here once they're picked." : "No ideas yet."} You can still check the Plan tab for what to film.</div>
@@ -9671,7 +9891,7 @@ function WsIdeas({p, items, act}){
                   <div style={{display:"flex", alignItems:"center", gap:8, flexWrap:"wrap"}}><WsVoteDots it={it} voters={voters}/>{tag && <span style={{fontSize:11, fontWeight:700, color:tag[1]}}>{tag[0]}</span>}</div>
                   <WsYesNo it={it} act={act} voters={voters} readOnly={!canVote}/>
                   {it.kind==="link" && <a href={it.url} target="_blank" rel="noopener noreferrer" style={{fontSize:12, fontWeight:600, color:"var(--accent)", textDecoration:"none"}}>Doesn't play here? Open on {(wsEmbed(it.url).platform && PLATFORM_META[wsEmbed(it.url).platform]) ? PLATFORM_META[wsEmbed(it.url).platform].label : "the app"} ↗</a>}
-                  <WsIdeaFood it={it} act={act} ro={!!p.filed}/>
+                  <WsIdeaFood it={it} act={act} ro={false}/>
                   <WsIdeaThread it={it} items={items} act={act}/>
                   <WsMeta it={it} act={act}/>
                 </div>
@@ -9821,7 +10041,7 @@ function WsPlan({p, items, act}){
   useEffect(()=>{ if((p.brief||"")!==savedBrief){ setSavedBrief(p.brief||""); setBrief(p.brief||""); } }, [p.brief]);
   const shots = items.filter(i=>i.kind==="shot");
   const done = shots.filter(s=>s.done).length;
-  const ro = !!p.filed;
+  const ro = false;
   async function addShot(){ const t = shot.trim(); if(!t) return; if(await act("/item", {kind:"shot", text:t})) setShot(""); }
   return (
     <div className="cf-ws-plan">
@@ -9876,7 +10096,9 @@ function WsDrafts({p, items, act}){
   const [upload, setUpload] = useState(null); // {pct, name}
   const fileRef = useRef(null);
   const draft = drafts.find(d=>d.id===sel) || drafts[drafts.length-1] || null;
-  const locked = !!(p.submitted || p.approval || p.filed);
+  // Uploading never stops: the creator can add more drafts (other angles) while some are waiting or approved.
+  const locked = false;
+  const dState = d=> d.filed ? "filed" : d.approval ? "approved" : d.submitted ? "waiting" : d.changes ? "changes" : "draft";
   async function pick(e){
     const file = e.target.files && e.target.files[0]; e.target.value = "";
     if(!file) return;
@@ -9891,13 +10113,13 @@ function WsDrafts({p, items, act}){
     }catch(err){ dispatch({type:"ADD_TOAST", message:err.message, variant:"danger"}); }
     setUpload(null);
   }
-  const openNotes = items.filter(i=>i.kind==="note" && !i.resolved).length;
+  const openNotes = items.filter(i=>i.kind==="note" && !i.resolved && draft && i.draftId===draft.id).length;
   async function submit(){
-    if(openNotes && !confirm(openNotes+" to-do"+(openNotes>1?"s aren't":" isn't")+" ticked as fixed yet. Send draft "+draft.cut+" for approval anyway?")) return;
-    await act("/submit", {draftId:draft.id}, "Sent for content approval");
+    if(openNotes && !confirm(openNotes+" to-do"+(openNotes>1?"s on draft "+draft.cut+" aren't":" on draft "+draft.cut+" isn't")+" ticked as fixed yet. Send draft "+draft.cut+" for approval anyway?")) return;
+    await act("/submit", {draftId:draft.id}, "Draft "+draft.cut+" sent for content approval");
   }
   const uploadBtn = !locked && <>
-    {draft && draft.id===drafts[drafts.length-1].id && <Button size="sm" onClick={()=>setMusicOpen(o=>!o)} disabled={!!upload}><span style={{color:"var(--violet)", display:"inline-flex", marginRight:2}}><Icon name="musicNote" size={14}/></span>{draft.media && draft.media.music ? "Change music" : "Add music"}</Button>}
+    {draft && dState(draft)!=="filed" && dState(draft)!=="approved" && <Button size="sm" onClick={()=>setMusicOpen(o=>!o)} disabled={!!upload}><span style={{color:"var(--violet)", display:"inline-flex", marginRight:2}}><Icon name="musicNote" size={14}/></span>{draft.media && draft.media.music ? "Change music" : "Add music"}</Button>}
     <Button size="sm" icon="upload" onClick={()=>fileRef.current && fileRef.current.click()} disabled={!!upload}>{drafts.length? "Upload new draft" : "Upload draft 1"}</Button>
   </>;
   const [musicOpen, setMusicOpen] = useState(false);
@@ -9920,7 +10142,7 @@ function WsDrafts({p, items, act}){
       <input ref={fileRef} type="file" accept="video/*" onChange={pick} style={{display:"none"}}/>
       {drafts.length>0 && <div style={{display:"flex", alignItems:"center", gap:6, marginBottom:12, flexWrap:"wrap"}}>
         <div className="cf-noscrollbar" style={{display:"flex", gap:6, overflowX:"auto", flex:1, minWidth:0}}>
-          {drafts.map(d=><button key={d.id} onClick={()=>setSel(d.id)} style={{flexShrink:0, padding:"5px 12px", borderRadius:99, fontSize:12.5, fontWeight:600, cursor:"pointer", border:"1px solid "+(d.id===draft.id? "var(--accent)":"var(--border)"), background: d.id===draft.id? "var(--accent-soft)":"var(--surface)", color: d.id===draft.id? "var(--accent-dark)":"var(--ink-soft)"}}>Draft {d.cut}{d.media && d.media.music ? " 🎵" : ""}{d.id===drafts[drafts.length-1].id && drafts.length>1 ? " · latest" : ""}</button>)}
+          {drafts.map(d=>{ const st = WS_DRAFT_STATE[dState(d)]; return <button key={d.id} onClick={()=>setSel(d.id)} style={{flexShrink:0, display:"inline-flex", alignItems:"center", gap:6, padding:"5px 12px", borderRadius:99, fontSize:12.5, fontWeight:600, cursor:"pointer", border:"1px solid "+(d.id===draft.id? "var(--accent)":"var(--border)"), background: d.id===draft.id? "var(--accent-soft)":"var(--surface)", color: d.id===draft.id? "var(--accent-dark)":"var(--ink-soft)"}}>Draft {d.cut}{d.media && d.media.music ? " 🎵" : ""}{st && <span style={{fontSize:10.5, fontWeight:700, padding:"1px 7px", borderRadius:99, background:st[2], color:st[1]}}>{st[0]}{d.filed? " "+d.filed.barcode : ""}</span>}</button>; })}
         </div>
         {uploadBtn}
       </div>}
@@ -9942,15 +10164,16 @@ function WsDrafts({p, items, act}){
         </div>)
       : <div className="cf-ws-review">
         <WsPlayer key={draft.id} draft={draft} items={items} seekTo={seekTo} apiRef={vapi} onTime={t=>{ pos.current = {cut:draft.cut, t, draftId:draft.id}; }}/>
-        <WsReviewChat items={items} act={act} drafts={drafts} draft={draft} onJump={jump} vapi={vapi} readOnly={!!p.filed}/>
+        <WsReviewChat items={items} act={act} drafts={drafts} draft={draft} onJump={jump} vapi={vapi}/>
       </div>}
-      {draft && !locked && draft.id===drafts[drafts.length-1].id && (
+      {draft && (dState(draft)==="draft" || dState(draft)==="changes") && (
         <div style={{borderTop:"1px solid var(--border)", marginTop:14, paddingTop:14, display:"flex", alignItems:"center", gap:10, flexWrap:"wrap"}}>
-          <div style={{fontSize:12.5, color: openNotes? "var(--amber)":"var(--green)", flex:"1 1 200px"}}>{openNotes? openNotes+" to-do"+(openNotes>1?"s":"")+" not fixed yet" : "All to-dos fixed"} · anyone except the uploader can approve</div>
+          <div style={{fontSize:12.5, color: openNotes? "var(--amber)":"var(--green)", flex:"1 1 200px"}}>{draft.changes ? "Changes were asked for on this draft — upload a new draft, or send this one again. " : ""}{openNotes? openNotes+" to-do"+(openNotes>1?"s":"")+" not fixed yet" : "All to-dos fixed"} · anyone except the uploader can approve · you can send more than one draft</div>
           <Button variant="primary" icon="send" onClick={submit}>Send draft {draft.cut} for approval</Button>
         </div>
       )}
-      {draft && locked && !p.filed && <div style={{marginTop:12, fontSize:12.5, color:"var(--ink-mute)"}}>Draft {(p.approval||p.submitted).cut} is {p.approval? "approved" : "waiting for approval"} — a new draft can be uploaded if changes are requested.</div>}
+      {draft && dState(draft)!=="draft" && dState(draft)!=="changes" && <div style={{borderTop:"1px solid var(--border)", marginTop:14, paddingTop:12, fontSize:12.5, color:"var(--ink-mute)"}}>
+        Draft {draft.cut} is {dState(draft)==="waiting" ? "waiting for approval (shown at the top of the project)" : dState(draft)==="approved" ? "approved — its file name is being confirmed" : "in the Content Library as "+draft.filed.name}. You can keep uploading new drafts and send them too.</div>}
     </Card>
   );
 }
@@ -10109,7 +10332,8 @@ function WsApprovalStage({p, draft, items, act, onName}){
   const item = useMemo(()=>({id:"ws_"+p.id, brand:"sanjugo", format:"post", title:p.title, platforms:WS_PREVIEW_PLATFORMS,
     media:{type:"video", fileUrl:draft.media.fileUrl, previewUrl:null, aspectRatio: nearestAspect(draft.media.w, draft.media.h) || "9:16", duration: draft.media.duration || null},
     variants:Object.fromEntries(WS_PREVIEW_PLATFORMS.map(pl=>[pl, makeVariant(pl, {caption})]))}), [p.id, draft.id, caption]);
-  const approved = p.status==="approved";
+  const approved = !!draft.approval;
+  const dAct = (path, body, ok)=>act(path, {draftId:draft.id, ...body}, ok);
   return (
     <Card style={{padding:16}}>
       <div style={{display:"flex", justifyContent:"center", gap:6, marginBottom:12, flexWrap:"wrap"}}>
@@ -10127,30 +10351,30 @@ function WsApprovalStage({p, draft, items, act, onName}){
         <div style={{minWidth:0, display:"flex", flexDirection:"column", gap:14}}>
           <div>
             <div style={{fontSize:16, fontWeight:600}}>Draft {draft.cut} · {approved? "approved" : "waiting for approval"}</div>
-            <div style={{fontSize:12.5, color:"var(--ink-mute)", marginTop:3}}>Uploaded by {wsUser(draft.author).name}{p.submitted? ", sent "+wsAgo(p.submitted.at) : ""}. This is content approval for the library — publishing is a separate post in the Approval Queue.</div>
+            <div style={{fontSize:12.5, color:"var(--ink-mute)", marginTop:3}}>Uploaded by {wsUser(draft.author).name}{draft.submitted? ", sent "+wsAgo(draft.submitted.at) : ""}. This is content approval for the library — publishing is a separate post in the Approval Queue.</div>
           </div>
           {approved ? <>
-            <div style={{padding:12, borderRadius:10, background:"var(--green-soft)", color:"var(--green)", fontSize:13, fontWeight:600}}>✓ Approved by {wsUser(p.approval.by).name} {wsAgo(p.approval.at)}{p.approval.note? " — "+p.approval.note : ""}</div>
+            <div style={{padding:12, borderRadius:10, background:"var(--green-soft)", color:"var(--green)", fontSize:13, fontWeight:600}}>✓ Approved by {wsUser(draft.approval.by).name} {wsAgo(draft.approval.at)}{draft.approval.note? " — "+draft.approval.note : ""}</div>
             <div style={{fontSize:13, color:"var(--ink-soft)", lineHeight:1.5}}>Next: {isUploader? "check" : wsUser(draft.author).name+" checks"} the file name, then the video is saved to Google Drive and added to the Content Library.</div>
             <div style={{display:"flex", gap:8, flexWrap:"wrap"}}>
               <Button variant="primary" icon="file" onClick={onName}>Confirm file name</Button>
-              {(p.approval.by===me.id || me.role==="admin") && <Button icon="undo" onClick={()=>act("/unapprove", {}, "Approval undone")}>Undo approval</Button>}
+              {(draft.approval.by===me.id || me.role==="admin") && <Button icon="undo" onClick={()=>dAct("/unapprove", {}, "Approval undone")}>Undo approval</Button>}
             </div>
           </> : isUploader ? <>
             <div style={{padding:12, borderRadius:10, background:"var(--blue-soft)", color:"var(--blue)", fontSize:13, fontWeight:600}}>Waiting for someone else on the team to approve.</div>
-            <div><Button icon="undo" onClick={()=>act("/withdraw", {}, "Taken back — you can upload a new cut")}>Take it back</Button></div>
+            <div><Button icon="undo" onClick={()=>dAct("/withdraw", {}, "Draft "+draft.cut+" taken back from approval")}>Take it back</Button></div>
           </> : noDecide ? <div style={{padding:12, borderRadius:10, background:"var(--blue-soft)", color:"var(--blue)", fontSize:13, fontWeight:600}}>Waiting for the team to approve this draft.</div>
           : asking ? <div>
             <TextField label="What needs to change?" value={changes} onChange={setChanges} textarea placeholder="Cut faster at the start and keep the logo visible at the end."/>
             <div style={{display:"flex", gap:8}}>
               <Button onClick={()=>setAsking(false)}>Cancel</Button>
-              <Button variant="amber" icon="edit" disabled={!changes.trim()} onClick={async()=>{ if(await act("/review", {decision:"changes", note:changes}, "Sent back with your changes")){ setAsking(false); setChanges(""); } }}>Send back for changes</Button>
+              <Button variant="amber" icon="edit" disabled={!changes.trim()} onClick={async()=>{ if(await dAct("/review", {decision:"changes", note:changes}, "Draft "+draft.cut+" sent back with your changes")){ setAsking(false); setChanges(""); } }}>Send back for changes</Button>
             </div>
           </div> : <div style={{display:"flex", gap:8, flexWrap:"wrap"}}>
             <Button icon="edit" onClick={()=>setAsking(true)} style={{color:"var(--amber)", borderColor:"var(--amber)", whiteSpace:"nowrap"}}>Needs changes</Button>
-            <Button variant="success" icon="check" onClick={()=>act("/review", {decision:"approve"}, "Approved — "+wsUser(draft.author).name+" will confirm the file name")} style={{whiteSpace:"nowrap"}}>Approve content</Button>
+            <Button variant="success" icon="check" onClick={()=>dAct("/review", {decision:"approve"}, "Draft "+draft.cut+" approved — "+wsUser(draft.author).name+" will confirm the file name")} style={{whiteSpace:"nowrap"}}>Approve content</Button>
           </div>}
-          <WsReviewChat compact items={items} act={act} drafts={items.filter(i=>i.kind==="draft")} draft={draft} onJump={()=>{}} vapi={null} readOnly={!!p.filed}/>
+          <WsReviewChat compact items={items} act={act} drafts={items.filter(i=>i.kind==="draft")} draft={draft} onJump={()=>{}} vapi={null}/>
         </div>
       </div>
     </Card>
@@ -10159,7 +10383,7 @@ function WsApprovalStage({p, draft, items, act, onName}){
 
 // The file-name check: Creator Studio suggests a name from the rule book, the creator can change any part,
 // and nothing is saved until every check passes (the server checks again before writing to Drive).
-function WsNameModal({p, onClose, onFiled}){
+function WsNameModal({p, draft, onClose, onFiled}){
   const {dispatch} = useApp();
   const post = useWsPost();
   const [sug, setSug] = useState(null);
@@ -10168,9 +10392,9 @@ function WsNameModal({p, onClose, onFiled}){
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
   useEffect(()=>{
-    wsGet("/name?id="+encodeURIComponent(p.id)).then(d=>{ setSug(d); setX({...d.parts, dish1:d.parts.dishes[0]||"", dish2:d.parts.dishes[1]||""}); }).catch(e=>setErr(e.message));
+    wsGet("/name?id="+encodeURIComponent(p.id)+"&draft="+encodeURIComponent(draft.id)).then(d=>{ setSug(d); setX({...d.parts, dish1:d.parts.dishes[0]||"", dish2:d.parts.dishes[1]||""}); }).catch(e=>setErr(e.message));
     loadLibrary(true).then(lib=>setUsed(new Set(lib.files.map(f=>f.barcode).filter(Boolean)))).catch(()=>setUsed(new Set()));
-  }, [p.id]);
+  }, [p.id, draft.id]);
   if(!x) return <Modal open onClose={onClose} width={560}><div style={{padding:22}}>{err ? <div style={{color:"var(--red)"}}>{err}</div> : <><Skeleton h={20} w="50%"/><div style={{height:12}}/><Skeleton h={44}/></>}</div></Modal>;
   const set = patch => setX(v=>({...v, ...patch}));
   const barcode = String(x.barcode||"").toUpperCase().trim();
@@ -10190,7 +10414,7 @@ function WsNameModal({p, onClose, onFiled}){
   const ok = checks.every(c=>c[0]) && used;
   async function save(){
     setBusy(true); setErr(null);
-    try{ await post("/file", {projectId:p.id, name}); dispatch({type:"ADD_TOAST", message:"Saved to Google Drive as "+barcode+" — it's in the Content Library now"}); onFiled(); }
+    try{ await post("/file", {projectId:p.id, draftId:draft.id, name}); dispatch({type:"ADD_TOAST", message:"Saved to Google Drive as "+barcode+" — it's in the Content Library now"}); onFiled(); }
     catch(e){ setErr(e.message); }
     setBusy(false);
   }
@@ -10200,7 +10424,7 @@ function WsNameModal({p, onClose, onFiled}){
     <Modal open onClose={busy? ()=>{} : onClose} width={600}>
       <div style={{padding:20}}>
         <h3 style={{margin:"0 0 4px", fontSize:17}}>Is this file name right?</h3>
-        <div style={{fontSize:12.5, color:"var(--ink-mute)", marginBottom:14}}>{p.title} · draft {p.approval.cut} approved by {wsUser(p.approval.by).name}. Change any part if it's not right.</div>
+        <div style={{fontSize:12.5, color:"var(--ink-mute)", marginBottom:14}}>{p.title} · draft {draft.cut} approved by {wsUser(draft.approval.by).name}. Change any part if it's not right.</div>
         <div className="num" style={{fontFamily:'ui-monospace, "SF Mono", Menlo, monospace', fontSize:14.5, fontWeight:600, padding:"12px 14px", borderRadius:10, background:"var(--surface-2)", wordBreak:"break-all", marginBottom:14}}>{name}</div>
         <div style={{display:"grid", gridTemplateColumns:"repeat(3, minmax(0,1fr))", gap:10, marginBottom:14}} className="cf-ws-namegrid">
           {field("Date", <input value={x.date} onChange={e=>set({date:e.target.value.replace(/\D/g,"").slice(0,8)})} style={inp}/>)}
@@ -10229,19 +10453,26 @@ function WsNameModal({p, onClose, onFiled}){
   );
 }
 
-function WsFiled({p}){
+// Every draft of this project that's in the Content Library — one row each (a project can have several angles).
+function WsFiled({p, drafts}){
   const {state, dispatch} = useApp();
   const me = USERS.find(u=>u.id===state.currentUserId);
-  const f = p.filed;
   return (
     <Card style={{padding:16}}>
-      <div style={{display:"flex", alignItems:"center", gap:8, marginBottom:8, flexWrap:"wrap"}}><Icon name="check" size={18} strokeWidth={2.6} style={{color:"var(--green)"}}/><span style={{fontWeight:600, fontSize:15}}>In the Content Library</span><BarcodeChip code={f.barcode} big/></div>
-      <div className="num" style={{fontFamily:'ui-monospace, "SF Mono", Menlo, monospace', fontSize:13, padding:"9px 11px", borderRadius:8, background:"var(--surface-2)", wordBreak:"break-all", marginBottom:8}}>{f.name}</div>
-      <div style={{fontSize:12.5, color:"var(--ink-mute)", marginBottom:12}}>Draft {p.approval.cut} approved by {wsUser(p.approval.by).name} · saved by {wsUser(f.by).name} on {wsDay(f.at)}</div>
-      <div style={{display:"flex", gap:8, flexWrap:"wrap"}}>
-        {PERMS[me.role].create && <Button variant="primary" icon="create" onClick={()=>wsCreatePost(dispatch, p)}>Create post from this</Button>}
-        <Button icon="grid" onClick={()=>dispatch({type:"SET_ROUTE", route:"library", libraryQuery:f.barcode})}>Open in Content Library</Button>
-        <Button icon="external" onClick={()=>window.open(driveFileUrl(f.driveId), "_blank", "noopener")}>Open in Drive</Button>
+      <div style={{display:"flex", alignItems:"center", gap:8, marginBottom:10, flexWrap:"wrap"}}><Icon name="check" size={18} strokeWidth={2.6} style={{color:"var(--green)"}}/><span style={{fontWeight:600, fontSize:15}}>In the Content Library{drafts.length>1? " · "+drafts.length+" videos" : ""}</span></div>
+      <div style={{display:"flex", flexDirection:"column", gap:12}}>
+        {drafts.map((d, i)=>{ const f = d.filed; return (
+          <div key={d.id} style={{borderTop: i? "1px solid var(--border)" : "none", paddingTop: i? 12 : 0}}>
+            <div style={{display:"flex", alignItems:"center", gap:8, flexWrap:"wrap", marginBottom:6}}><b style={{fontSize:13.5}}>Draft {d.cut}</b><BarcodeChip code={f.barcode}/></div>
+            <div className="num" style={{fontFamily:'ui-monospace, "SF Mono", Menlo, monospace', fontSize:12.5, padding:"8px 10px", borderRadius:8, background:"var(--surface-2)", wordBreak:"break-all", marginBottom:6}}>{f.name}</div>
+            <div style={{fontSize:12, color:"var(--ink-mute)", marginBottom:8}}>{d.approval ? "Approved by "+wsUser(d.approval.by).name+" · " : ""}saved by {wsUser(f.by).name} on {wsDay(f.at)}</div>
+            <div style={{display:"flex", gap:8, flexWrap:"wrap"}}>
+              {PERMS[me.role].create && <Button size="sm" variant="primary" icon="create" onClick={()=>wsCreatePost(dispatch, p, f)}>Create post from this</Button>}
+              <Button size="sm" icon="grid" onClick={()=>dispatch({type:"SET_ROUTE", route:"library", libraryQuery:f.barcode})}>Open in Content Library</Button>
+              <Button size="sm" icon="external" onClick={()=>window.open(driveFileUrl(f.driveId), "_blank", "noopener")}>Open in Drive</Button>
+            </div>
+          </div>
+        ); })}
       </div>
     </Card>
   );
@@ -10486,7 +10717,7 @@ function ChatPage(){
           </div>
         </div>
       </Card>
-      {toProject && <ChatToProject url={toProject.url} projects={openProjects.filter(p=>!p.filed)} onClose={()=>setToProject(null)} onDone={()=>{ setToProject(null); loadProjects(); }}/>}
+      {toProject && <ChatToProject url={toProject.url} projects={openProjects} onClose={()=>setToProject(null)} onDone={()=>{ setToProject(null); loadProjects(); }}/>}
       <style>{`
         .cf-chat-actions{position:absolute; right:12px; top:-14px; display:none; align-items:center; gap:1px; padding:3px; border-radius:10px; background:var(--surface); border:1px solid var(--border); box-shadow:var(--shadow-md); z-index:3;}
         .cf-chat-actions button{border:none; background:none; cursor:pointer; font-size:15px; padding:3px 5px; border-radius:6px; line-height:1;}
@@ -10522,13 +10753,13 @@ function ChatProjectCard({p, id}){
   const me = state.currentUserId;
   const open = ()=>dispatch({type:"SET_ROUTE", route:"workspace", workspaceProject:id});
   if(!p) return <button onClick={e=>{ e.stopPropagation(); open(); }} style={{marginTop:6, display:"inline-flex", alignItems:"center", gap:6, padding:"6px 10px", borderRadius:10, border:"1px solid var(--border)", background:"var(--surface)", fontSize:12.5, cursor:"pointer", color:"var(--ink)"}}><Icon name="workspace" size={14}/>Open project</button>;
-  const act = p.status==="waiting" && p.submitted && p.submitted.by!==me ? "Approve draft" : p.status==="approved" && p.submitted && p.submitted.by===me ? "Name file" : p.counts && p.counts.toVote ? "Vote ("+p.counts.toVote+")" : null;
+  const act = (p.waiting||[]).some(r=>r.author!==me) ? "Approve draft" : (p.approved||[]).some(r=>r.author===me) ? "Name file" : p.counts && p.counts.toVote ? "Vote ("+p.counts.toVote+")" : null;
   return (
     <div role="button" onClick={e=>{ e.stopPropagation(); open(); }} style={{display:"flex", alignItems:"center", gap:9, marginTop:6, padding:6, paddingRight:8, borderRadius:10, border:"1px solid var(--border)", background:"var(--surface)", maxWidth:420, cursor:"pointer"}}>
       <span style={{width:38, height:38, borderRadius:7, overflow:"hidden", flexShrink:0}}><WsCover p={p} height={38}/></span>
       <span style={{flex:1, minWidth:0}}>
         <span style={{display:"block", fontSize:12.5, fontWeight:600, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>{p.title}</span>
-        <span style={{display:"block", fontSize:11, color:(WS_STATUS[p.status]||{}).color}}>{(WS_STATUS[p.status]||{}).label}{p.filed? " · "+p.filed.barcode : ""}</span>
+        <span style={{display:"block", fontSize:11, color:(WS_STATUS[p.status]||{}).color}}>{(WS_STATUS[p.status]||{}).label}{(p.filedList||[]).length? " · "+p.filedList.map(f=>f.barcode).join(", ") : ""}</span>
       </span>
       {act ? <Button size="sm" variant="primary" onClick={e=>{ e.stopPropagation(); open(); }}>{act}</Button>
         : <Icon name="chevronRight" size={16} style={{color:"var(--ink-mute)", flexShrink:0}}/>}
@@ -11109,6 +11340,19 @@ function App(){
 
   useMakeSync(state, dispatch);
 
+  // A phone can keep the app open for days. When a new version is live, offer a one-tap refresh so nobody keeps
+  // using old screens (e.g. a fix that's already out).
+  const [newVersion, setNewVersion] = useState(false);
+  useEffect(()=>{
+    let first = null;
+    const sig = async()=>{ const r = await fetch("/", {cache:"no-store"}); if(!r.ok) return null; const t = await r.text(); let h = 0; for(let i=0; i<t.length; i++) h = (h*31 + t.charCodeAt(i))|0; return h; };
+    const check = ()=>{ if(document.hidden) return; sig().then(h=>{ if(h==null) return; if(first==null) first = h; else if(h!==first) setNewVersion(true); }).catch(()=>{}); };
+    check();
+    const t = setInterval(check, 5*60e3);
+    document.addEventListener("visibilitychange", check);
+    return ()=>{ clearInterval(t); document.removeEventListener("visibilitychange", check); };
+  }, []);
+
   // If this device has alerts on, make sure they go to whoever is using it now (e.g. after switching name).
   useEffect(()=>{
     if(!state.bootDone || !("Notification" in window) || Notification.permission!=="granted") return;
@@ -11214,6 +11458,7 @@ function App(){
       {/* Always the live copy of the post, so changes made while it's open (dates, Make results, approvals) show straight away. */}
       <ContentDetailDrawer item={detailItem && (state.contentItems.find(i=>i.id===detailItem.id) || null)} onClose={()=>setDetailItem(null)}/>
       <ToastHost toasts={state.toasts} remove={id=>dispatch({type:"REMOVE_TOAST", id})}/>
+      {newVersion && <button onClick={()=>location.reload()} style={{position:"fixed", left:"50%", transform:"translateX(-50%)", bottom:"calc(18px + env(safe-area-inset-bottom, 0px))", zIndex:210, border:"none", borderRadius:99, padding:"10px 18px", background:"var(--ink)", color:"var(--surface)", fontSize:13, fontWeight:600, boxShadow:"var(--shadow-sm)", cursor:"pointer"}}>New version of Creator Studio — tap to refresh</button>}
       <style>{`@media (max-width:600px){ .cf-main{ padding:18px 16px 50px !important; } .cf-search{ width:100% !important; } }`}</style>
     </AppCtx.Provider>
   );

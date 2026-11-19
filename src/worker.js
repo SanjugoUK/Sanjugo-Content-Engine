@@ -585,6 +585,7 @@ async function libraryStatus(env) {
     serviceEmail: sa ? sa.client_email : auth ? auth.email : null,
     connectedAt: auth ? auth.connected_at : null,
     canArchive: !!(auth && (auth.scopes || "").includes("drive.file")),
+    canRaw: hasFullDrive(auth),
     signInConfigured: oauthConfigured(env),
     rootFolderId: env.LIBRARY_FOLDER_ID || null,
     lastRefresh: head ? (head.customMetadata && head.customMetadata.updatedAt) || head.uploaded : null,
@@ -769,7 +770,9 @@ async function libraryStream(id, request, env) {
 // ---------------------------------------------------------------------------
 
 // drive.readonly: read the library. drive.file: create/manage only files ContentFlow itself makes (the archive).
-const GOOGLE_SCOPES = "openid email https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file";
+// drive: save raw footage into a folder the team made by hand ("Man Man RAW Files"), which drive.file can't reach.
+const GOOGLE_SCOPES = "openid email https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive";
+const hasFullDrive = (auth) => !!auth && (auth.scopes || "").split(/\s+/).includes("https://www.googleapis.com/auth/drive");
 function oauthConfigured(env) { return !!(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET); }
 function redirectUri(request) { return new URL("/api/google/callback", request.url).toString(); }
 
@@ -1000,6 +1003,7 @@ async function storageReport(env) {
     upcoming: { count: upcoming.length, bytes: upcoming.reduce((s, a) => s + a.size, 0), items: upcoming.sort((a, b) => a.dueAt.localeCompare(b.dueAt)).slice(0, 50) },
     archivedToDrive: { count: archived.n, bytes: archived.bytes, unnamed: archived.unnamed || 0 },
     canArchive: !!(auth && (auth.scopes || "").includes("drive.file")),
+    canRaw: hasFullDrive(auth),
     lastCleanup: await kvGet(env, "last_cleanup"),
     policy: { publishedGraceDays: PUBLISHED_GRACE_DAYS, orphanGraceHours: ORPHAN_GRACE_HOURS },
   };
@@ -2196,8 +2200,8 @@ async function digestTasks(env) {
     }
     for (const p of projects) {
       const sum = wsSummary(p, byProject.get(p.id) || [], members, m.id);
-      if (!video && sum.status === "waiting" && p.submitted && p.submitted.by !== m.id) t.push({ kind: "draft", title: p.title });
-      if (sum.status === "approved" && p.submitted && p.submitted.by === m.id) t.push({ kind: "name", title: p.title });
+      for (const r of sum.waiting) if (!video && r.author !== m.id) t.push({ kind: "draft", title: p.title + " (draft " + r.cut + ")" });
+      for (const r of sum.approved) if ((r.submitted && r.submitted.by) === m.id || r.author === m.id) t.push({ kind: "name", title: p.title + " (draft " + r.cut + ")" });
       if (sum.counts.toVote > 0) t.push({ kind: "vote", title: p.title, n: sum.counts.toVote });
     }
     for (const ct of campTasks) if (ct.who === m.id) t.push({ kind: "camp", title: ct.title, urgent: ct.urgent });
@@ -2598,8 +2602,32 @@ async function ensureWsTables(env) {
     env.DB.prepare("CREATE TABLE IF NOT EXISTS ws_projects (id TEXT PRIMARY KEY, data TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"),
     env.DB.prepare("CREATE TABLE IF NOT EXISTS ws_items (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, kind TEXT NOT NULL, data TEXT NOT NULL, created_at TEXT NOT NULL)"),
     env.DB.prepare("CREATE INDEX IF NOT EXISTS ws_items_project ON ws_items(project_id)"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS ws_raw (id TEXT PRIMARY KEY, data TEXT NOT NULL, created_at TEXT NOT NULL)"),
   ]);
+  await wsMigrateMulti(env);
   wsTablesReady = true;
+}
+
+// Nov 2026: a project can send several drafts for approval. Approval moved from the project (one draft at a time)
+// onto each draft: draft.submitted / draft.approval / draft.filed. Old projects are converted once.
+async function wsMigrateMulti(env) {
+  if ((await kvGet(env, "ws_multi_draft_v1"))) return;
+  const { results } = await env.DB.prepare("SELECT data FROM ws_projects WHERE data LIKE '%\"submitted\"%' OR data LIKE '%\"approval\"%' OR data LIKE '%\"filed\"%' OR data LIKE '%\"filing\"%'").all();
+  for (const r of results || []) {
+    const p = JSON.parse(r.data);
+    if (p.filed && !p.filed.draftId && p.approval) p.filed.draftId = p.approval.draftId;
+    const moves = [["submitted", p.submitted], ["approval", p.approval], ["filed", p.filed]].filter(([, v]) => v && v.draftId);
+    for (const [k, v] of moves) {
+      try {
+        await wsUpdateItem(env, v.draftId, (d) => { if (!d[k]) d[k] = { ...v }; if (k !== "submitted" && !d.submitted) d.submitted = { by: d.author, at: v.at, cut: d.cut }; });
+      } catch (e) { console.error("ws migrate", p.id, k, e.message); }
+    }
+    delete p.submitted; delete p.approval; delete p.filing;
+    if (p.filed) p.legacyFiled = p.filed;
+    delete p.filed;
+    await wsSaveProject(env, p);
+  }
+  await kvSet(env, "ws_multi_draft_v1", { at: new Date().toISOString(), projects: (results || []).length });
 }
 
 const wsId = (p) => p + "_" + crypto.randomUUID().replace(/-/g, "").slice(0, 10);
@@ -2662,12 +2690,32 @@ function wsSong(m, mixed) {
   return { title: wsText(m.title, 120), url: /^https:\/\//i.test(url) ? url : "", ...(t ? { track: t } : {}), ...(pv && !t ? { preview: pv } : {}) };
 }
 
-// Ideas → Draft review → Waiting for approval → Approved (naming) → In Library.
+// Each draft goes its own way: Draft → Waiting for approval → Approved (naming) → In Library (or Changes needed).
+// A project can send several drafts (different angles) for approval, one after another or at the same time.
+function wsDraftState(d) {
+  if (d.filed) return "filed";
+  if (d.approval) return "approved";
+  if (d.submitted) return "waiting";
+  if (d.changes) return "changes";
+  return "draft";
+}
+// Project status, most urgent first: something waiting → something approved (needs its name) → in library → review → ideas.
 function wsStatus(p, items) {
-  if (p.filed) return "filed";
-  if (p.approval) return "approved";
-  if (p.submitted) return "waiting";
-  return items.some((i) => i.kind === "draft") ? "review" : "ideas";
+  const drafts = items.filter((i) => i.kind === "draft" && !i.deleted);
+  const st = drafts.map(wsDraftState);
+  if (st.includes("waiting")) return "waiting";
+  if (st.includes("approved")) return "approved";
+  const filed = drafts.filter((d) => d.filed);
+  if (filed.length) {
+    const last = filed.reduce((t, d) => (d.filed.at > t ? d.filed.at : t), "");
+    return drafts.some((d) => !d.filed && !d.submitted && d.createdAt > last) ? "review" : "filed";
+  }
+  if (p.legacyFiled) return "filed";
+  return drafts.length ? "review" : "ideas";
+}
+function wsReview(d) {
+  return { draftId: d.id, cut: d.cut, author: d.author, state: wsDraftState(d), createdAt: d.createdAt,
+    submitted: d.submitted || null, approval: d.approval || null, filed: d.filed || null, changes: d.changes || null };
 }
 function wsSummary(p, items, members, me) {
   const voters = members ? wsVoters(p, members) : [];
@@ -2675,13 +2723,21 @@ function wsSummary(p, items, members, me) {
   const shots = items.filter((i) => i.kind === "shot");
   const drafts = items.filter((i) => i.kind === "draft");
   const latest = drafts[drafts.length - 1] || null;
-  const shown = (p.submitted && drafts.find((d) => d.id === p.submitted.draftId)) || latest;
+  const reviews = drafts.filter((d) => wsDraftState(d) !== "draft").map(wsReview);
+  const waiting = reviews.filter((r) => r.state === "waiting");
+  const approved = reviews.filter((r) => r.state === "approved");
+  const filedList = reviews.filter((r) => r.state === "filed").map((r) => ({ ...r.filed, draftId: r.draftId, cut: r.cut, approval: r.approval }))
+    .sort((a, b) => String(a.at).localeCompare(String(b.at)));
+  if (!filedList.length && p.legacyFiled) filedList.push(p.legacyFiled);
+  const lastFiled = filedList[filedList.length - 1] || null;
+  const shownD = (waiting[0] && drafts.find((d) => d.id === waiting[0].draftId)) || latest;
   return { ...p, status: wsStatus(p, items),
-    finishedAt: p.filed ? p.filed.at : null, voters,
-    counts: { ideas: ideas.length, picked: ideas.filter((i) => wsPicked(i, voters)).length, toVote: me && voters.includes(me) && !p.filed ? ideas.filter((i) => !(i.yes || []).includes(me) && !(i.no || []).includes(me)).length : 0, shots: shots.length, shotsDone: shots.filter((i) => i.done).length,
-      comments: items.filter((i) => i.kind === "comment" && !i.parentId).length, drafts: drafts.length,
-      openNotes: items.filter((i) => i.kind === "note" && !i.resolved && (!shown || i.draftId === shown.id)).length },
-    cover: shown ? { fileUrl: shown.media && shown.media.fileUrl, mime: shown.media && shown.media.mime, cut: shown.cut } : null,
+    reviews, waiting, approved, filedList, filed: lastFiled,
+    finishedAt: lastFiled ? lastFiled.at : null, voters,
+    counts: { ideas: ideas.length, picked: ideas.filter((i) => wsPicked(i, voters)).length, toVote: me && voters.includes(me) ? ideas.filter((i) => !(i.yes || []).includes(me) && !(i.no || []).includes(me)).length : 0, shots: shots.length, shotsDone: shots.filter((i) => i.done).length,
+      comments: items.filter((i) => i.kind === "comment" && !i.parentId).length, drafts: drafts.length, waiting: waiting.length, approved: approved.length, filed: filedList.length,
+      openNotes: items.filter((i) => i.kind === "note" && !i.resolved && (!shownD || i.draftId === shownD.id)).length },
+    cover: shownD ? { fileUrl: shownD.media && shownD.media.fileUrl, mime: shownD.media && shownD.media.mime, cut: shownD.cut } : null,
     lastActivity: items.reduce((t, i) => (i.createdAt > t ? i.createdAt : t), p.updatedAt) };
 }
 
@@ -2714,6 +2770,7 @@ async function wsNotify(env, ctx, { actor, members, project, text, push, eventId
 async function workspaceRoute(request, env, url, viewer, ctx) {
   await ensureWsTables(env);
   const path = url.pathname.replace(/^\/api\/workspace\/?/, "");
+  if (path === "raw" || path.startsWith("raw/")) return await rawRoute(request, env, url, viewer, path.slice(4));
   if (request.method === "GET") {
     if (path === "") {
       const [{ results: rows }, { results: itemRows }] = await Promise.all([
@@ -2734,7 +2791,7 @@ async function workspaceRoute(request, env, url, viewer, ctx) {
     }
     if (path === "name") {
       const p = await wsProject(env, url.searchParams.get("id"));
-      return json(await wsNameSuggestion(env, request, p, await wsItems(env, p.id)));
+      return json(await wsNameSuggestion(env, request, p, await wsItems(env, p.id), url.searchParams.get("draft")));
     }
     throw new HttpError(404, "Unknown workspace request");
   }
@@ -2746,7 +2803,6 @@ async function workspaceRoute(request, env, url, viewer, ctx) {
   if (path === "project") { // create or edit a project's details
     const isNew = !body.id;
     const p = isNew ? { id: wsId("wp"), createdBy: me.id, createdAt: now } : await wsProject(env, body.id);
-    if (!isNew && p.filed) throw new HttpError(409, "This project is already in the Content Library.");
     if (isNew || body.title !== undefined) p.title = wsText(body.title, 120) || "Untitled project";
     if (isNew || body.branch !== undefined) p.branch = WS_BRANCHES[body.branch] ? body.branch : "all";
     if (isNew || body.category !== undefined) p.category = WS_CATEGORIES[body.category] ? body.category : "FC";
@@ -2767,7 +2823,7 @@ async function workspaceRoute(request, env, url, viewer, ctx) {
   if (path === "project/delete") {
     const p = await wsProject(env, body.id);
     if (me.role !== "admin" && p.createdBy !== me.id) throw new HttpError(403, "Only admins or the person who started it can delete a project.");
-    if (p.filed) throw new HttpError(409, "This project's video is already in the Content Library, so the project is kept.");
+    if ((await wsItems(env, p.id)).some((i) => i.kind === "draft" && i.filed)) throw new HttpError(409, "This project has videos in the Content Library, so the project is kept.");
     p.deleted = { by: me.id, at: now };
     await wsSaveProject(env, p);
     await wsNotify(env, ctx, { actor: me, members, project: p, text: `🗑️ ${me.name} deleted the Workspace project "${p.title}"`, push: { title: "Project deleted", body: `${me.name} deleted "${p.title}"` } });
@@ -2776,7 +2832,6 @@ async function workspaceRoute(request, env, url, viewer, ctx) {
 
   if (path === "item") { // add a link, idea, comment, draft (a cut) or a note on a draft
     const p = await wsProject(env, body.projectId);
-    if (p.filed && body.kind !== "comment") throw new HttpError(409, "This project is finished — only comments can be added now.");
     const kind = String(body.kind || "");
     if (!WS_ITEM_KINDS.includes(kind)) throw new HttpError(400, "Unknown item type");
     const it = { id: wsId("wi"), projectId: p.id, kind, author: me.id, createdAt: now, text: wsText(body.text, 4000) };
@@ -2797,7 +2852,6 @@ async function workspaceRoute(request, env, url, viewer, ctx) {
         it.parentId = parent.id;
       }
     } else if (kind === "draft") {
-      if (p.submitted || p.approval) throw new HttpError(409, "A draft is waiting for approval — wait for the decision before uploading another.");
       const m = body.media || {};
       if (!/^\/api\/media\/workspace\/[\w.-]+$/.test(m.fileUrl || "")) throw new HttpError(400, "Upload the video first.");
       if (!/^video\//.test(m.mime || "")) throw new HttpError(400, "Drafts must be videos.");
@@ -2824,7 +2878,6 @@ async function workspaceRoute(request, env, url, viewer, ctx) {
     if (it.kind !== "idea" && it.kind !== "link") throw new HttpError(400, "Only ideas can be moved.");
     const from = await wsProject(env, it.projectId), to = await wsProject(env, body.projectId);
     if (to.id === from.id) throw new HttpError(400, "It's already in this project.");
-    if (to.filed) throw new HttpError(409, "That project is already finished.");
     if (me.role === "video" && it.author !== me.id) throw new HttpError(403, "Only the person who added it or the team can move it.");
     const comments = (await wsItems(env, from.id)).filter((c) => c.kind === "comment" && c.parentId === it.id);
     it.projectId = to.id; it.movedFrom = { projectId: from.id, title: from.title, by: me.id, at: now }; it.priority = it.priority || null;
@@ -2856,7 +2909,6 @@ async function workspaceRoute(request, env, url, viewer, ctx) {
     if (path === "item/vote") {
       if (it0.kind !== "link" && it0.kind !== "idea") throw new HttpError(400, "Only ideas and reels take votes.");
       if (me.id === p.creatorId || me.role === "video") throw new HttpError(403, "The project's creator doesn't vote — the rest of the team decides.");
-      if (p.filed) throw new HttpError(409, "This project is finished — voting is closed.");
       const v = body.vote === "yes" || body.vote === "no" ? body.vote : null;
       const saved = await wsUpdateItem(env, body.id, (it) => {
         it.yes = (it.yes || []).filter((x) => x !== me.id);
@@ -2872,65 +2924,80 @@ async function workspaceRoute(request, env, url, viewer, ctx) {
       else throw new HttpError(400, "Only notes and shots can be ticked off.");
     } else {
       if (it.author !== me.id && me.role !== "admin") throw new HttpError(403, "You can only delete what you added.");
-      if (it.kind === "draft" && ((p.submitted && p.submitted.draftId === it.id) || p.approval || p.filed)) throw new HttpError(409, "This draft is in approval or already approved, so it's kept.");
+      if (it.kind === "draft" && (it.submitted || it.approval || it.filed)) throw new HttpError(409, "This draft is in approval or already approved, so it's kept.");
       it.deleted = { by: me.id, at: now };
     }
     await wsSaveItem(env, it);
     return json({ item: it });
   }
 
-  if (path === "submit") { // the creator says a cut is ready → it waits for anyone else to approve it
-    const p = await wsProject(env, body.projectId);
-    if (p.filed || p.approval) throw new HttpError(409, "This project is already approved.");
+  // Approval is per draft: the creator can send several drafts (different angles) and each is approved, sent back
+  // or filed to the library on its own. The project stays open for more drafts.
+  const wsDraftOf = async (p) => {
     const d = await wsItem(env, body.draftId);
     if (d.projectId !== p.id || d.kind !== "draft" || d.deleted) throw new HttpError(400, "Pick a draft from this project.");
-    p.submitted = { draftId: d.id, cut: d.cut, by: me.id, at: now };
-    await wsSaveProject(env, p);
-    await wsNotify(env, ctx, { actor: me, members, project: p, text: `🙋 ${me.name} sent draft ${d.cut} of "${p.title}" for content approval — open it in the Workspace to approve or ask for changes.`, push: { title: `Ready for approval: ${p.title}`, body: `${me.name} sent draft ${d.cut} for content approval` }, eventId: "ws_submit_" + d.id });
-    return json({ project: wsSummary(p, await wsItems(env, p.id), members) });
+    return d;
+  };
+  const summary = async (p) => json({ project: wsSummary(p, await wsItems(env, p.id), members) });
+
+  if (path === "submit") { // the creator says a draft is ready → it waits for anyone else to approve it
+    const p = await wsProject(env, body.projectId);
+    const d0 = await wsDraftOf(p);
+    const d = await wsUpdateItem(env, d0.id, (d) => {
+      if (d.filed || d.approval) throw new HttpError(409, `Draft ${d.cut} is already approved.`);
+      if (d.submitted) throw new HttpError(409, `Draft ${d.cut} is already waiting for approval.`);
+      d.submitted = { by: me.id, at: now, cut: d.cut };
+      delete d.changes;
+    });
+    await wsNotify(env, ctx, { actor: me, members, project: p, text: `🙋 ${me.name} sent draft ${d.cut} of "${p.title}" for content approval — open it in the Workspace to approve or ask for changes.`, push: { title: `Ready for approval: ${p.title}`, body: `${me.name} sent draft ${d.cut} for content approval` }, eventId: "ws_submit_" + d.id + "_" + Date.now() });
+    return summary(p);
   }
 
   if (path === "withdraw") {
     const p = await wsProject(env, body.projectId);
-    if (!p.submitted || p.approval) throw new HttpError(409, "Nothing is waiting for approval.");
-    if (p.submitted.by !== me.id && me.role !== "admin") throw new HttpError(403, "Only the person who sent it can take it back.");
-    const cut = p.submitted.cut;
-    delete p.submitted;
-    await wsSaveProject(env, p);
-    await wsNotify(env, ctx, { actor: me, members, project: p, text: `↩️ ${me.name} took draft ${cut} of "${p.title}" back from approval`, push: { title: p.title, body: `${me.name} took draft ${cut} back from approval` } });
-    return json({ project: wsSummary(p, await wsItems(env, p.id), members) });
+    const d0 = await wsDraftOf(p);
+    const d = await wsUpdateItem(env, d0.id, (d) => {
+      if (!d.submitted || d.approval || d.filed) throw new HttpError(409, `Draft ${d.cut} isn't waiting for approval.`);
+      if (d.submitted.by !== me.id && me.role !== "admin") throw new HttpError(403, "Only the person who sent it can take it back.");
+      delete d.submitted;
+    });
+    await wsNotify(env, ctx, { actor: me, members, project: p, text: `↩️ ${me.name} took draft ${d.cut} of "${p.title}" back from approval`, push: { title: p.title, body: `${me.name} took draft ${d.cut} back from approval` } });
+    return summary(p);
   }
 
-  if (path === "review") { // any one teammate other than whoever uploaded the cut decides
+  if (path === "review") { // any one teammate other than whoever uploaded the draft decides
     const p = await wsProject(env, body.projectId);
-    if (!p.submitted || p.approval) throw new HttpError(409, "Nothing is waiting for approval.");
-    const d = await wsItem(env, p.submitted.draftId);
-    if (d.author === me.id) throw new HttpError(403, "Someone other than the person who uploaded this draft has to approve it.");
+    const d0 = await wsDraftOf(p);
+    if (d0.author === me.id) throw new HttpError(403, "Someone other than the person who uploaded this draft has to approve it.");
     if (me.role === "video") throw new HttpError(403, "Video Creators upload drafts — someone else on the team approves them.");
     const note = wsText(body.note, 2000);
+    if (body.decision !== "approve" && body.decision !== "changes") throw new HttpError(400, "Choose approve or changes.");
+    if (body.decision === "changes" && !note) throw new HttpError(400, "Say what needs to change.");
+    const d = await wsUpdateItem(env, d0.id, (d) => {
+      if (!d.submitted || d.approval || d.filed) throw new HttpError(409, `Draft ${d.cut} isn't waiting for approval any more.`);
+      if (body.decision === "approve") d.approval = { by: me.id, at: now, note, cut: d.cut, draftId: d.id };
+      else { delete d.submitted; d.changes = { by: me.id, at: now, note }; }
+    });
     if (body.decision === "approve") {
-      p.approval = { draftId: d.id, cut: d.cut, by: me.id, at: now, note };
-      await wsSaveProject(env, p);
       await wsNotify(env, ctx, { actor: me, members, project: p, text: `✅ ${me.name} approved draft ${d.cut} of "${p.title}". Next: confirm the file name so it can go to Google Drive.`, push: { title: `Approved: ${p.title}`, body: `${me.name} approved draft ${d.cut} — confirm the file name next` }, eventId: "ws_approve_" + d.id });
-    } else if (body.decision === "changes") {
-      if (!note) throw new HttpError(400, "Say what needs to change.");
-      delete p.submitted;
-      await wsSaveProject(env, p);
+    } else {
       await wsSaveItem(env, { id: wsId("wi"), projectId: p.id, kind: "comment", author: me.id, createdAt: now, text: `Changes needed on draft ${d.cut}: ${note}`, decision: "changes", draftId: d.id });
       await wsNotify(env, ctx, { actor: me, members, project: p, text: `✏️ ${me.name} asked for changes on draft ${d.cut} of "${p.title}": ${note}`, push: { title: `Changes needed: ${p.title}`, body: `${me.name}: ${note}` }, eventId: "ws_changes_" + d.id + "_" + Date.now() });
-    } else throw new HttpError(400, "Choose approve or changes.");
-    return json({ project: wsSummary(p, await wsItems(env, p.id), members) });
+    }
+    return summary(p);
   }
 
   if (path === "unapprove") { // undo an approval before the file is saved
     const p = await wsProject(env, body.projectId);
-    if (!p.approval || p.filed) throw new HttpError(409, "There's no approval to undo.");
-    if (p.approval.by !== me.id && me.role !== "admin") throw new HttpError(403, "Only the person who approved it can undo that.");
-    const cut = p.approval.cut;
-    delete p.approval;
-    await wsSaveProject(env, p);
-    await wsNotify(env, ctx, { actor: me, members, project: p, text: `↩️ ${me.name} undid the approval of draft ${cut} of "${p.title}" — it's waiting for approval again`, push: { title: p.title, body: `${me.name} undid the approval of draft ${cut}` } });
-    return json({ project: wsSummary(p, await wsItems(env, p.id), members) });
+    const d0 = await wsDraftOf(p);
+    const d = await wsUpdateItem(env, d0.id, (d) => {
+      if (!d.approval || d.filed) throw new HttpError(409, "There's no approval to undo.");
+      if (d.filing && Date.now() - Date.parse(d.filing.at) < 5 * 60e3) throw new HttpError(409, "This video is being saved to Drive right now.");
+      if (d.approval.by !== me.id && me.role !== "admin") throw new HttpError(403, "Only the person who approved it can undo that.");
+      delete d.approval;
+    });
+    await wsNotify(env, ctx, { actor: me, members, project: p, text: `↩️ ${me.name} undid the approval of draft ${d.cut} of "${p.title}" — it's waiting for approval again`, push: { title: p.title, body: `${me.name} undid the approval of draft ${d.cut}` } });
+    return summary(p);
   }
 
   if (path === "file") return json(await wsFile(env, request, ctx, body, me, members));
@@ -2950,7 +3017,9 @@ async function wsUsedBarcodes(env, request) {
   const used = new Set();
   for (const f of files) { const m = /_([A-Z]\d{3})(?:\.[^.]+)?$/.exec(f.name || ""); if (m) used.add(m[1]); }
   const { results } = await env.DB.prepare("SELECT data FROM ws_projects").all();
-  for (const r of results || []) { const p = JSON.parse(r.data); if (p.filed && p.filed.barcode) used.add(p.filed.barcode); }
+  for (const r of results || []) { const p = JSON.parse(r.data); const f = p.filed || p.legacyFiled; if (f && f.barcode) used.add(f.barcode); }
+  const { results: dr } = await env.DB.prepare("SELECT json_extract(data, '$.filed.barcode') AS b FROM ws_items WHERE kind = 'draft' AND json_extract(data, '$.filed.barcode') IS NOT NULL").all();
+  for (const r of dr || []) used.add(r.b);
   try {
     await ensureStorageTables(env);
     const { results: arch } = await env.DB.prepare("SELECT name FROM media_archive WHERE name IS NOT NULL").all();
@@ -2970,14 +3039,14 @@ function londonDate(d = new Date()) {
   return v("year") + v("month") + v("day");
 }
 
-async function wsNameSuggestion(env, request, p, items) {
-  const d = items.find((i) => p.approval && i.id === p.approval.draftId);
-  if (!d) throw new HttpError(409, "Approve a cut first.");
+async function wsNameSuggestion(env, request, p, items, draftId) {
+  const d = items.find((i) => i.kind === "draft" && i.approval && !i.filed && (!draftId || i.id === draftId));
+  if (!d) throw new HttpError(409, "Approve the draft first.");
   const used = await wsUsedBarcodes(env, request);
   const branch = WS_BRANCHES[p.branch] || WS_BRANCHES.all;
   const parts = { date: londonDate(), social: "AL", category: p.category || "FC", dishes: p.dishes || [], stage: "FIN", version: "v" + d.cut,
     barcode: wsNextBarcode(branch.letter, used), ext: wsExtOf(d.media && d.media.fileUrl) };
-  return { parts, name: wsBuildName(parts), branchLetter: branch.letter, usedBarcodes: [...used].filter((c) => c[0] === branch.letter).length,
+  return { draftId: d.id, cut: d.cut, approval: d.approval, parts, name: wsBuildName(parts), branchLetter: branch.letter, usedBarcodes: [...used].filter((c) => c[0] === branch.letter).length,
     codes: { social: WS_SOCIAL, categories: WS_CATEGORIES, dishes: WS_DISHES, stages: WS_STAGES } };
 }
 function wsBuildName(x) {
@@ -3030,14 +3099,14 @@ async function wsDriveFolder(env, token, branchKey) {
 
 async function wsFile(env, request, ctx, body, me, members) {
   const p = await wsProject(env, body.projectId);
-  if (p.filed) return { project: wsSummary(p, await wsItems(env, p.id), members) };
-  if (!p.approval) throw new HttpError(409, "Approve a cut first.");
-  if (p.filing && Date.now() - Date.parse(p.filing.at) < 5 * 60e3) throw new HttpError(409, "This video is already being saved to Drive — give it a minute.");
-  const items = await wsItems(env, p.id);
-  const d = items.find((i) => i.id === p.approval.draftId);
-  const key = d && mediaKeyOf(d.media && d.media.fileUrl);
+  const d = await wsItem(env, body.draftId);
+  if (d.projectId !== p.id || d.kind !== "draft" || d.deleted) throw new HttpError(400, "Pick a draft from this project.");
+  if (d.filed) return { project: wsSummary(p, await wsItems(env, p.id), members) };
+  if (!d.approval) throw new HttpError(409, "Approve the draft first.");
+  if (d.filing && Date.now() - Date.parse(d.filing.at) < 5 * 60e3) throw new HttpError(409, "This video is already being saved to Drive — give it a minute.");
+  const key = mediaKeyOf(d.media && d.media.fileUrl);
   const obj = key && await env.MEDIA.head(key);
-  if (!obj) throw new HttpError(410, "The approved video file is missing from storage — upload the cut again.");
+  if (!obj) throw new HttpError(410, "The approved video file is missing from storage — upload the draft again.");
   const used = await wsUsedBarcodes(env, request);
   const name = wsText(body.name, 200);
   const check = wsCheckName(name, used, wsExtOf(d.media.fileUrl));
@@ -3045,26 +3114,32 @@ async function wsFile(env, request, ctx, body, me, members) {
 
   const auth = serviceAccount(env) ? null : await getGoogleAuth(env);
   if (!auth || !(auth.scopes || "").includes("drive.file")) throw new HttpError(409, "Creator Studio can't save to Google Drive yet — an admin needs to reconnect Google Drive in Settings.");
-  p.filing = { at: new Date().toISOString(), by: me.id };
-  await wsSaveProject(env, p);
+  // Claim the draft (and the barcode) so two people saving at once can't both write it.
+  await wsUpdateItem(env, d.id, (x) => {
+    if (x.filed) throw new HttpError(409, "This draft is already in the Content Library.");
+    if (x.filing && Date.now() - Date.parse(x.filing.at) < 5 * 60e3) throw new HttpError(409, "This video is already being saved to Drive — give it a minute.");
+    x.filing = { at: new Date().toISOString(), by: me.id, barcode: check.barcode };
+  });
+  const { results: busy } = await env.DB.prepare("SELECT id FROM ws_items WHERE kind = 'draft' AND id != ?1 AND json_extract(data, '$.filing.barcode') = ?2").bind(d.id, check.barcode).all();
+  if ((busy || []).length) { await wsUpdateItem(env, d.id, (x) => { delete x.filing; }); throw new HttpError(409, `Barcode ${check.barcode} is being used for another video right now — pick the next number.`); }
+  let filed;
   try {
     const token = await getGoogleToken(env);
     const { rootId, folderId, branch } = await wsDriveFolder(env, token, p.branch);
-    const approver = (members.find((m) => m.id === p.approval.by) || {}).name || "the team";
+    const approver = (members.find((m) => m.id === d.approval.by) || {}).name || "the team";
     const creator = (members.find((m) => m.id === d.author) || {}).name || "the creator";
     const song = d.media && d.media.music;
-    const description = `Workspace project: ${p.title}. Filmed by ${creator}, draft ${d.cut}, approved by ${approver} on ${p.approval.at.slice(0, 10)}.` + (song ? ` Music: ${song.credit || song.title + " by " + song.artist} (mixed in).` : "") + (p.brief ? " Brief: " + p.brief.slice(0, 400) : "");
+    const description = `Workspace project: ${p.title}. Filmed by ${creator}, draft ${d.cut}, approved by ${approver} on ${d.approval.at.slice(0, 10)}.` + (song ? ` Music: ${song.credit || song.title + " by " + song.artist} (mixed in).` : "") + (p.brief ? " Brief: " + p.brief.slice(0, 400) : "");
     const driveId = await driveUploadFromR2(env, token, key, name, folderId, description);
-    p.filed = { driveId, name, barcode: check.barcode, by: me.id, at: new Date().toISOString(), folderId, rootId, draftId: d.id, ...(song ? { music: song } : {}) };
-    delete p.filing;
-    await wsSaveProject(env, p);
-    await wsAddToLibraryIndex(env, request, { id: driveId, name, mime: obj.httpMetadata && obj.httpMetadata.contentType || d.media.mime, size: obj.size, branch: branch.folder, path: [], modified: p.filed.at, note: description });
+    filed = { driveId, name, barcode: check.barcode, by: me.id, at: new Date().toISOString(), folderId, rootId, draftId: d.id, cut: d.cut, ...(song ? { music: song } : {}) };
+    await wsUpdateItem(env, d.id, (x) => { x.filed = filed; delete x.filing; });
+    await wsSaveProject(env, p); // bumps the project's "updated" time
+    await wsAddToLibraryIndex(env, request, { id: driveId, name, mime: obj.httpMetadata && obj.httpMetadata.contentType || d.media.mime, size: obj.size, branch: branch.folder, path: [], modified: filed.at, note: description });
   } catch (e) {
-    delete p.filing;
-    await wsSaveProject(env, p);
+    await wsUpdateItem(env, d.id, (x) => { delete x.filing; }).catch(() => {});
     throw e;
   }
-  await wsNotify(env, ctx, { actor: me, members, project: p, text: `📚 "${p.title}" is in the Content Library as ${name} (barcode ${check.barcode}). Use "Create post from this" in the Workspace when you want to publish it.`, push: { title: `In the library: ${p.title}`, body: `Saved to Drive as ${check.barcode}` }, eventId: "ws_filed_" + p.id });
+  await wsNotify(env, ctx, { actor: me, members, project: p, text: `📚 Draft ${d.cut} of "${p.title}" is in the Content Library as ${name} (barcode ${check.barcode}). Use "Create post from this" in the Workspace when you want to publish it.`, push: { title: `In the library: ${p.title}`, body: `Draft ${d.cut} saved to Drive as ${check.barcode}` }, eventId: "ws_filed_" + d.id });
   return { project: wsSummary(p, await wsItems(env, p.id), members) };
 }
 
@@ -3518,4 +3593,155 @@ async function libraryUsedRoute(request, env, viewer) {
   }
   await kvSet(env, "library_used", marks);
   return json({ marks });
+}
+
+
+// ---------------------------------------------------------------------------
+// Raw footage → Google Drive ("Man Man RAW Files"). The creator picks photos/videos on her phone and they go straight
+// into Drive, sorted into a folder per month and per shoot:
+//   Man Man RAW Files / 2026-11 November / 2026-11-19 Christmas Content (Shoreditch) / 20261119_S_RAW_IMG_1234.MOV
+// Big videos go up in 16 MB pieces through the Worker into a Google resumable upload, so they can be any size and a
+// dropped connection only repeats one piece. Every file is listed in Creator Studio (ws_raw) with who, when and why.
+// ---------------------------------------------------------------------------
+const RAW_ROOT_DEFAULT = "1ve6cyn5tFZn9LHZ2ex2sQc0Wg-kCmPHo"; // "Man Man RAW Files" in admin@'s Drive
+const RAW_CHUNK = 16 * 1024 * 1024; // a multiple of 256 KB, as Google requires
+const RAW_MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+const rawFolderName = (s) => wsText(s, 90).replace(/[\\/:*?"<>|#]+/g, " ").replace(/\s+/g, " ").trim();
+
+async function rawDriveCall(token, path, init = {}) {
+  const sep = path.includes("?") ? "&" : "?";
+  const r = await fetch("https://www.googleapis.com/drive/v3/" + path + sep + "supportsAllDrives=true", { ...init, headers: { Authorization: "Bearer " + token, ...(init.body ? { "Content-Type": "application/json" } : {}), ...(init.headers || {}) } });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new HttpError(r.status === 404 ? 404 : 502, "Google Drive: " + ((d.error && d.error.message) || r.status));
+  return d;
+}
+// Find or make a sub-folder by name (remembered, and checked again if someone deletes it in Drive).
+async function rawSubfolder(env, token, parentId, name, cache) {
+  const key = parentId + "/" + name;
+  if (cache.folders[key]) {
+    try { const f = await rawDriveCall(token, `files/${cache.folders[key]}?fields=id,trashed`); if (!f.trashed) return cache.folders[key]; } catch (e) { /* gone */ }
+  }
+  const q = `name = '${name.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}' and '${parentId}' in parents and mimeType = '${DRIVE_FOLDER}' and trashed = false`;
+  const found = await rawDriveCall(token, "files?fields=files(id)&includeItemsFromAllDrives=true&q=" + encodeURIComponent(q));
+  const id = (found.files && found.files[0] && found.files[0].id) || (await rawDriveCall(token, "files?fields=id", { method: "POST", body: JSON.stringify({ name, mimeType: DRIVE_FOLDER, parents: [parentId] }) })).id;
+  cache.folders[key] = id;
+  return id;
+}
+async function rawRoot(env) {
+  const saved = (await kvGet(env, "raw_drive_folder")) || {};
+  return { id: saved.id || RAW_ROOT_DEFAULT, folders: saved.folders || {} };
+}
+const rawRow = async (env, id) => {
+  const row = await env.DB.prepare("SELECT data FROM ws_raw WHERE id = ?1").bind(String(id || "")).first();
+  if (!row) throw new HttpError(404, "That upload doesn't exist.");
+  return JSON.parse(row.data);
+};
+const rawSave = (env, r) => env.DB.prepare("INSERT INTO ws_raw (id, data, created_at) VALUES (?1, ?2, ?3) ON CONFLICT(id) DO UPDATE SET data = excluded.data").bind(r.id, JSON.stringify(r), r.createdAt).run();
+// What the outside world sees of an upload (never the Google upload address).
+const rawPublic = (r) => { const { session, ...rest } = r; return rest; };
+
+async function rawRoute(request, env, url, viewer, path) {
+  if (request.method === "GET" && path === "") {
+    const { results } = await env.DB.prepare("SELECT data FROM ws_raw ORDER BY created_at DESC LIMIT 1000").all();
+    const auth = serviceAccount(env) ? null : await getGoogleAuth(env);
+    const root = await rawRoot(env);
+    const files = (results || []).map((r) => rawPublic(JSON.parse(r.data))).filter((r) => r.status === "done" && !r.removed);
+    return json({ files, canUpload: hasFullDrive(auth), connected: !!auth, rootId: root.id });
+  }
+
+  if (request.method === "PUT" && path === "chunk") { // one piece of a file, passed on to Google
+    const { me } = await wsActor(env, viewer, { userId: url.searchParams.get("userId") });
+    const r = await rawRow(env, url.searchParams.get("id"));
+    if (r.by !== me.id) throw new HttpError(403, "This upload belongs to someone else.");
+    if (r.status === "done") return json({ file: rawPublic(r), received: r.size, done: true });
+    const offset = Number(url.searchParams.get("offset"));
+    const len = Number(request.headers.get("content-length") || 0);
+    if (!Number.isFinite(offset) || offset < 0 || !len || len > RAW_CHUNK || offset + len > r.size) throw new HttpError(400, "That piece of the file doesn't fit.");
+    const { readable, writable } = new FixedLengthStream(len);
+    const pump = request.body.pipeTo(writable);
+    const up = await fetch(r.session, { method: "PUT", headers: { "Content-Range": `bytes ${offset}-${offset + len - 1}/${r.size}` }, body: readable });
+    await pump.catch(() => {});
+    return json(await rawAfterPut(env, r, up));
+  }
+
+  if (request.method !== "POST") throw new HttpError(405, "Method not allowed");
+  const body = await request.json().catch(() => ({}));
+  const { me } = await wsActor(env, viewer, body);
+
+  if (path === "start") { // make the Drive folders and open a resumable upload for one file
+    const auth = serviceAccount(env) ? null : await getGoogleAuth(env);
+    if (!hasFullDrive(auth)) throw new HttpError(409, "An admin needs to reconnect Google Drive in Settings once, so Creator Studio can save into the RAW files folder.");
+    const size = Math.round(Number(body.size) || 0);
+    if (size <= 0) throw new HttpError(400, "That file is empty.");
+    if (size > 20 * 1024 ** 3) throw new HttpError(413, "Files over 20 GB can't be uploaded here — use Google Drive directly.");
+    const mime = /^(image|video)\/[\w.+-]+$/.test(String(body.mime || "")) ? body.mime : "application/octet-stream";
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(body.shootDate || "") ? body.shootDate : new Date().toISOString().slice(0, 10);
+    const branchKey = WS_BRANCHES[body.branch] ? body.branch : "all";
+    const branch = WS_BRANCHES[branchKey];
+    let project = null;
+    if (body.projectId) { try { project = await wsProject(env, body.projectId); } catch (e) { project = null; } }
+    const label = rawFolderName(body.label || (project && project.title) || "Shoot");
+    const shootFolder = rawFolderName(`${date} ${label}` + (branchKey === "all" ? "" : ` (${branch.folder})`));
+    const monthFolder = `${date.slice(0, 7)} ${RAW_MONTHS[Number(date.slice(5, 7)) - 1]}`;
+    const original = wsText(body.name, 160).replace(/[\\/:*?"<>|]+/g, "_") || "file";
+    const driveName = `${date.replace(/-/g, "")}_${branch.letter}_RAW_${original}`;
+
+    const token = await getGoogleToken(env);
+    const root = await rawRoot(env);
+    const monthId = await rawSubfolder(env, token, root.id, monthFolder, root);
+    const shootId = await rawSubfolder(env, token, monthId, shootFolder, root);
+    await kvSet(env, "raw_drive_folder", { id: root.id, folders: root.folders });
+
+    const note = wsText(body.note, 500);
+    const description = `Raw ${/^video/.test(mime) ? "video" : /^image/.test(mime) ? "photo" : "file"} uploaded by ${me.name} via Creator Studio on ${new Date().toISOString().slice(0, 10)}.` +
+      (project ? ` Workspace project: ${project.title}.` : "") + ` Branch: ${branch.folder}. Original name: ${original}.` + (note ? " Note: " + note : "");
+    const init = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&supportsAllDrives=true&fields=id,name,webViewLink,thumbnailLink", {
+      method: "POST",
+      headers: { Authorization: "Bearer " + token, "Content-Type": "application/json; charset=UTF-8", "X-Upload-Content-Type": mime, "X-Upload-Content-Length": String(size) },
+      body: JSON.stringify({ name: driveName, parents: [shootId], description }),
+    });
+    const session = init.headers.get("location");
+    if (!init.ok || !session) throw new HttpError(502, "Google Drive upload couldn't start (" + init.status + ")");
+    const r = { id: wsId("raw"), session, name: original, driveName, size, mime, shootDate: date, branch: branchKey, projectId: project ? project.id : null, projectTitle: project ? project.title : null,
+      label, note, folderPath: [monthFolder, shootFolder], folderId: shootId, by: me.id, createdAt: new Date().toISOString(), status: "uploading", received: 0 };
+    await rawSave(env, r);
+    return json({ upload: rawPublic(r), chunk: RAW_CHUNK });
+  }
+
+  if (path === "status") { // after a dropped connection: ask Google how much it already has
+    const r = await rawRow(env, body.id);
+    if (r.by !== me.id) throw new HttpError(403, "This upload belongs to someone else.");
+    if (r.status === "done") return json({ file: rawPublic(r), received: r.size, done: true });
+    const up = await fetch(r.session, { method: "PUT", headers: { "Content-Range": `bytes */${r.size}` } });
+    return json(await rawAfterPut(env, r, up));
+  }
+
+  if (path === "remove") { // take it off the list in Creator Studio (the file stays in Drive)
+    const r = await rawRow(env, body.id);
+    if (r.by !== me.id && me.role !== "admin") throw new HttpError(403, "Only the person who uploaded it or an admin can remove it.");
+    r.removed = { by: me.id, at: new Date().toISOString() };
+    await rawSave(env, r);
+    return json({ ok: true });
+  }
+
+  throw new HttpError(404, "Unknown raw-file request");
+}
+
+async function rawAfterPut(env, r, up) {
+  if (up.status === 308) { // Google has part of it: "Range: bytes=0-N"
+    const m = /bytes=0-(\d+)/.exec(up.headers.get("range") || "");
+    const received = m ? Number(m[1]) + 1 : 0;
+    if (received !== r.received) { r.received = received; await rawSave(env, r); }
+    return { received, done: false };
+  }
+  if (up.ok) {
+    const d = await up.json().catch(() => ({}));
+    r.status = "done"; r.received = r.size; r.driveId = d.id || null; r.doneAt = new Date().toISOString();
+    if (d.webViewLink) r.link = d.webViewLink;
+    await rawSave(env, r);
+    return { file: rawPublic(r), received: r.size, done: true };
+  }
+  if (up.status === 404 || up.status === 410) { r.status = "expired"; await rawSave(env, r); throw new HttpError(410, "The upload expired — start this file again."); }
+  const t = await up.text().catch(() => "");
+  throw new HttpError(502, "Google Drive didn't take that piece (" + up.status + ") " + t.slice(0, 120));
 }

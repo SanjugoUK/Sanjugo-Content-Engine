@@ -10121,6 +10121,15 @@ function WsDrafts({p, items, act}){
     if(openNotes && !confirm(openNotes+" to-do"+(openNotes>1?"s on draft "+draft.cut+" aren't":" on draft "+draft.cut+" isn't")+" ticked as fixed yet. Send draft "+draft.cut+" for approval anyway?")) return;
     await act("/submit", {draftId:draft.id}, "Draft "+draft.cut+" sent for content approval");
   }
+  const meU = USERS.find(u=>u.id===state.currentUserId);
+  const canDelDraft = draft && meU && (draft.author===meU.id || meU.role==="admin") && (dState(draft)==="draft" || dState(draft)==="changes");
+  async function delDraft(){
+    const notes = items.filter(i=>i.kind==="note" && i.draftId===draft.id).length;
+    if(!confirm("Delete draft "+draft.cut+"?"+(notes? " Its "+notes+" review note"+(notes>1?"s":"")+" pinned to this draft will go too." : "")+" This can't be undone in the app.")) return;
+    const cut = draft.cut;
+    const r = await act("/item/delete", {id:draft.id}, "Draft "+cut+" deleted");
+    if(r) setSel(null);
+  }
   const uploadBtn = !locked && <>
     {draft && dState(draft)!=="filed" && dState(draft)!=="approved" && <Button size="sm" onClick={()=>setMusicOpen(o=>!o)} disabled={!!upload}><span style={{color:"var(--violet)", display:"inline-flex", marginRight:2}}><Icon name="musicNote" size={14}/></span>{draft.media && draft.media.music ? "Change music" : "Add music"}</Button>}
     <Button size="sm" icon="upload" onClick={()=>fileRef.current && fileRef.current.click()} disabled={!!upload}>{drafts.length? "Upload new draft" : "Upload draft 1"}</Button>
@@ -10133,10 +10142,10 @@ function WsDrafts({p, items, act}){
   const sourceDraft = draft && draft.media && draft.media.music && draft.media.music.sourceUrl ? draft.media.music.sourceUrl : draft && draft.media && draft.media.fileUrl;
   async function saveMusicDraft(blob, settings, setBusy){
     setBusy("Uploading the new draft…");
-    const up = await wsUpload(new File([blob], "draft"+(drafts.length+1)+"-music.mp4", {type:"video/mp4"}), pct=>setBusy("Uploading the new draft… "+pct+"%"));
+    const up = await wsUpload(new File([blob], "draft"+(drafts.reduce((m,x)=>Math.max(m, x.cut||0), 0)+1)+"-music.mp4", {type:"video/mp4"}), pct=>setBusy("Uploading the new draft… "+pct+"%"));
     const m = draft.media || {};
-    const d = await act("/item", {kind:"draft", media:{fileUrl:up.url, mime:"video/mp4", name:"Draft "+(drafts.length+1)+" with music.mp4", size:blob.size, duration:m.duration, w:m.w, h:m.h,
-      music:{...trackInfo(musicPick), ...settings, sourceUrl: sourceDraft}}}, "Draft "+(drafts.length+1)+" uploaded with the music");
+    const d = await act("/item", {kind:"draft", media:{fileUrl:up.url, mime:"video/mp4", name:"Draft "+(drafts.reduce((m,x)=>Math.max(m, x.cut||0), 0)+1)+" with music.mp4", size:blob.size, duration:m.duration, w:m.w, h:m.h,
+      music:{...trackInfo(musicPick), ...settings, sourceUrl: sourceDraft}}}, "Draft "+(drafts.reduce((m,x)=>Math.max(m, x.cut||0), 0)+1)+" uploaded with the music");
     if(d && d.item) setSel(d.item.id);
     setMusicOpen(false);
   }
@@ -10151,9 +10160,9 @@ function WsDrafts({p, items, act}){
       </div>}
       {musicOpen && draft && <div style={{border:"1px solid var(--violet)", borderRadius:12, padding:12, marginBottom:14, background:"var(--surface)"}}>
         <div style={{fontWeight:600, fontSize:13.5, marginBottom:4}}>🎵 Add music to draft {draft.cut}</div>
-        <div style={{fontSize:12, color:"var(--ink-mute)", marginBottom:10}}>The music is mixed into a copy, saved as <b>draft {drafts.length+1}</b>, so everyone reviews the final sound before approving.{planned && musicPick && musicPick.id===planned.id ? " This is the song picked in the plan." : ""}</div>
+        <div style={{fontSize:12, color:"var(--ink-mute)", marginBottom:10}}>The music is mixed into a copy, saved as <b>draft {(drafts.reduce((m,x)=>Math.max(m, x.cut||0), 0)+1)}</b>, so everyone reviews the final sound before approving.{planned && musicPick && musicPick.id===planned.id ? " This is the song picked in the plan." : ""}</div>
         {musicPick ? <>
-          <MusicFitter key={musicPick.id} videoUrl={sourceDraft} duration={draft.media && draft.media.duration} track={musicPick} init={draft.media && draft.media.music && draft.media.music.id===musicPick.id ? draft.media.music : null} applyLabel={"Save as draft "+(drafts.length+1)} onApply={saveMusicDraft}/>
+          <MusicFitter key={musicPick.id} videoUrl={sourceDraft} duration={draft.media && draft.media.duration} track={musicPick} init={draft.media && draft.media.music && draft.media.music.id===musicPick.id ? draft.media.music : null} applyLabel={"Save as draft "+(drafts.reduce((m,x)=>Math.max(m, x.cut||0), 0)+1)} onApply={saveMusicDraft}/>
           <div style={{display:"flex", gap:8, marginTop:10}}><Button size="sm" variant="text" onClick={()=>setMusicPick(null)}>Choose another song</Button><Button size="sm" variant="subtle" onClick={()=>setMusicOpen(false)}>Close</Button></div>
         </> : <MusicSearch selectedId={planned && planned.id} onPick={setMusicPick} onClose={()=>setMusicOpen(false)}/>}
       </div>}
@@ -10172,6 +10181,7 @@ function WsDrafts({p, items, act}){
       {draft && (dState(draft)==="draft" || dState(draft)==="changes") && (
         <div style={{borderTop:"1px solid var(--border)", marginTop:14, paddingTop:14, display:"flex", alignItems:"center", gap:10, flexWrap:"wrap"}}>
           <div style={{fontSize:12.5, color: openNotes? "var(--amber)":"var(--green)", flex:"1 1 200px"}}>{draft.changes ? "Changes were asked for on this draft — upload a new draft, or send this one again. " : ""}{openNotes? openNotes+" to-do"+(openNotes>1?"s":"")+" not fixed yet" : "All to-dos fixed"} · anyone except the uploader can approve · you can send more than one draft</div>
+          {canDelDraft && <Button variant="subtle" icon="trash" onClick={delDraft}>Delete draft {draft.cut}</Button>}
           <Button variant="primary" icon="send" onClick={submit}>Send draft {draft.cut} for approval</Button>
         </div>
       )}

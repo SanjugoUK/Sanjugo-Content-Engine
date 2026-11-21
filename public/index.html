@@ -6399,9 +6399,16 @@ function suggestedTitle(f){
 }
 /* Where a library file has been used: every Creator Studio post that links to it, with each platform's post type
    and publish date — so the team can see "G730 went out as an Instagram Reel on 20 Sept" before reusing it. */
-function libraryUsageMap(items){
+function libraryUsageMap(items, files){
   const m = {};
   items.forEach(i=>{ const id = i.libraryRef && i.libraryRef.id; if(id) (m[id] = m[id]||[]).push(i); });
+  // Archive copies are the post's own upload, moved to Drive after publishing — they count as used by that post.
+  const arch = (files||[]).filter(f=>f.archiveKey);
+  if(arch.length){
+    const byKey = {};
+    items.forEach(i=>{ for(const mm of JSON.stringify(i).matchAll(/\/api\/media\/([^"?#\\]+)/g)){ let k = mm[1]; try{ k = decodeURIComponent(k); }catch(e){} (byKey[k] = byKey[k]||[]).push(i); } });
+    arch.forEach(f=>{ const posts = byKey[f.archiveKey]; if(posts) m[f.id] = [...new Set([...(m[f.id]||[]), ...posts])]; });
+  }
   Object.values(m).forEach(list=>list.sort((a,b)=> new Date(b.createdAt||0)-new Date(a.createdAt||0)));
   return m;
 }
@@ -6526,7 +6533,7 @@ function LibraryPage(){
   const [openFile, setOpenFile] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
   useEffect(()=>{ setLimit(60); }, [q, JSON.stringify(f)]);
-  const usedBy = useMemo(()=>libraryUsageMap(state.contentItems), [state.contentItems]);
+  const usedBy = useMemo(()=>libraryUsageMap(state.contentItems, lib && lib.files), [state.contentItems, lib]);
   const marks = useUsedMarks();
   const [showFilters, setShowFilters] = useState(false);
 
@@ -6780,7 +6787,7 @@ function UsedMarkBox({file, mark}){
 function LibraryPicker({onPick}){
   const {lib} = useLibrary();
   const {state} = useApp();
-  const usedBy = useMemo(()=>libraryUsageMap(state.contentItems), [state.contentItems]);
+  const usedBy = useMemo(()=>libraryUsageMap(state.contentItems, lib && lib.files), [state.contentItems, lib]);
   const marks = useUsedMarks();
   const [q, setQ] = useState("");
   const [open, setOpen] = useState(false);
@@ -7610,7 +7617,16 @@ function CreateContentPage(){
                   }
                   const f=picked[0]; if(!f) return;
                   const isVideo = f.type.startsWith("video/");
-                  set({fileName:f.name, mediaType: isVideo?"video":"image", previewLoading:true, uploadStatus:"uploading", fileUrl:null, gallery:[], galleryStatus:""});
+                  set({fileName:f.name, mediaType: isVideo?"video":"image", previewLoading:true, uploadStatus:"uploading", fileUrl:null, gallery:[], galleryStatus:"", libraryRef:null});
+                  // A file downloaded from the Content Library keeps its filing name (…_S465.mp4): link it to that library file,
+                  // so the library shows it as used once posted and no second copy goes to the archive.
+                  const named = parseLibraryName(f.name);
+                  if(named && named.barcode) loadLibrary().then(lib=>{
+                    const hit = lib.files.find(x=>x.barcode===named.barcode && x.name===f.name) || lib.files.find(x=>x.barcode===named.barcode);
+                    if(!hit) return;
+                    setForm(ff=> ff.fileName===f.name && !ff.libraryRef ? {...ff, libraryRef: libraryRefOf(hit)} : ff);
+                    dispatch({type:"ADD_TOAST", message:"Linked to "+hit.barcode+" in the Content Library — it'll show as used once posted"});
+                  }).catch(()=>{});
                   // Small poster/thumbnail for instant feedback in the UI...
                   const task = isVideo ? videoFileToPoster(f, 480, 0.72) : imageFileToPreview(f, 480, 0.78);
                   task.then(dataUrl=>{ set({previewUrl:dataUrl, previewLoading:false}); })
@@ -9271,7 +9287,8 @@ function RawUploadModal({project, onClose, onDone}){
     <Modal open onClose={busy? ()=>{ if(confirm("Stop uploading? Files already finished stay in Drive.")){ stop.current = true; } } : onClose} width={600}>
       <div style={{padding:20}}>
         <h3 style={{margin:"0 0 4px", fontSize:17}}>Upload raw files</h3>
-        <div style={{fontSize:12.5, color:"var(--ink-mute)", marginBottom:14}}>Photos and videos straight from your phone to Google Drive → Man Man RAW Files, sorted by branch and shoot. Each file gets its own barcode and appears in the Content Library.</div>
+        <div style={{fontSize:12.5, color:"var(--ink-mute)", marginBottom:14}}>Unedited photos and videos straight from the camera to Google Drive → Man Man RAW Files, sorted by branch and shoot. Each file gets its own barcode and appears in the Content Library.</div>
+        <div style={{fontSize:12.5, padding:"9px 11px", borderRadius:10, background:"var(--blue-soft)", color:"var(--blue)", marginBottom:14, lineHeight:1.45}}><b>Edited videos don't go here.</b> Upload them in the project's <b>Draft review</b> — the approved draft is saved to Drive with its own code when its file name is confirmed. Drafts and files already uploaded are turned away here.</div>
         {cantUpload && <div style={{padding:12, borderRadius:10, background:"var(--amber-soft)", color:"var(--amber)", fontSize:13, fontWeight:600, marginBottom:14}}>One-time step: an admin needs to press “Reconnect Google Drive” in Settings, so Creator Studio is allowed to save into the RAW files folder.</div>}
         <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:12, marginBottom:12}} className="cf-raw-grid">
           <div style={{gridColumn:"1 / -1"}}><label style={label}>Shoot name</label><input value={f.label} disabled={busy} onChange={e=>set({label:e.target.value})} placeholder="e.g. Christmas dishes, Wagyu roll close-ups" style={inp}/></div>
@@ -9358,7 +9375,7 @@ function RawFilesList({reloadKey}){
                 <span className="num" style={{flex:1, minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", fontFamily:'ui-monospace, "SF Mono", Menlo, monospace', fontSize:12}} title={r.note || r.driveName}>{r.driveName}</span>
                 <span style={{color:"var(--ink-mute)", fontSize:11.5, whiteSpace:"nowrap"}}>{fmtBytes(r.size)} · {wsAgo(r.createdAt)}</span>
                 {driveLink(r) && <a href={driveLink(r)} target="_blank" rel="noopener" style={{fontSize:12, fontWeight:600, color:"var(--accent)"}}>Open</a>}
-                {(r.by===me.id || me.role==="admin") && <button title="Remove from this list (stays in Drive)" onClick={async()=>{ if(!confirm("Remove “"+r.driveName+"” from this list? The file stays in Google Drive.")) return; try{ await post("/raw/remove", {id:r.id}); load(); }catch(e){ dispatch({type:"ADD_TOAST", message:e.message, variant:"danger"}); } }} style={{border:"none", background:"none", cursor:"pointer", color:"var(--ink-mute)", padding:2}}><Icon name="x" size={13}/></button>}
+                {(r.by===me.id || me.role==="admin") && <button title="Remove (moves it to the Google Drive bin)" onClick={async()=>{ if(!confirm("Remove “"+r.driveName+"”? It leaves this list and the Content Library, and moves to the Google Drive bin (it can be restored from there for 30 days).")) return; try{ await post("/raw/remove", {id:r.id}); load(); }catch(e){ dispatch({type:"ADD_TOAST", message:e.message, variant:"danger"}); } }} style={{border:"none", background:"none", cursor:"pointer", color:"var(--ink-mute)", padding:2}}><Icon name="x" size={13}/></button>}
               </div>)}
               <div style={{fontSize:12, color:"var(--ink-mute)", marginTop:4}}>📁 Man Man RAW Files › {(g.r.folderPath||[]).join(" › ")}{g.r.note ? " · Note: "+g.r.note : ""}</div>
             </div>}

@@ -595,7 +595,18 @@ async function libraryStatus(env) {
 // The live index (from the last refresh) if there is one, otherwise the snapshot bundled with the app.
 async function getLibrary(request, env) {
   const obj = await env.MEDIA.get(LIBRARY_INDEX_KEY);
-  if (obj) return new Response(obj.body, { headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
+  if (obj) {
+    const data = await obj.json().catch(() => null);
+    if (data && Array.isArray(data.files)) {
+      try {
+        await ensureStorageTables(env);
+        const { results } = await env.DB.prepare("SELECT key, drive_id FROM media_archive").all();
+        const keyOf = new Map((results || []).map((r) => [r.drive_id, r.key]));
+        for (const f of data.files) { const k = keyOf.get(f.id); if (k) f.archiveKey = k; }
+      } catch (e) { /* archive table not there yet */ }
+      return json(data);
+    }
+  }
   return env.ASSETS.fetch(new Request(new URL("/library.json", request.url)));
 }
 
@@ -970,6 +981,8 @@ async function planCleanup(env, now = Date.now()) {
     const { results } = await env.DB.prepare("SELECT data FROM camp_docs").all();
     for (const r of results || []) for (const m of String(r.data).matchAll(/\/api\/media\/([^"?#\\]+)/g)) { try { pinned.add(decodeURIComponent(m[1])); } catch (e) { pinned.add(m[1]); } }
   } catch (e) { return { objects, actions: [] }; } // can't check campaign files right now: delete nothing tonight
+  let libSizes = null;
+  try { const li = await env.MEDIA.get(LIBRARY_INDEX_KEY); if (li) libSizes = new Map(((await li.json()).files || []).map((f) => [f.id, Number(f.size) || null])); } catch (e) { /* archive as before */ }
   // Safety: with no shared post data to compare against, never treat files as unused.
   const canJudgeOrphans = items.length > 0;
   const actions = [];
@@ -988,7 +1001,10 @@ async function planCleanup(env, now = Date.now()) {
     const done = us.map(finishedAt);
     if (done.some((t) => t === null)) continue; // still being worked on, scheduled or rejected
     const dueAt = Math.max(...done) + PUBLISHED_GRACE_DAYS * 86400e3;
-    const a = { ...base, action: cat === "library" ? "delete" : "archive", titles: us.map((u) => u.title), item: us[0], publishedAt: Math.max(...done), reason: "Published", dueAt: new Date(dueAt).toISOString() };
+    // Made from a Content Library file (e.g. an approved Workspace video) and the upload is that same file:
+    // the original is already filed in Drive with its code, so the copy is just deleted — no second archive copy.
+    const sameAsLibrary = us.every((u) => u.libraryRef && u.libraryRef.id && libSizes && libSizes.get(u.libraryRef.id) === o.size);
+    const a = { ...base, action: cat === "library" || sameAsLibrary ? "delete" : "archive", titles: us.map((u) => u.title), item: us[0], publishedAt: Math.max(...done), reason: "Published", dueAt: new Date(dueAt).toISOString() };
     actions.push({ ...a, ready: now >= dueAt });
   }
   return { objects, actions };
@@ -1122,9 +1138,9 @@ async function renameArchive(env, { limit = 50 } = {}) {
   await ensureStorageTables(env);
   const { results } = await env.DB.prepare("SELECT * FROM media_archive WHERE name IS NULL ORDER BY archived_at ASC LIMIT ?1").bind(limit).all();
   const rows = results || [];
-  if (!rows.length) return { renamed: 0, left: 0 };
   const auth = await getGoogleAuth(env);
   if (!auth || !(auth.scopes || "").includes("drive.file")) return { renamed: 0, left: rows.length, needsReconnect: true };
+  if (!rows.length) return { renamed: 0, left: 0, dupes: await fixArchiveDupes(env, null, limit).catch((e) => ({ error: e.message })) };
   const token = await getGoogleToken(env);
   const stateRow = await env.DB.prepare("SELECT data FROM app_state WHERE id = 1").first();
   const items = stateRow ? (JSON.parse(stateRow.data).contentItems || []) : [];
@@ -1144,7 +1160,37 @@ async function renameArchive(env, { limit = 50 } = {}) {
     renamed++;
   }
   const left = (await env.DB.prepare("SELECT COUNT(*) AS n FROM media_archive WHERE name IS NULL").first()).n;
-  return { renamed, left };
+  const dupes = await fixArchiveDupes(env, token, limit).catch((e) => ({ error: e.message }));
+  return { renamed, left, dupes };
+}
+
+// Every archive file must have its own barcode. The first file keeps a shared code; the others get the next free one.
+async function fixArchiveDupes(env, token, limit) {
+  const { results } = await env.DB.prepare("SELECT key, drive_id, name, archived_at, size FROM media_archive WHERE name IS NOT NULL ORDER BY archived_at ASC, key ASC").all();
+  const seen = new Set(), fix = [];
+  for (const r of results || []) {
+    const m = /_([A-Z]\d{3,4})\.[a-z0-9]+$/i.exec(r.name || "");
+    if (!m) continue;
+    if (seen.has(m[1]) || !(await claimThisBarcode(env, m[1], "archive", r.key))) fix.push({ ...r, code: m[1] });
+    seen.add(m[1]);
+  }
+  let fixed = 0;
+  if (!fix.length) return { fixed, left: 0 };
+  token = token || await getGoogleToken(env);
+  const used = await wsUsedBarcodes(env, null);
+  for (const r of fix.slice(0, limit)) {
+    const letter = r.code[0];
+    const code = await claimBarcode(env, null, letter, "archive", r.key, used);
+    const name = r.name.replace(new RegExp("_" + r.code + "(\\.[a-z0-9]+)$", "i"), "_" + code + "$1");
+    const res = await fetch(`https://www.googleapis.com/drive/v3/files/${r.drive_id}?fields=id,name,description`, {
+      method: "PATCH", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
+    if (!res.ok) { await env.DB.prepare("DELETE FROM ws_barcodes WHERE code = ?1 AND ref = ?2").bind(code, r.key).run(); continue; }
+    const d = await res.json().catch(() => ({}));
+    await env.DB.prepare("UPDATE media_archive SET name = ?2 WHERE key = ?1").bind(r.key, name).run();
+    await wsAddToLibraryIndex(env, null, { id: r.drive_id, name, mime: null, size: r.size, branch: "All-Branches", path: ["Creator Studio Archive"], modified: r.archived_at, ...(d.description ? { note: d.description } : {}) }).catch(() => {});
+    fixed++;
+  }
+  return { fixed, left: fix.length - fixed };
 }
 
 // ---------------------------------------------------------------------------
@@ -3210,6 +3256,15 @@ async function driveUploadFromR2(env, token, key, name, parentId, description) {
 }
 
 // Add the new file to the library list straight away (the next full refresh finds it in Drive too).
+async function libraryIndexRemove(env, id) {
+  const obj = await env.MEDIA.get(LIBRARY_INDEX_KEY);
+  if (!obj) return;
+  const data = await obj.json().catch(() => null);
+  if (!data || !Array.isArray(data.files)) return;
+  data.files = data.files.filter((f) => f.id !== id);
+  await env.MEDIA.put(LIBRARY_INDEX_KEY, JSON.stringify(data), { httpMetadata: { contentType: "application/json" }, customMetadata: { updatedAt: data.updatedAt || new Date().toISOString() } });
+}
+
 async function wsAddToLibraryIndex(env, request, file) {
   let data = null;
   const obj = await env.MEDIA.get(LIBRARY_INDEX_KEY);
@@ -3715,6 +3770,7 @@ async function rawRoute(request, env, url, viewer, path) {
   const { me } = await wsActor(env, viewer, body);
 
   if (path === "start") { // make the Drive folders and open a resumable upload for one file
+    await rawGuard(env, body, Math.round(Number(body.size) || 0));
     const auth = serviceAccount(env) ? null : await getGoogleAuth(env);
     if (!hasFullDrive(auth)) throw new HttpError(409, "An admin needs to reconnect Google Drive in Settings once, so Creator Studio can save into the RAW files folder.");
     const size = Math.round(Number(body.size) || 0);
@@ -3771,15 +3827,49 @@ async function rawRoute(request, env, url, viewer, path) {
     return json(await rawAfterPut(env, r, up));
   }
 
-  if (path === "remove") { // take it off the list in Creator Studio (the file stays in Drive)
+  if (path === "remove") { // off the list, out of the Content Library, and into the Google Drive bin (restorable for 30 days)
     const r = await rawRow(env, body.id);
     if (r.by !== me.id && me.role !== "admin") throw new HttpError(403, "Only the person who uploaded it or an admin can remove it.");
-    r.removed = { by: me.id, at: new Date().toISOString() };
+    let binned = false;
+    if (r.driveId) {
+      try {
+        const token = await getGoogleToken(env);
+        const res = await fetch(`https://www.googleapis.com/drive/v3/files/${r.driveId}?supportsAllDrives=true`, {
+          method: "PATCH", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" }, body: JSON.stringify({ trashed: true }) });
+        binned = res.ok || res.status === 404;
+      } catch (e) { /* stays in Drive; still leaves the list */ }
+      await libraryIndexRemove(env, r.driveId).catch(() => {});
+    }
+    r.removed = { by: me.id, at: new Date().toISOString(), binned };
     await rawSave(env, r);
-    return json({ ok: true });
+    return json({ ok: true, binned });
   }
 
   throw new HttpError(404, "Unknown raw-file request");
+}
+
+// RAW files = untouched camera footage. An edited video that is already a Workspace draft (same file size, or the
+// same file name in the same project), or a file already uploaded as raw, is turned away with a clear reason.
+async function rawGuard(env, body, size) {
+  const name = String(body.name || "").trim().toLowerCase();
+  const { results: dr } = await env.DB.prepare("SELECT data FROM ws_items WHERE kind = 'draft'").all();
+  for (const r of dr || []) {
+    const d = JSON.parse(r.data);
+    if (d.deleted || !d.media) continue;
+    const sameSize = size > 0 && Number(d.media.size) === size;
+    const sameName = name && String(d.media.name || "").trim().toLowerCase() === name && body.projectId && d.projectId === body.projectId;
+    if (sameSize || sameName) {
+      let title = "a Workspace project";
+      try { title = "“" + (await wsProject(env, d.projectId)).title + "”"; } catch (e) { /* project gone */ }
+      throw new HttpError(409, `This is draft ${d.cut} of ${title} — an edited video, not raw footage. Drafts go in the project's Draft review, and the approved one is saved to Drive with its code when it's named.`);
+    }
+  }
+  const { results: rr } = await env.DB.prepare("SELECT data FROM ws_raw").all();
+  for (const r of rr || []) {
+    const x = JSON.parse(r.data);
+    if (x.status === "done" && !x.removed && size > 0 && Number(x.size) === size && String(x.name || "").trim().toLowerCase() === name)
+      throw new HttpError(409, `Already uploaded as ${x.barcode} (${x.driveName}).`);
+  }
 }
 
 async function rawAfterPut(env, r, up) {

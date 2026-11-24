@@ -10613,8 +10613,8 @@ function EngagementPage(){
   const page = ov && ov.page;
   const mcOk = !!(page && page.connected && !page.error);
   const mcActive = mcOk || !!(ov && (ov.people>0 || ov.last)) || ENG_MC_TABS.includes(state.engagementTab);
-  const tabs = [["comments","Comments"],["reviews","Reviews"],["links","Links"], ...(mcActive ? [["overview","DMs"],["human","Needs a person"],["people","People"],["texts","DM texts"]] : [])];
-  const [tab, setTab] = useState(()=> state.engagementTab && (["comments","reviews","links"].includes(state.engagementTab) || ENG_MC_TABS.includes(state.engagementTab)) ? state.engagementTab : "comments");
+  const tabs = [["comments","Comments"],["reviews","Reviews"],["keywords","Keywords"],["links","Links"],["insights","Insights"], ...(mcActive ? [["overview","DMs"],["human","Needs a person"],["people","People"],["texts","DM texts"]] : [])];
+  const [tab, setTab] = useState(()=> state.engagementTab && (["comments","reviews","keywords","links","insights"].includes(state.engagementTab) || ENG_MC_TABS.includes(state.engagementTab)) ? state.engagementTab : "comments");
   const counts = eng ? {comments:[eng.comments.todo, eng.comments.urgent>0], reviews:[eng.reviews.todo, eng.reviews.low>0], human:[ov ? ov.open||0 : 0, ov ? ov.openUrgent>0 : false]} : {};
   const missing = eng ? [!eng.setup.comments && "Instagram comments", !eng.setup.igReply && "Instagram replies", !eng.setup.reviews && "Google reviews", !eng.setup.reviewReply && "review replies"].filter(Boolean) : [];
   return (
@@ -10637,7 +10637,9 @@ function EngagementPage(){
       </div>
       {tab==="comments" && <EngComments onChange={load}/>}
       {tab==="reviews" && <EngReviews reviewer={reviewer} onChange={load}/>}
+      {tab==="keywords" && <EngKeywords goLinks={()=>setTab("links")}/>}
       {tab==="links" && <EngLinks admin={admin}/>}
+      {tab==="insights" && <EngInsights admin={admin}/>}
       {tab==="overview" && <EngOverview ov={ov && ov.page ? ov : null} go={setTab} connected={mcOk}/>}
       {tab==="human" && <EngHuman onChange={load}/>}
       {tab==="people" && <EngPeople admin={admin}/>}
@@ -10811,6 +10813,225 @@ function EngReviews({reviewer, onChange}){
   );
 }
 
+/* ---------- Keyword DM stats: comments with a ManyChat keyword vs clicks on that keyword's tracked link ---------- */
+function EngKeywords({goLinks}){
+  const eg = useEngage();
+  const [days, setDays] = useState(30);
+  const [data, setData] = useState(null);
+  useEffect(()=>{ setData(null); eg.get("/keywords?days="+days).then(setData).catch(e=>eg.toast(e.message, "danger")); }, [days]);
+  return (
+    <div>
+      <div style={{display:"flex", gap:6, marginBottom:14, flexWrap:"wrap", alignItems:"center"}}>
+        {[[7,"7 days"],[30,"30 days"],[90,"90 days"]].map(([d,l])=><ChipToggle key={d} active={days===d} onClick={()=>setDays(d)}>{l}</ChipToggle>)}
+      </div>
+      {!data ? <div style={{display:"grid", gap:10}}><Skeleton h={120}/><Skeleton h={120}/></div>
+        : !data.keywords.length ? <Card><EmptyState icon="zap" title="No ManyChat keywords yet" subtitle="Add them in Settings → Engagement → Left to ManyChat (e.g. WAGYU, MENU). Comments with those words are counted here."/></Card>
+        : <div style={{display:"grid", gap:12}}>{data.keywords.map(k=>(
+            <Card key={k.keyword} style={{padding:16}}>
+              <div style={{display:"flex", alignItems:"center", gap:10, flexWrap:"wrap"}}>
+                <span style={{fontWeight:700, fontSize:15, letterSpacing:".04em"}}>{k.keyword}</span>
+                <span style={{flex:1}}/>
+                {k.clickRate!=null && k.links.length>0 && <EngChip color="var(--green)" soft="var(--green-soft)">{k.clickRate}% clicked</EngChip>}
+              </div>
+              <div style={{display:"grid", gridTemplateColumns:"repeat(3, 1fr)", gap:8, marginTop:12}}>
+                {[["Comments", k.comments], ["People", k.people], ["Link clicks", k.links.length ? k.clicks : "—"]].map(([l, v])=>(
+                  <div key={l} style={{background:"var(--surface-2)", borderRadius:10, padding:"8px 10px"}}>
+                    <div className="num" style={{fontSize:20, fontWeight:600}}>{typeof v==="number" ? fmtNum(v) : v}</div>
+                    <div style={{fontSize:11.5, color:"var(--ink-mute)"}}>{l}</div>
+                  </div>))}
+              </div>
+              {!k.links.length && <div style={{fontSize:12, color:"var(--ink-mute)", marginTop:10}}>No tracked link for {k.keyword} yet. <button onClick={goLinks} style={{border:"none", background:"none", padding:0, color:"var(--accent)", fontWeight:600, cursor:"pointer", fontSize:12}}>Make one in Links</button> and pick this keyword, then use it on the ManyChat DM button.</div>}
+              {k.links.length>0 && <div style={{fontSize:12, color:"var(--ink-mute)", marginTop:8}}>{k.links.map(l=>"/go/"+l.code+" · "+l.clicks+" click"+(l.clicks===1?"":"s")).join("  ·  ")}</div>}
+              {k.posts.length>0 && <div style={{marginTop:12}}>
+                <div style={{fontSize:12, fontWeight:700, color:"var(--ink-mute)", marginBottom:6}}>Posts it came from</div>
+                <div style={{display:"flex", gap:8, overflowX:"auto"}} className="cf-noscrollbar">
+                  {k.posts.map(p=>(
+                    <a key={p.mediaId} href={p.permalink || undefined} target="_blank" rel="noopener noreferrer" title={p.caption} style={{flexShrink:0, width:76, textDecoration:"none", color:"var(--ink)"}}>
+                      {p.thumb ? <img src={p.thumb} alt="" style={{width:76, height:96, objectFit:"cover", borderRadius:8, display:"block", background:"var(--surface-2)"}}/>
+                        : <div style={{width:76, height:96, borderRadius:8, background:"var(--surface-2)", display:"flex", alignItems:"center", justifyContent:"center", color:"var(--ink-mute)"}}><Icon name="image" size={16}/></div>}
+                      <div className="num" style={{fontSize:12, fontWeight:600, marginTop:4, textAlign:"center"}}>{p.comments}</div>
+                    </a>))}
+                </div>
+              </div>}
+            </Card>))}</div>}
+      <div style={{fontSize:12, color:"var(--ink-mute)", marginTop:12, lineHeight:1.5}}>Comments are counted from the moment Instagram comments were connected (24 Nov 2026). Click rate = people who opened the link ÷ people who commented the keyword (or clicks, if ManyChat can't pass who clicked).</div>
+    </div>
+  );
+}
+
+/* ---------- Insights: Instagram stories, Google Maps actions per branch, competitor & creator watch ---------- */
+function EngInsights({admin}){
+  const [view, setView] = useState("stories");
+  return (
+    <div>
+      <div style={{display:"flex", gap:6, marginBottom:16, flexWrap:"wrap"}}>
+        {[["stories","Stories"],["maps","Google Maps"],["comp","Competitors"]].map(([k,l])=><ChipToggle key={k} active={view===k} onClick={()=>setView(k)}>{l}</ChipToggle>)}
+      </div>
+      {view==="stories" && <EngStories/>}
+      {view==="maps" && <EngMaps/>}
+      {view==="comp" && <EngComp admin={admin}/>}
+    </div>
+  );
+}
+
+function EngStories(){
+  const eg = useEngage();
+  const [data, setData] = useState(null);
+  useEffect(()=>{ eg.get("/stories?days=60").then(setData).catch(e=>eg.toast(e.message, "danger")); }, []);
+  if(!data) return <Skeleton h={160}/>;
+  const a = data.avg || {};
+  const fmtWhen = iso => iso ? new Date(iso).toLocaleString("en-GB", {weekday:"short", day:"numeric", month:"short", hour:"2-digit", minute:"2-digit"}) : "";
+  return (
+    <div>
+      <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(140px, 1fr))", gap:10, marginBottom:16}}>
+        <StatTile icon="trend" label="Avg reach" value={a.reach==null ? "—" : fmtNum(a.reach)} sub="per story, 60 days"/>
+        <StatTile icon="chat" label="Avg replies" value={a.replies==null ? "—" : fmtNum(a.replies)} sub="per story"/>
+        <StatTile icon="chevronRight" label="Avg taps forward" value={a.tapsForward==null ? "—" : fmtNum(a.tapsForward)} sub="skipped ahead"/>
+        <StatTile icon="x" label="Avg exits" value={a.exits==null ? "—" : fmtNum(a.exits)} sub="left stories"/>
+      </div>
+      {!data.stories.length ? <Card><EmptyState icon="image" title="No story stats yet" subtitle="Instagram sends a story's numbers when it ends, 24 hours after posting. They'll appear here from the next story."/></Card>
+        : <Card style={{padding:"4px 0"}}>{data.stories.map((s, i)=>(
+            <div key={s.id} style={{display:"flex", gap:12, alignItems:"center", padding:"10px 14px", borderTop: i? "1px solid var(--border)" : "none"}}>
+              <EngStoryThumb s={s}/>
+              <div style={{flex:"1 1 auto", minWidth:0}}>
+                <div style={{fontWeight:600, fontSize:13.5}}>{fmtWhen(s.postedAt)}</div>
+                <div style={{fontSize:12, color:"var(--ink-mute)"}}>{s.type ? s.type.toLowerCase() : "story"}{s.permalink ? <> · <a href={s.permalink} target="_blank" rel="noopener noreferrer" style={{color:"var(--accent)"}}>open</a></> : null}</div>
+              </div>
+              <div style={{display:"flex", gap:14, flexWrap:"wrap", justifyContent:"flex-end"}}>
+                {[["Reach", s.reach], ["Replies", s.replies], ["Fwd", s.tapsForward], ["Back", s.tapsBack], ["Exits", s.exits]].map(([l, v])=>(
+                  <div key={l} style={{textAlign:"center", minWidth:38}}><div className="num" style={{fontWeight:600, fontSize:14}}>{v==null ? "—" : fmtNum(v)}</div><div style={{fontSize:10.5, color:"var(--ink-mute)"}}>{l}</div></div>))}
+              </div>
+            </div>))}</Card>}
+    </div>
+  );
+}
+function EngStoryThumb({s}){
+  const [broken, setBroken] = useState(false);
+  return s.thumb && !broken ? <img src={s.thumb} alt="" onError={()=>setBroken(true)} style={{width:36, height:64, objectFit:"cover", borderRadius:6, flexShrink:0, background:"var(--surface-2)"}}/>
+    : <div style={{width:36, height:64, borderRadius:6, background:"var(--surface-2)", flexShrink:0, display:"flex", alignItems:"center", justifyContent:"center", color:"var(--ink-mute)"}}><Icon name="image" size={14}/></div>;
+}
+
+const MAPS_ROWS = [["views","Views on Google"],["directions","Direction requests"],["calls","Calls"],["website","Website clicks"],["bookings","Bookings"],["menu","Menu clicks"],["orders","Food orders"]];
+function EngMaps(){
+  const eg = useEngage();
+  const [data, setData] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const load = ()=>eg.get("/maps").then(setData).catch(e=>eg.toast(e.message, "danger"));
+  useEffect(()=>{ load(); }, []);
+  async function pull(){ setBusy(true); try{ await eg.post("maps/pull"); eg.toast("Asking Google — numbers show up in a minute"); setTimeout(load, 20000); setTimeout(load, 45000); }catch(e){ eg.toast(e.message, "danger"); } setBusy(false); }
+  if(!data) return <Skeleton h={200}/>;
+  const last = data.last;
+  const pct = (a, b) => !b ? null : Math.round(((a - b) / b) * 100);
+  const nice = d => d ? new Date(d+"T12:00:00Z").toLocaleDateString("en-GB", {day:"numeric", month:"short"}) : "";
+  return (
+    <div>
+      <div style={{display:"flex", gap:10, alignItems:"center", marginBottom:14, flexWrap:"wrap"}}>
+        <div style={{fontSize:12.5, color:"var(--ink-mute)", flex:"1 1 240px"}}>{data.lastDay ? `Last 28 days (${nice(data.from)} – ${nice(data.lastDay)}) vs the 28 days before. Google's numbers run a few days behind.` : "Google Business Profile: what people do after finding each branch on Google Search and Maps."}</div>
+        <span style={{fontSize:12, color: last && last.error ? "var(--red)" : "var(--ink-mute)"}}>{last ? (last.error ? "Failed: "+last.error : "Checked "+engAgo(last.at)) : ""}</span>
+        <Button size="sm" icon="refresh" disabled={busy} onClick={pull}>Check now</Button>
+      </div>
+      {!data.lastDay ? <Card><EmptyState icon="trend" title="No Google Maps numbers yet" subtitle="Checked every Monday morning. Click Check now to fetch the last 60 days."/></Card>
+        : <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(260px, 1fr))", gap:12}}>
+          {ENG_BRANCHES.map(([k, label])=>{ const b = data.branches[k]; if(!b) return null;
+            if(!b.hasData) return <Card key={k} style={{padding:16}}><div style={{fontWeight:700, fontSize:15}}>{label}</div><div style={{fontSize:13, color:"var(--ink-mute)", marginTop:6}}>No numbers yet{data.last && data.last.error && data.last.error.toLowerCase().startsWith(k) ? " — "+data.last.error : ""}.</div></Card>;
+            const actions = ["directions","calls","website","bookings","menu","orders"].reduce((s, m)=>s + (b.totals[m]||0), 0);
+            const actionsBefore = ["directions","calls","website","bookings","menu","orders"].reduce((s, m)=>s + (b.before[m]||0), 0);
+            return (
+              <Card key={k} style={{padding:16}}>
+                <div style={{display:"flex", alignItems:"baseline", gap:8}}>
+                  <div style={{fontWeight:700, fontSize:15, flex:1}}>{label}</div>
+                  <div style={{fontSize:12, color:"var(--ink-mute)"}}><b className="num" style={{color:"var(--ink)", fontSize:16}}>{fmtNum(actions)}</b> actions <EngDelta p={pct(actions, actionsBefore)}/></div>
+                </div>
+                <div style={{marginTop:10}}>
+                  {MAPS_ROWS.filter(([m])=>m==="views" || b.totals[m] || b.before[m]).map(([m, l])=>(
+                    <div key={m} style={{display:"flex", alignItems:"center", gap:8, padding:"6px 0", borderTop:"1px solid var(--border)", fontSize:13}}>
+                      <span style={{flex:1, color:"var(--ink-soft)"}}>{l}</span>
+                      <b className="num">{fmtNum(b.totals[m]||0)}</b>
+                      <EngDelta p={pct(b.totals[m]||0, b.before[m]||0)}/>
+                    </div>))}
+                </div>
+                <div style={{fontSize:11.5, color:"var(--ink-mute)", margin:"10px 0 4px"}}>Actions per week</div>
+                <BarChart height={110} data={b.weekly.map(w=>({label:"Week to "+nice(w.end), shortLabel: nice(w.end).split(" ")[0], value:w.actions}))}/>
+              </Card>
+            ); })}
+        </div>}
+    </div>
+  );
+}
+function EngDelta({p}){
+  if(p==null || !isFinite(p)) return <span style={{fontSize:11.5, color:"var(--ink-mute)", minWidth:40, textAlign:"right"}}>—</span>;
+  const up = p >= 0;
+  return <span className="num" style={{fontSize:11.5, fontWeight:600, color: p===0 ? "var(--ink-mute)" : up ? "var(--green)" : "var(--red)", minWidth:40, textAlign:"right"}}>{up ? "+" : ""}{p}%</span>;
+}
+
+function EngComp({admin}){
+  const eg = useEngage();
+  const [data, setData] = useState(null);
+  const [form, setForm] = useState({username:"", kind:"competitor", label:""});
+  const [busy, setBusy] = useState("");
+  const [open, setOpen] = useState(null);
+  const load = ()=>eg.get("/comp").then(setData).catch(e=>eg.toast(e.message, "danger"));
+  useEffect(()=>{ load(); }, []);
+  async function add(){ setBusy("add"); try{ const d = await eg.post("comp/add", form); setData(d); setForm({username:"", kind:form.kind, label:""}); eg.toast("Added — numbers show up in a minute"); setTimeout(load, 20000); }catch(e){ eg.toast(e.message, "danger"); } setBusy(""); }
+  async function remove(u){ try{ setData(await eg.post("comp/remove", {username:u})); eg.toast("Removed"); }catch(e){ eg.toast(e.message, "danger"); } }
+  async function pull(){ setBusy("pull"); try{ await eg.post("comp/pull"); eg.toast("Checking Instagram — updates in a minute"); setTimeout(load, 25000); }catch(e){ eg.toast(e.message, "danger"); } setBusy(""); }
+  if(!data) return <Skeleton h={200}/>;
+  const last = data.last;
+  const input = {padding:"8px 11px", borderRadius:8, border:"1px solid var(--border)", background:"var(--surface)", color:"var(--ink)", fontSize:13.5};
+  const signed = n => n==null ? "—" : (n>0 ? "+" : "")+fmtNum(n);
+  return (
+    <div>
+      {admin && <Card style={{padding:12, marginBottom:14, display:"flex", gap:8, flexWrap:"wrap", alignItems:"center"}}>
+        <input value={form.username} onChange={e=>setForm(f=>({...f, username:e.target.value}))} placeholder="@username or Instagram link" style={{...input, flex:"2 1 200px"}}/>
+        <Select value={form.kind} onChange={v=>setForm(f=>({...f, kind:v}))} options={[{value:"competitor", label:"Competitor"},{value:"creator", label:"Creator / influencer"}]} style={{flex:"1 1 150px"}}/>
+        <input value={form.label} onChange={e=>setForm(f=>({...f, label:e.target.value}))} placeholder="Note (optional)" maxLength={60} style={{...input, flex:"1 1 140px"}}/>
+        <Button size="sm" variant="primary" icon="plus" disabled={busy==="add" || form.username.trim().length<2} onClick={add}>Watch</Button>
+      </Card>}
+      <div style={{display:"flex", gap:10, alignItems:"center", marginBottom:12, flexWrap:"wrap"}}>
+        <div style={{fontSize:12.5, color:"var(--ink-mute)", flex:"1 1 240px"}}>Public business and creator accounts only. Checked every 3 days.</div>
+        <span style={{fontSize:12, color: last && last.error ? "var(--red)" : "var(--ink-mute)"}}>{last ? (last.error ? "Failed: "+last.error : "Checked "+engAgo(last.at)) : ""}</span>
+        {data.accounts.length>0 && <Button size="sm" icon="refresh" disabled={busy==="pull"} onClick={pull}>Check now</Button>}
+      </div>
+      {!data.accounts.length ? <Card><EmptyState icon="search" title="No accounts watched yet" subtitle={admin ? "Add a restaurant you compete with, or a creator you might work with, e.g. @sticksnsushi.uk." : "An admin can add accounts to watch."}/></Card>
+        : <div style={{display:"grid", gap:12}}>{data.accounts.map(a=>{ const expanded = open===a.username;
+            return (
+              <Card key={a.username} style={{padding:14}}>
+                <div style={{display:"flex", gap:12, alignItems:"center", flexWrap:"wrap"}}>
+                  <EngFace p={{name:a.name || a.username, pic:a.pic}} size={42}/>
+                  <div style={{flex:"1 1 160px", minWidth:0}}>
+                    <div style={{fontWeight:600, fontSize:14, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>{a.name || "@"+a.username}</div>
+                    <div style={{fontSize:12, color:"var(--ink-mute)"}}><a href={"https://www.instagram.com/"+a.username+"/"} target="_blank" rel="noopener noreferrer" style={{color:"var(--ink-mute)", textDecoration:"none"}}>@{a.username}</a> · {a.kind==="creator" ? "Creator" : "Competitor"}{a.label ? " · "+a.label : ""}</div>
+                  </div>
+                  <div style={{display:"flex", gap:14, flexWrap:"wrap"}}>
+                    {[["Followers", a.followers==null ? "—" : fmtNum(a.followers)], ["7 days", signed(a.followers7)], ["Posts / 30d", a.posts30], ["Avg likes", a.avgLikes==null ? "—" : fmtNum(a.avgLikes)], ["Engagement", a.engagement==null ? "—" : a.engagement+"%"]].map(([l, v])=>(
+                      <div key={l} style={{textAlign:"center", minWidth:50}}><div className="num" style={{fontWeight:600, fontSize:14}}>{v}</div><div style={{fontSize:10.5, color:"var(--ink-mute)"}}>{l}</div></div>))}
+                  </div>
+                </div>
+                {a.error && <div style={{fontSize:12.5, color:"var(--red)", marginTop:8}}>{a.error}</div>}
+                {!a.checkedAt && !a.error && <div style={{fontSize:12.5, color:"var(--ink-mute)", marginTop:8}}>Waiting for the first check…</div>}
+                <div style={{display:"flex", gap:8, marginTop:10, flexWrap:"wrap"}}>
+                  {a.posts.length>0 && <Button size="sm" variant="ghost" icon={expanded ? "chevronDown" : "chevronRight"} onClick={()=>setOpen(expanded ? null : a.username)}>{expanded ? "Hide posts" : "Recent posts"}</Button>}
+                  {admin && <ConfirmButton confirmLabel="Stop watching?" onConfirm={()=>remove(a.username)}>Remove</ConfirmButton>}
+                </div>
+                {expanded && <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(96px, 1fr))", gap:8, marginTop:10}}>
+                  {a.posts.map(p=>(
+                    <a key={p.id} href={p.permalink || undefined} target="_blank" rel="noopener noreferrer" title={p.caption.slice(0, 200)} style={{textDecoration:"none", color:"var(--ink)"}}>
+                      <EngPostThumb p={p}/>
+                      <div style={{fontSize:11, color:"var(--ink-soft)", marginTop:3}}>❤ {fmtNum(p.likes)} · 💬 {fmtNum(p.comments)}</div>
+                      <div style={{fontSize:10.5, color:"var(--ink-mute)"}}>{p.at ? fmtDate(p.at, {day:"numeric", month:"short"}) : ""}</div>
+                    </a>))}
+                </div>}
+              </Card>
+            ); })}</div>}
+    </div>
+  );
+}
+function EngPostThumb({p}){
+  const [broken, setBroken] = useState(false);
+  return p.thumb && !broken && !/\.mp4(\?|$)/i.test(p.thumb) ? <img src={p.thumb} alt="" onError={()=>setBroken(true)} style={{width:"100%", aspectRatio:"4 / 5", objectFit:"cover", borderRadius:8, display:"block", background:"var(--surface-2)"}}/>
+    : <div style={{width:"100%", aspectRatio:"4 / 5", borderRadius:8, background:"var(--surface-2)", display:"flex", alignItems:"center", justifyContent:"center", color:"var(--ink-mute)"}}><Icon name={/VIDEO|REEL/i.test(p.type) ? "play" : "image"} size={16}/></div>;
+}
+
 /* Settings → Engagement (admins): the Make links for comments and reviews. */
 function EngHookRow({label, hint, on, value, onSave, children, first}){
   const [v, setV] = useState(value || "");
@@ -10849,6 +11070,9 @@ function EngageSettings(){
         <Button size="sm" variant="ghost" icon="refresh" onClick={pull}>Check now</Button>
       </EngHookRow>
       <EngHookRow label="Google review replies" on={!!d.reviewReply} value={d.reviewReply} hint={d.reviewReply ? "Make webhook set" : "Paste the “Engage · Google review reply” webhook"} onSave={v=>save({reviewReply:v}, "Review reply webhook saved")}/>
+      <EngHookRow label="Competitors" on={!!d.compPull} value={d.compPull} hint={d.compPull ? (d.lastComp ? (d.lastComp.error ? "Last check failed: "+d.lastComp.error : "Checked "+engAgo(d.lastComp.at)+" · every 3 days") : "Make webhook set") : "Paste the “Engage · Competitors” webhook"} onSave={v=>save({compPull:v}, "Competitors webhook saved")}/>
+      <EngHookRow label="Google Maps stats" on={!!d.mapsPull} value={d.mapsPull} hint={d.mapsPull ? (d.lastMaps ? (d.lastMaps.error ? "Last check failed: "+d.lastMaps.error : "Checked "+engAgo(d.lastMaps.at)+" · Mondays") : "Make webhook set") : "Paste the “Engage · Google Maps stats” webhook"} onSave={v=>save({mapsPull:v}, "Google Maps webhook saved")}/>
+      <SettingRow on={!!d.lastStory} label="Story stats" hint={d.lastStory ? "Last story "+engAgo(d.lastStory.at) : "Uses the incoming link · arrives when each story ends"}/>
       <SettingRow label="Left to ManyChat" hint="Comments with these keywords get ManyChat's reply, so they skip To answer">
         <input value={kw} onChange={e=>setKw(e.target.value)} placeholder="WAGYU, MENU" style={{width:200, maxWidth:"100%", padding:"6px 9px", borderRadius:8, border:"1px solid var(--border)", background:"var(--surface)", color:"var(--ink)", fontSize:12.5}}/>
         <Button size="sm" variant="ghost" disabled={kw===(d.keywords||[]).join(", ")} onClick={()=>save({keywords:kw}, "Keywords saved")}>Save</Button>
@@ -11163,6 +11387,7 @@ function EngLinks({admin}){
           <label style={{fontSize:12.5, fontWeight:600}}>Short name<input style={{...input, marginTop:5}} value={form.code} disabled={!!form.editing} placeholder="wagyu" onChange={e=>setForm(x=>({...x, code: engSlug(e.target.value), auto:false}))}/></label>
           <label style={{fontSize:12.5, fontWeight:600, gridColumn:"1 / -1"}}>Opens this page<input style={{...input, marginTop:5}} value={form.url} placeholder="https://sanjugo.co.uk/…" onChange={e=>setForm(x=>({...x, url:e.target.value.trim()}))}/></label>
           {camps.length>0 && <label style={{fontSize:12.5, fontWeight:600}}>Campaign (optional)<Select value={form.campaign} onChange={v=>setForm(x=>({...x, campaign:v}))} placeholder="None" options={camps.map(c=>({value:c.id, label:c.name}))} style={{marginTop:5}}/></label>}
+          {data && (data.keywords||[]).length>0 && <label style={{fontSize:12.5, fontWeight:600}}>ManyChat keyword (optional)<Select value={form.keyword||""} onChange={v=>setForm(x=>({...x, keyword:v}))} placeholder="None" options={data.keywords.map(k=>({value:k, label:k}))} style={{marginTop:5}}/></label>}
         </div>
         {data && form.code && <div style={{fontSize:12, color:"var(--ink-mute)", marginTop:10, wordBreak:"break-all"}}>Link: {data.goBase}{form.code}</div>}
         <div style={{display:"flex", gap:8, marginTop:12}}>
@@ -11179,7 +11404,7 @@ function EngLinks({admin}){
               <Card key={l.code} style={{padding:14}}>
                 <div style={{display:"flex", gap:12, alignItems:"flex-start", flexWrap:"wrap"}}>
                   <div style={{flex:"1 1 260px", minWidth:0}}>
-                    <div style={{fontWeight:600, fontSize:14}}>{l.name}{camp && <span style={{fontWeight:500, fontSize:12, color:"var(--ink-mute)"}}> · {camp.name}</span>}</div>
+                    <div style={{fontWeight:600, fontSize:14}}>{l.name}{camp && <span style={{fontWeight:500, fontSize:12, color:"var(--ink-mute)"}}> · {camp.name}</span>}{l.keyword && <span style={{marginLeft:6}}><EngChip color="var(--violet)" soft="var(--violet-soft)">{l.keyword}</EngChip></span>}</div>
                     <button onClick={()=>copy(short)} title="Copy link" style={{display:"flex", alignItems:"center", gap:5, marginTop:4, border:"none", background:"none", padding:0, cursor:"pointer", color:"var(--accent)", fontSize:12.5, fontWeight:600, maxWidth:"100%"}}>
                       <Icon name="link" size={13}/><span style={{overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>/go/{l.code}</span>
                     </button>
@@ -11191,7 +11416,7 @@ function EngLinks({admin}){
                 </div>
                 <div style={{display:"flex", gap:8, marginTop:10, flexWrap:"wrap"}}>
                   <Button size="sm" icon="link" onClick={()=>copy(short)}>Copy link</Button>
-                  {admin && <Button size="sm" icon="edit" onClick={()=>setForm({name:l.name, code:l.code, url:l.url, campaign:l.campaign, editing:l.code})}>Edit</Button>}
+                  {admin && <Button size="sm" icon="edit" onClick={()=>setForm({name:l.name, code:l.code, url:l.url, campaign:l.campaign, keyword:l.keyword||"", editing:l.code})}>Edit</Button>}
                   {admin && <ConfirmButton confirmLabel="Remove this link?" onConfirm={()=>del(l.code)}>Remove</ConfirmButton>}
                 </div>
               </Card>

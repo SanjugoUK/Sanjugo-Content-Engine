@@ -2084,6 +2084,7 @@ async function handleMakeCallback(request, env, ctx) {
   const now = new Date().toISOString();
 
   if (job.kind === "reviews" || job.kind === "reply_ig" || job.kind === "reply_review") return await engageCallback(env, job, body);
+  if (job.kind === "comp" || job.kind === "maps") return await insightsCallback(env, job, body);
   if (job.kind === "collab") {
     if (job.status !== "sent" || Date.now() - Date.parse(job.created_at) > 60 * 60e3) return json({ error: "Expired" }, 403);
     await ensureStudy(env);
@@ -3950,6 +3951,7 @@ async function ensureMcTables(env) {
     "CREATE INDEX IF NOT EXISTS mc_clicks_code ON mc_clicks (code, day)",
     "CREATE TABLE IF NOT EXISTS mc_fields (name TEXT PRIMARY KEY, label TEXT NOT NULL, value TEXT, draft TEXT, approvals TEXT, edited_by TEXT, updated_at TEXT, pushed_at TEXT, push_error TEXT, sort INTEGER NOT NULL DEFAULT 0, builtin INTEGER NOT NULL DEFAULT 0)",
   ]) await env.DB.prepare(sql).run();
+  try { await env.DB.prepare("ALTER TABLE mc_links ADD COLUMN keyword TEXT").run(); } catch (e) { /* already there */ }
   const n = await env.DB.prepare("SELECT COUNT(*) AS n FROM mc_fields").first();
   if (!n.n) {
     for (const [i, [name, label]] of MC_FIELDS_DEFAULT.entries())
@@ -4361,7 +4363,8 @@ async function manychatRoute(request, env, url, viewer, ctx) {
     ]);
     const byCode = new Map((counts || []).map((c) => [c.code, c]));
     return json({ goBase: mcBase(env, url) + "/go/", links: (links || []).map((l) => { const c = byCode.get(l.code) || {};
-      return { code: l.code, name: l.name, url: l.url, campaign: l.campaign || "", createdBy: l.created_by, createdAt: l.created_at, clicks: c.n || 0, clicks7: c.n7 || 0, people: c.people || 0 }; }) });
+      return { code: l.code, name: l.name, url: l.url, campaign: l.campaign || "", keyword: l.keyword || "", createdBy: l.created_by, createdAt: l.created_at, clicks: c.n || 0, clicks7: c.n7 || 0, people: c.people || 0 }; }),
+      keywords: (await engConfig(env)).keywords });
   }
   if (POST && path === "links/save") {
     adminOnly();
@@ -4373,9 +4376,10 @@ async function manychatRoute(request, env, url, viewer, ctx) {
     if (!/^[a-z0-9][a-z0-9-]{1,39}$/.test(code)) throw new HttpError(400, "Short name: 2–40 letters, numbers or dashes.");
     const existing = await env.DB.prepare("SELECT deleted FROM mc_links WHERE code = ?1").bind(code).first();
     if (existing && !existing.deleted && body.editing !== code) throw new HttpError(400, "That short name is taken — pick another.");
-    await env.DB.prepare(`INSERT INTO mc_links (code, name, url, campaign, created_by, created_at, deleted) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)
-      ON CONFLICT(code) DO UPDATE SET name = excluded.name, url = excluded.url, campaign = excluded.campaign, deleted = 0`)
-      .bind(code, name, dest, String(body.campaign || "").slice(0, 80) || null, by, now).run();
+    const keyword = String(body.keyword || "").trim().toUpperCase().slice(0, 40) || null;
+    await env.DB.prepare(`INSERT INTO mc_links (code, name, url, campaign, created_by, created_at, deleted, keyword) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)
+      ON CONFLICT(code) DO UPDATE SET name = excluded.name, url = excluded.url, campaign = excluded.campaign, deleted = 0, keyword = excluded.keyword`)
+      .bind(code, name, dest, String(body.campaign || "").slice(0, 80) || null, by, now, keyword).run();
     return json({ ok: true });
   }
   if (POST && path === "links/delete") {
@@ -4427,13 +4431,21 @@ async function ensureEngTables(env) {
     `CREATE TABLE IF NOT EXISTS eng_reviews (name TEXT PRIMARY KEY, location TEXT NOT NULL, branch TEXT, reviewer TEXT, photo TEXT, stars INTEGER, comment TEXT,
       created_at TEXT, updated_at TEXT, reply TEXT, reply_at TEXT, reply_state TEXT, reply_error TEXT, replied_by TEXT, first_seen TEXT NOT NULL, done_by TEXT, done_at TEXT)`,
     "CREATE INDEX IF NOT EXISTS eng_reviews_created ON eng_reviews (created_at)",
+    `CREATE TABLE IF NOT EXISTS eng_stories (media_id TEXT PRIMARY KEY, reach INTEGER, views INTEGER, replies INTEGER, exits INTEGER, taps_forward INTEGER, taps_back INTEGER,
+      posted_at TEXT, permalink TEXT, media_type TEXT, thumb TEXT, received_at TEXT NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS comp_accounts (username TEXT PRIMARY KEY, label TEXT, kind TEXT, name TEXT, pic TEXT, bio TEXT, website TEXT, followers INTEGER, follows INTEGER,
+      media_count INTEGER, error TEXT, checked_at TEXT, added_by TEXT, added_at TEXT NOT NULL)`,
+    "CREATE TABLE IF NOT EXISTS comp_snaps (username TEXT NOT NULL, day TEXT NOT NULL, followers INTEGER, media_count INTEGER, PRIMARY KEY (username, day))",
+    `CREATE TABLE IF NOT EXISTS comp_posts (username TEXT NOT NULL, post_id TEXT NOT NULL, permalink TEXT, caption TEXT, type TEXT, thumb TEXT, likes INTEGER, comments INTEGER,
+      views INTEGER, posted_at TEXT, updated_at TEXT NOT NULL, PRIMARY KEY (username, post_id))`,
+    "CREATE TABLE IF NOT EXISTS gbp_daily (location TEXT NOT NULL, day TEXT NOT NULL, metric TEXT NOT NULL, value INTEGER, PRIMARY KEY (location, day, metric))",
   ]) await env.DB.prepare(sql).run();
   engReady = true;
 }
 
 async function engConfig(env) {
   const c = (await kvGet(env, "engage_config")) || {};
-  return { igReply: c.igReply || "", reviewsPull: c.reviewsPull || "", reviewReply: c.reviewReply || "",
+  return { igReply: c.igReply || "", reviewsPull: c.reviewsPull || "", reviewReply: c.reviewReply || "", compPull: c.compPull || "", mapsPull: c.mapsPull || "",
     keywords: Array.isArray(c.keywords) ? c.keywords : [], updatedAt: c.updatedAt || null };
 }
 async function engInKey(env, rotate) {
@@ -4458,6 +4470,10 @@ async function engIn(request, env, url, ctx) {
   let b; try { b = JSON.parse(raw || "{}"); } catch (e) { return json({ error: "Send JSON" }, 400); }
   const now = new Date().toISOString();
   const field = String(b.field || "comments").slice(0, 30);
+  if (field === "story_insights" || field === "story_media") {
+    await kvSet(env, "engage_last_story", { at: now, field });
+    return json(await engStoryIn(env, b, field, now));
+  }
   await kvSet(env, "engage_last_in", { at: now, field });
   if (field !== "comments" && field !== "live_comments") return json({ ok: true, ignored: field });
   const id = String(b.id || "").trim();
@@ -4523,6 +4539,7 @@ async function engageCron(env) {
     env.DB.prepare("UPDATE eng_reviews SET reply_state = 'failed', reply_error = ?2 WHERE reply_state = 'sending' AND reply_at < ?1").bind(cutoff, ENG_REPLY_TIMEOUT_NOTE),
   ]);
   const cfg = await engConfig(env);
+  await insightsCron(env, cfg).catch((e) => console.error("insights cron failed", e));
   if (!cfg.reviewsPull) return;
   const { hour } = londonClock();
   if (hour < 8 || hour >= 22) return;
@@ -4676,13 +4693,14 @@ async function engageRoute(request, env, url, viewer, ctx) {
   // ---- Settings (admins) ----
   if (GET && path === "config") {
     if (!isAdmin) throw new HttpError(403, "Only admins can see this.");
-    const [cfg, key, lastIn, lastPull] = await Promise.all([engConfig(env), engInKey(env), kvGet(env, "engage_last_in"), kvGet(env, "engage_reviews_pull")]);
-    return json({ ...cfg, inLink: mcBase(env, url) + "/api/engage/in?key=" + key, lastIn, lastPull });
+    const [cfg, key, lastIn, lastPull, lastStory, lastComp, lastMaps] = await Promise.all([engConfig(env), engInKey(env), kvGet(env, "engage_last_in"), kvGet(env, "engage_reviews_pull"),
+      kvGet(env, "engage_last_story"), kvGet(env, "engage_comp_pull"), kvGet(env, "engage_maps_pull")]);
+    return json({ ...cfg, inLink: mcBase(env, url) + "/api/engage/in?key=" + key, lastIn, lastPull, lastStory, lastComp, lastMaps });
   }
   if (POST && path === "config") {
     if (!isAdmin) throw new HttpError(403, "Only admins can change this.");
     const cfg = await engConfig(env);
-    for (const k of ["igReply", "reviewsPull", "reviewReply"]) {
+    for (const k of ["igReply", "reviewsPull", "reviewReply", "compPull", "mapsPull"]) {
       if (body[k] === undefined) continue;
       const v = String(body[k] || "").trim();
       if (v && !MAKE_HOOK_RE.test(v)) throw new HttpError(400, "That doesn't look like a Make webhook address (https://hook.eu1.make.com/…).");
@@ -4752,6 +4770,34 @@ async function engageRoute(request, env, url, viewer, ctx) {
     return json({ ok: true });
   }
 
+  // ---- Keyword DM stats, stories, competitors, Google Maps ----
+  if (GET && path === "keywords") return json(await engKeywordStats(env, url));
+  if (GET && path === "stories") return json(await engStories(env, url));
+  if (GET && path === "comp") return json(await compList(env));
+  if (POST && path === "comp/add") {
+    if (!isAdmin) throw new HttpError(403, "Only admins can change the list.");
+    const u = String(body.username || "").trim().replace(/^@/, "").replace(/^https?:\/\/(www\.)?instagram\.com\//i, "").replace(/[/?#].*$/, "").toLowerCase();
+    if (!/^[a-z0-9._]{1,30}$/.test(u)) throw new HttpError(400, "That doesn't look like an Instagram username.");
+    if (u === ENG_IG_USERNAME) throw new HttpError(400, "That's us.");
+    const n = await env.DB.prepare("SELECT COUNT(*) AS n FROM comp_accounts").first();
+    if (n.n >= 20) throw new HttpError(400, "Watch up to 20 accounts — remove one first.");
+    const kind = body.kind === "creator" ? "creator" : "competitor";
+    await env.DB.prepare("INSERT INTO comp_accounts (username, label, kind, added_by, added_at) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(username) DO UPDATE SET label = excluded.label, kind = excluded.kind")
+      .bind(u, String(body.label || "").trim().slice(0, 60) || null, kind, by, now).run();
+    const cfg = await engConfig(env);
+    if (cfg.compPull) await compPull(env, "added", [u]).catch(() => {});
+    return json(await compList(env));
+  }
+  if (POST && path === "comp/remove") {
+    if (!isAdmin) throw new HttpError(403, "Only admins can change the list.");
+    const u = String(body.username || "");
+    await env.DB.batch(["comp_accounts", "comp_snaps", "comp_posts"].map((t) => env.DB.prepare(`DELETE FROM ${t} WHERE username = ?1`).bind(u)));
+    return json(await compList(env));
+  }
+  if (POST && path === "comp/pull") return json(await compPull(env, "manual"));
+  if (GET && path === "maps") return json(await mapsSummary(env));
+  if (POST && path === "maps/pull") return json(await mapsPull(env, "manual"));
+
   // ---- AI drafts + sending replies ----
   if (POST && path === "draft") {
     if (body.kind === "review") {
@@ -4814,4 +4860,246 @@ async function engPrune(env) {
   await ensureEngTables(env);
   const iso = new Date(Date.now() - MC_KEEP_DAYS * 86400e3).toISOString();
   await env.DB.prepare("DELETE FROM eng_comments WHERE received_at < ?1").bind(iso).run();
+}
+
+// ---------------------------------------------------------------------------
+// Insights (Engagement → Keywords / Insights): keyword DM stats, Instagram story stats, competitor & creator watch
+// and Google Maps actions per branch.
+// - Keywords: counted from the Instagram comments we already receive (eng_comments) against the "Left to ManyChat"
+//   keywords, next to clicks on tracked links that carry the same keyword (mc_links.keyword).
+// - Stories: "Engage · Instagram story stats" (Instagram story_insights event, sent when a story ends) posts to the
+//   same /api/engage/in link, then the story's details (field story_media).
+// - Competitors: "Engage · Competitors" webhook, called every 3 days (and on Check now) with a one-time token and the
+//   usernames; Make looks each up with Instagram business discovery and answers on /api/make/callback (kind comp).
+// - Google Maps: "Engage · Google Maps stats" webhook, called every Monday (and on Check now); Make asks the Business
+//   Profile Performance API for each branch's daily numbers and answers on /api/make/callback (kind maps).
+// ---------------------------------------------------------------------------
+const MAPS_METRICS = ["CALL_CLICKS", "BUSINESS_DIRECTION_REQUESTS", "WEBSITE_CLICKS", "BUSINESS_BOOKINGS", "BUSINESS_FOOD_ORDERS", "BUSINESS_FOOD_MENU_CLICKS",
+  "BUSINESS_IMPRESSIONS_MOBILE_MAPS", "BUSINESS_IMPRESSIONS_MOBILE_SEARCH", "BUSINESS_IMPRESSIONS_DESKTOP_MAPS", "BUSINESS_IMPRESSIONS_DESKTOP_SEARCH"];
+const MAPS_LOCATIONS = Object.fromEntries(Object.entries(GBP_LOCATIONS).map(([k, v]) => ["locations/" + v, k]));
+const COMP_EVERY_MS = 3 * 86400e3 - 2 * 3600e3;
+
+async function engKeywordStats(env, url) {
+  await ensureEngTables(env); await ensureMcTables(env); await ensureMakeTables(env);
+  const days = Math.min(365, Math.max(1, Number(url.searchParams.get("days")) || 30));
+  const since = new Date(Date.now() - days * 86400e3).toISOString(), sinceDay = londonDay(Date.now() - (days - 1) * 86400e3);
+  const cfg = await engConfig(env);
+  const { results: rows } = await env.DB.prepare("SELECT media_id, username, text FROM eng_comments WHERE mine = 0 AND received_at >= ?1 ORDER BY received_at DESC LIMIT 20000").bind(since).all();
+  const by = new Map();
+  for (const r of rows || []) {
+    const k = engKeywordHit(r.text || "", cfg.keywords);
+    if (!k) continue;
+    if (!by.has(k)) by.set(k, { keyword: k, comments: 0, people: new Set(), posts: new Map() });
+    const e = by.get(k); e.comments++; if (r.username) e.people.add(r.username);
+    e.posts.set(r.media_id || "?", (e.posts.get(r.media_id || "?") || 0) + 1);
+  }
+  const [{ results: links }, { results: clicks }] = await Promise.all([
+    env.DB.prepare("SELECT code, name, keyword FROM mc_links WHERE deleted = 0 AND keyword IS NOT NULL AND keyword != ''").all(),
+    env.DB.prepare("SELECT code, COUNT(*) AS n, COUNT(DISTINCT sub_id) AS people FROM mc_clicks WHERE day >= ?1 GROUP BY code").bind(sinceDay).all(),
+  ]);
+  const clickBy = new Map((clicks || []).map((c) => [c.code, c]));
+  const mediaIds = [...new Set([...by.values()].flatMap((e) => [...e.posts.keys()]).filter((m) => m !== "?"))].slice(0, 90);
+  const postInfo = new Map();
+  if (mediaIds.length) {
+    const { results } = await env.DB.prepare(`SELECT post_id, permalink, caption, thumb, published_at FROM social_posts WHERE platform = 'instagram' AND post_id IN (${mediaIds.map(() => "?").join(",")})`).bind(...mediaIds).all();
+    for (const p of results || []) postInfo.set(p.post_id, p);
+  }
+  const all = new Set([...cfg.keywords, ...by.keys(), ...(links || []).map((l) => String(l.keyword).toUpperCase())]);
+  const out = [...all].map((k) => {
+    const e = by.get(k) || { comments: 0, people: new Set(), posts: new Map() };
+    const ls = (links || []).filter((l) => String(l.keyword).toUpperCase() === k).map((l) => ({ code: l.code, name: l.name, clicks: (clickBy.get(l.code) || {}).n || 0, people: (clickBy.get(l.code) || {}).people || 0 }));
+    const clicksN = ls.reduce((a, l) => a + l.clicks, 0);
+    // Rate = people who clicked ÷ people who commented (falls back to clicks when ManyChat can't pass the contact id). Never above 100%.
+    const clickers = ls.reduce((a, l) => a + l.people, 0) || clicksN;
+    return { keyword: k, comments: e.comments, people: e.people.size, links: ls, clicks: clicksN, clickRate: e.people.size && ls.length ? Math.min(100, Math.round((clickers / e.people.size) * 100)) : null,
+      posts: [...e.posts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([m, n]) => { const p = postInfo.get(m) || {};
+        return { mediaId: m, comments: n, permalink: p.permalink || "", caption: (p.caption || "").slice(0, 120), thumb: p.thumb || "", at: p.published_at || null }; }) };
+  }).sort((a, b) => b.comments - a.comments || a.keyword.localeCompare(b.keyword));
+  return { days, keywords: out, configured: cfg.keywords };
+}
+
+async function engStoryIn(env, b, field, now) {
+  await ensureEngTables(env);
+  const id = String(b.media_id || b.id || "").trim();
+  if (!/^\d{5,40}$/.test(id)) return { error: "No story id" };
+  const n = (v) => (v === undefined || v === null || v === "" ? null : num(v));
+  if (field === "story_insights") {
+    await env.DB.prepare(`INSERT INTO eng_stories (media_id, reach, views, replies, exits, taps_forward, taps_back, received_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+      ON CONFLICT(media_id) DO UPDATE SET reach = excluded.reach, views = excluded.views, replies = excluded.replies, exits = excluded.exits,
+        taps_forward = excluded.taps_forward, taps_back = excluded.taps_back, received_at = excluded.received_at`)
+      .bind(id, n(b.reach), n(b.impressions ?? b.views), n(b.replies), n(b.exits), n(b.taps_forward), n(b.taps_back), now).run();
+  } else {
+    const thumb = dec(b.thumb || b.media_url || "");
+    await env.DB.prepare(`INSERT INTO eng_stories (media_id, posted_at, permalink, media_type, thumb, received_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+      ON CONFLICT(media_id) DO UPDATE SET posted_at = excluded.posted_at, permalink = excluded.permalink, media_type = excluded.media_type, thumb = COALESCE(NULLIF(excluded.thumb, ''), eng_stories.thumb)`)
+      .bind(id, toIsoDate(b.timestamp), String(b.permalink || "").slice(0, 300) || null, String(b.media_type || "").slice(0, 20) || null, /^https:\/\//.test(thumb) ? thumb.slice(0, 1500) : null, now).run();
+  }
+  return { ok: true };
+}
+
+async function engStories(env, url) {
+  await ensureEngTables(env);
+  const days = Math.min(365, Math.max(1, Number(url.searchParams.get("days")) || 60));
+  const since = new Date(Date.now() - days * 86400e3).toISOString();
+  const { results } = await env.DB.prepare("SELECT * FROM eng_stories WHERE COALESCE(posted_at, received_at) >= ?1 ORDER BY COALESCE(posted_at, received_at) DESC LIMIT 200").bind(since).all();
+  const stories = (results || []).map((r) => ({ id: r.media_id, reach: r.reach, views: r.views, replies: r.replies, exits: r.exits, tapsForward: r.taps_forward, tapsBack: r.taps_back,
+    postedAt: r.posted_at || r.received_at, permalink: r.permalink || "", type: r.media_type || "", thumb: r.thumb || "" }));
+  const withReach = stories.filter((s) => s.reach != null);
+  const avg = (k) => withReach.length ? Math.round(withReach.reduce((a, s) => a + (s[k] || 0), 0) / withReach.length) : null;
+  return { days, stories, last: await kvGet(env, "engage_last_story"), avg: { reach: avg("reach"), replies: avg("replies"), exits: avg("exits"), tapsForward: avg("tapsForward") } };
+}
+
+// ---- Competitor & creator watch ----
+async function compPull(env, trigger, only) {
+  const cfg = await engConfig(env);
+  if (!cfg.compPull) throw new HttpError(400, "Add the Competitors webhook in Settings → Engagement first.");
+  await ensureEngTables(env); await ensureMakeTables(env);
+  const users = only || ((await env.DB.prepare("SELECT username FROM comp_accounts ORDER BY added_at").all()).results || []).map((r) => r.username);
+  if (!users.length) throw new HttpError(400, "Add an account to watch first.");
+  const id = "comp_" + crypto.randomUUID().slice(0, 12), token = crypto.randomUUID() + crypto.randomUUID().slice(0, 8), now = new Date().toISOString();
+  await env.DB.prepare("INSERT INTO make_jobs (id, kind, token, status, trigger, detail, created_at, updated_at) VALUES (?1, 'comp', ?2, 'sent', ?3, '{}', ?4, ?4)").bind(id, token, trigger, now).run();
+  if (!only) await kvSet(env, "engage_comp_pull", { at: now, trigger });
+  try { await callHook(cfg.compPull, { token, usernames: users.join(",") }); }
+  catch (e) { if (!only) await kvSet(env, "engage_comp_pull", { at: now, trigger, error: e.message }); throw e; }
+  return { requestedAt: now, accounts: users.length };
+}
+
+async function compList(env) {
+  await ensureEngTables(env);
+  const { results: accts } = await env.DB.prepare("SELECT * FROM comp_accounts ORDER BY COALESCE(followers, 0) DESC").all();
+  const weekAgo = londonDay(Date.now() - 7 * 86400e3), monthAgo = londonDay(Date.now() - 30 * 86400e3);
+  const since30 = new Date(Date.now() - 30 * 86400e3).toISOString();
+  const out = [];
+  for (const a of accts || []) {
+    const [w, m, posts] = await Promise.all([
+      env.DB.prepare("SELECT followers FROM comp_snaps WHERE username = ?1 AND day <= ?2 ORDER BY day DESC LIMIT 1").bind(a.username, weekAgo).first(),
+      env.DB.prepare("SELECT followers FROM comp_snaps WHERE username = ?1 AND day <= ?2 ORDER BY day DESC LIMIT 1").bind(a.username, monthAgo).first(),
+      env.DB.prepare("SELECT * FROM comp_posts WHERE username = ?1 ORDER BY posted_at DESC LIMIT 12").bind(a.username).all(),
+    ]);
+    const ps = (posts.results || []).map((p) => ({ id: p.post_id, permalink: p.permalink || "", caption: p.caption || "", type: p.type || "", thumb: p.thumb || "",
+      likes: p.likes || 0, comments: p.comments || 0, views: p.views || 0, at: p.posted_at }));
+    const avgLikes = ps.length ? Math.round(ps.reduce((s, p) => s + p.likes, 0) / ps.length) : null;
+    const avgComments = ps.length ? Math.round(ps.reduce((s, p) => s + p.comments, 0) / ps.length) : null;
+    out.push({ username: a.username, label: a.label || "", kind: a.kind || "competitor", name: a.name || "", pic: a.pic || "", bio: a.bio || "", website: a.website || "",
+      followers: a.followers, mediaCount: a.media_count, error: a.error || null, checkedAt: a.checked_at,
+      followers7: w && a.followers != null ? a.followers - w.followers : null, followers30: m && a.followers != null ? a.followers - m.followers : null,
+      posts30: ps.filter((p) => p.at && p.at >= since30).length, avgLikes, avgComments,
+      engagement: a.followers && ps.length ? Math.round(((avgLikes + avgComments) / a.followers) * 10000) / 100 : null,
+      top: ps.slice().sort((x, y) => (y.likes + y.comments) - (x.likes + x.comments))[0] || null, posts: ps });
+  }
+  return { accounts: out, last: await kvGet(env, "engage_comp_pull") };
+}
+
+// ---- Google Maps actions per branch ----
+async function mapsPull(env, trigger) {
+  const cfg = await engConfig(env);
+  if (!cfg.mapsPull) throw new HttpError(400, "Add the Google Maps webhook in Settings → Engagement first.");
+  await ensureEngTables(env); await ensureMakeTables(env);
+  const id = "maps_" + crypto.randomUUID().slice(0, 12), token = crypto.randomUUID() + crypto.randomUUID().slice(0, 8), now = new Date().toISOString();
+  // Google's numbers arrive a few days late, so ask for the last 60 days each time (older days get corrected too).
+  const end = new Date(Date.now() - 86400e3), start = new Date(Date.now() - 60 * 86400e3);
+  await env.DB.prepare("INSERT INTO make_jobs (id, kind, token, status, trigger, detail, created_at, updated_at) VALUES (?1, 'maps', ?2, 'sent', ?3, '{}', ?4, ?4)").bind(id, token, trigger, now).run();
+  await kvSet(env, "engage_maps_pull", { at: now, trigger });
+  try {
+    await callHook(cfg.mapsPull, { token, locations: Object.keys(MAPS_LOCATIONS).join(","), metrics: MAPS_METRICS.join(","),
+      sy: start.getUTCFullYear(), sm: start.getUTCMonth() + 1, sd: start.getUTCDate(), ey: end.getUTCFullYear(), em: end.getUTCMonth() + 1, ed: end.getUTCDate() });
+  } catch (e) { await kvSet(env, "engage_maps_pull", { at: now, trigger, error: e.message }); throw e; }
+  return { requestedAt: now };
+}
+
+async function mapsSummary(env) {
+  await ensureEngTables(env);
+  const from = londonDay(Date.now() - 70 * 86400e3);
+  const { results } = await env.DB.prepare("SELECT location, day, metric, value FROM gbp_daily WHERE day >= ?1").bind(from).all();
+  const lastDay = (results || []).reduce((m, r) => (r.day > m ? r.day : m), "");
+  const dayShift = (d, n) => { const t = new Date(d + "T12:00:00Z"); t.setUTCDate(t.getUTCDate() + n); return t.toISOString().slice(0, 10); };
+  const cur0 = lastDay ? dayShift(lastDay, -27) : "", prev0 = lastDay ? dayShift(lastDay, -55) : "", prev1 = lastDay ? dayShift(lastDay, -28) : "";
+  const group = { calls: ["CALL_CLICKS"], directions: ["BUSINESS_DIRECTION_REQUESTS"], website: ["WEBSITE_CLICKS"], bookings: ["BUSINESS_BOOKINGS"],
+    orders: ["BUSINESS_FOOD_ORDERS"], menu: ["BUSINESS_FOOD_MENU_CLICKS"], views: MAPS_METRICS.filter((m) => m.startsWith("BUSINESS_IMPRESSIONS")) };
+  const branches = {};
+  for (const [loc, branch] of Object.entries(MAPS_LOCATIONS)) {
+    const rows = (results || []).filter((r) => r.location === loc);
+    const sum = (metrics, a, b) => rows.filter((r) => metrics.includes(r.metric) && r.day >= a && r.day <= b).reduce((s, r) => s + (r.value || 0), 0);
+    const totals = {}, before = {};
+    for (const [k, ms] of Object.entries(group)) { totals[k] = lastDay ? sum(ms, cur0, lastDay) : 0; before[k] = lastDay ? sum(ms, prev0, prev1) : 0; }
+    const actionsMetrics = [...group.calls, ...group.directions, ...group.website, ...group.bookings, ...group.orders, ...group.menu];
+    const weekly = [];
+    for (let i = 7; i >= 0; i--) { const b = lastDay ? dayShift(lastDay, -7 * i) : "", a = lastDay ? dayShift(b, -6) : ""; weekly.push({ end: b, actions: lastDay ? sum(actionsMetrics, a, b) : 0, views: lastDay ? sum(group.views, a, b) : 0 }); }
+    branches[branch] = { totals, before, weekly, hasData: rows.length > 0 };
+  }
+  return { lastDay: lastDay || null, from: cur0 || null, branches, last: await kvGet(env, "engage_maps_pull") };
+}
+
+async function insightsCron(env, cfg) {
+  const { hour, day } = londonClock();
+  if (cfg.compPull && hour >= 7 && hour < 9) {
+    const last = await kvGet(env, "engage_comp_pull");
+    const n = await env.DB.prepare("SELECT COUNT(*) AS n FROM comp_accounts").first().catch(() => ({ n: 0 }));
+    if (n && n.n && (!last || Date.now() - Date.parse(last.at || 0) > COMP_EVERY_MS)) await compPull(env, "auto");
+  }
+  if (cfg.mapsPull && hour >= 8 && hour < 10 && new Date(day + "T12:00:00Z").getUTCDay() === 1) {
+    const last = await kvGet(env, "engage_maps_pull");
+    if (!last || Date.now() - Date.parse(last.at || 0) > 3 * 86400e3) await mapsPull(env, "auto");
+  }
+}
+
+async function insightsCallback(env, job, body) {
+  await ensureEngTables(env);
+  const now = new Date().toISOString();
+  if (Date.now() - Date.parse(job.created_at) > 60 * 60e3) return json({ error: "Expired" }, 403);
+  if (job.kind === "comp") {
+    const u = String(body.username || "").toLowerCase();
+    if (!/^[a-z0-9._]{1,30}$/.test(u)) return json({ error: "Unknown account" }, 400);
+    const known = await env.DB.prepare("SELECT 1 FROM comp_accounts WHERE username = ?1").bind(u).first();
+    if (!known) return json({ ok: true, ignored: true });
+    if (body.error) {
+      await env.DB.prepare("UPDATE comp_accounts SET error = ?2, checked_at = ?3 WHERE username = ?1").bind(u, dec(body.error).slice(0, 200), now).run();
+      return json({ ok: true });
+    }
+    const p = body.profile || {};
+    const followers = p.followers === "" || p.followers == null ? null : num(p.followers);
+    await env.DB.prepare(`UPDATE comp_accounts SET name = ?2, pic = ?3, bio = ?4, website = ?5, followers = ?6, follows = ?7, media_count = ?8, error = NULL, checked_at = ?9 WHERE username = ?1`)
+      .bind(u, dec(p.name).slice(0, 80), /^https:\/\//.test(dec(p.pic)) ? dec(p.pic).slice(0, 1500) : null, dec(p.bio).slice(0, 400), dec(p.website).slice(0, 200),
+        followers, num(p.follows), num(p.media), now).run();
+    if (followers != null) await env.DB.prepare("INSERT INTO comp_snaps (username, day, followers, media_count) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(username, day) DO UPDATE SET followers = excluded.followers, media_count = excluded.media_count")
+      .bind(u, londonDay(), followers, num(p.media)).run();
+    const posts = Array.isArray(body.posts) ? body.posts.slice(0, 30) : [];
+    for (const x of posts) {
+      if (!x || !x.id) continue;
+      await env.DB.prepare(`INSERT INTO comp_posts (username, post_id, permalink, caption, type, thumb, likes, comments, views, posted_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+        ON CONFLICT(username, post_id) DO UPDATE SET permalink = excluded.permalink, caption = excluded.caption, type = excluded.type, thumb = COALESCE(NULLIF(excluded.thumb, ''), comp_posts.thumb),
+          likes = excluded.likes, comments = excluded.comments, views = excluded.views, posted_at = excluded.posted_at, updated_at = excluded.updated_at`)
+        .bind(u, String(x.id).slice(0, 40), String(x.permalink || "").slice(0, 300), dec(x.caption).slice(0, 600), String(x.mediaType || "").slice(0, 20), dec(x.thumb).slice(0, 1500),
+          num(x.likes), num(x.comments), num(x.views), toIsoDate(x.at), now).run();
+    }
+    await env.DB.prepare("UPDATE make_jobs SET status = 'done', updated_at = ?2 WHERE id = ?1").bind(job.id, now).run();
+    return json({ ok: true, posts: posts.length });
+  }
+  // maps
+  const location = String(body.location || "");
+  if (!MAPS_LOCATIONS[location]) return json({ error: "Unknown location" }, 400);
+  if (body.error) {
+    const last = (await kvGet(env, "engage_maps_pull")) || { at: now };
+    last.error = MAPS_LOCATIONS[location].replace(/^./, (c) => c.toUpperCase()) + ": " + dec(body.error).slice(0, 160);
+    await kvSet(env, "engage_maps_pull", last);
+    return json({ ok: true });
+  }
+  let data = body.data;
+  if (typeof data === "string") { try { data = JSON.parse(data); } catch (e) { data = null; } }
+  const series = [];
+  for (const m of (data && data.multiDailyMetricTimeSeries) || []) for (const s of m.dailyMetricTimeSeries || []) series.push(s);
+  const stmts = [];
+  for (const s of series) {
+    if (!MAPS_METRICS.includes(s.dailyMetric)) continue;
+    for (const dv of ((s.timeSeries || {}).datedValues || [])) {
+      const d = dv.date || {};
+      if (!d.year || !d.month || !d.day) continue;
+      const day = `${d.year}-${String(d.month).padStart(2, "0")}-${String(d.day).padStart(2, "0")}`;
+      stmts.push(env.DB.prepare("INSERT INTO gbp_daily (location, day, metric, value) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(location, day, metric) DO UPDATE SET value = excluded.value")
+        .bind(location, day, s.dailyMetric, num(dv.value)));
+    }
+  }
+  for (let i = 0; i < stmts.length; i += 90) await env.DB.batch(stmts.slice(i, i + 90));
+  await env.DB.prepare("UPDATE make_jobs SET status = 'done', updated_at = ?2 WHERE id = ?1").bind(job.id, now).run();
+  return json({ ok: true, values: stmts.length });
 }

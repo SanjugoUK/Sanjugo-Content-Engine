@@ -12,11 +12,14 @@ export default {
       // Nightly stats from Make (skipped quietly if the analytics webhook isn't set up yet).
       ctx.waitUntil(makeConfig(env).then((c) => pullPlatforms(c).length && triggerAnalyticsPull(env, { trigger: "nightly" })).catch((e) => console.error("analytics pull failed", e)));
       ctx.waitUntil(refreshCollabs(env).catch((e) => console.error("collab refresh failed", e)));
+      ctx.waitUntil(mcPrune(env).catch((e) => console.error("manychat prune failed", e)));
+      ctx.waitUntil(engPrune(env).catch((e) => console.error("engage prune failed", e)));
     } else {
       ctx.waitUntil(autoPublishDue(env).catch((e) => console.error("auto-publish failed", e)));
       ctx.waitUntil(expireStuckJobs(env).catch((e) => console.error("expire jobs failed", e)));
       ctx.waitUntil(remindPendingApprovals(env).catch((e) => console.error("approval reminders failed", e)));
       ctx.waitUntil(dailyDigest(env).catch((e) => console.error("daily digest failed", e)));
+      ctx.waitUntil(engageCron(env).catch((e) => console.error("engage cron failed", e)));
     }
   },
 
@@ -28,6 +31,19 @@ export default {
     // Make reports results here from its own servers; it proves itself with the one-time job token instead of a sign-in.
     if (url.pathname === "/api/make/callback") {
       try { return await makeRoute(request, env, url, viewer, ctx); } catch (e) { return json({ error: e.message || "Make error" }, e.status || 500); }
+    }
+    // ManyChat's automations report here from ManyChat's servers; the hook key in the link proves it's our ManyChat.
+    if (url.pathname === "/api/manychat/hook") {
+      try { return await mcHook(request, env, url, ctx); } catch (e) { return json({ error: e.message || "Hook error" }, e.status || 500); }
+    }
+    // Instagram comments from Make's "Engage · Instagram comments" scenario; the key in the link proves it's ours.
+    if (url.pathname === "/api/engage/in" && request.method === "POST") {
+      try { return await engIn(request, env, url, ctx); } catch (e) { return json({ error: e.message || "Engage error" }, e.status || 500); }
+    }
+    // Tracked links in DMs (/go/<short name>) — guests open these, so no sign-in.
+    const goLink = request.method === "GET" && url.pathname.match(/^\/go\/([A-Za-z0-9-]{2,40})\/?$/);
+    if (goLink) {
+      try { return await mcGo(request, env, url, goLink[1], ctx); } catch (e) { return new Response(null, { status: 302, headers: { Location: "https://sanjugo.co.uk/" } }); }
     }
     // Make, Instagram, Facebook, YouTube and Google fetch post files by link when publishing — they can't sign in.
     // These links are long random keys (R2 object / Drive file ids), so they're safe to leave unsigned.
@@ -150,6 +166,13 @@ export default {
       } catch (e) {
         return json({ error: e.message || "Workspace error" }, e.status || 500);
       }
+    }
+
+    if (url.pathname === "/api/engage" || url.pathname.startsWith("/api/engage/")) {
+      try { return await engageRoute(request, env, url, viewer, ctx); } catch (e) { return json({ error: e.message || "Engagement error" }, e.status || 500); }
+    }
+    if (url.pathname === "/api/manychat" || url.pathname.startsWith("/api/manychat/")) {
+      try { return await manychatRoute(request, env, url, viewer, ctx); } catch (e) { return json({ error: e.message || "ManyChat error" }, e.status || 500); }
     }
 
     if (url.pathname.startsWith("/api/music/") && request.method === "GET") {
@@ -2060,6 +2083,7 @@ async function handleMakeCallback(request, env, ctx) {
   if (!job) return json({ error: "Unknown or expired token" }, 403);
   const now = new Date().toISOString();
 
+  if (job.kind === "reviews" || job.kind === "reply_ig" || job.kind === "reply_review") return await engageCallback(env, job, body);
   if (job.kind === "collab") {
     if (job.status !== "sent" || Date.now() - Date.parse(job.created_at) > 60 * 60e3) return json({ error: "Expired" }, 403);
     await ensureStudy(env);
@@ -3892,4 +3916,902 @@ async function rawAfterPut(env, r, up) {
   if (up.status === 404 || up.status === 410) { r.status = "expired"; await rawSave(env, r); throw new HttpError(410, "The upload expired — start this file again."); }
   const t = await up.text().catch(() => "");
   throw new HttpError(502, "Google Drive didn't take that piece (" + up.status + ") " + t.slice(0, 120));
+}
+
+// ---------------------------------------------------------------------------
+// ManyChat — the Engagement section.
+// ManyChat runs Sanjugo's Instagram DMs and comment keywords. Its API can't build automations or read the inbox, so
+// ManyChat's own automations tell us what happened (an "External Request" step posting to /api/manychat/hook) and
+// Creator Studio keeps the counts, the people list, the "needs a person" queue and tracked links (/go/<code>).
+// The texts automations send (current offer, booking link…) are ManyChat "bot fields" that Creator Studio writes
+// once every reviewer has approved the change. The API key is a Cloudflare secret (MANYCHAT_API_KEY); the hook's own
+// key lives in app_kv (mc_hook_secret) and is shown to admins in Settings.
+// ---------------------------------------------------------------------------
+const MC_API = "https://api.manychat.com";
+const MC_TYPES = ["keyword", "human", "story_mention", "story_reply", "welcome", "dm", "other"];
+const MC_FIELDS_DEFAULT = [
+  ["sj_offer", "Current offer"], ["sj_offer_link", "Offer link"], ["sj_booking_link", "Booking link"], ["sj_menu_link", "Menu link"],
+  ["sj_hours", "Opening hours"], ["sj_branches", "Our branches"], ["sj_special", "This week's special"],
+];
+const MC_KEEP_DAYS = 400; // people, messages and clicks older than this are deleted in the nightly clean-up
+const MC_URGENT = /allerg|anaphyla|gluten|coeliac|celiac|\bnuts?\b|peanut|sesame|shellfish|lactose|dairy.free|food poisoning|\bsick\b|ill after|complain|refund|disgusting/i;
+let mcReady = false;
+
+async function ensureMcTables(env) {
+  if (mcReady) return;
+  for (const sql of [
+    "CREATE TABLE IF NOT EXISTS mc_events (id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT NOT NULL, sub_id TEXT, automation TEXT, keyword TEXT, text TEXT, day TEXT NOT NULL, created_at TEXT NOT NULL)",
+    "CREATE INDEX IF NOT EXISTS mc_events_day ON mc_events (day)",
+    "CREATE INDEX IF NOT EXISTS mc_events_sub ON mc_events (sub_id)",
+    "CREATE TABLE IF NOT EXISTS mc_people (sub_id TEXT PRIMARY KEY, name TEXT, username TEXT, pic TEXT, chat_url TEXT, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, events INTEGER NOT NULL DEFAULT 0, keywords TEXT, tags TEXT)",
+    "CREATE TABLE IF NOT EXISTS mc_handover (id TEXT PRIMARY KEY, sub_id TEXT, reason TEXT, text TEXT, urgent INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL, created_at TEXT NOT NULL, done_at TEXT, done_by TEXT)",
+    "CREATE TABLE IF NOT EXISTS mc_links (code TEXT PRIMARY KEY, name TEXT NOT NULL, url TEXT NOT NULL, campaign TEXT, created_by TEXT, created_at TEXT NOT NULL, deleted INTEGER NOT NULL DEFAULT 0)",
+    "CREATE TABLE IF NOT EXISTS mc_clicks (id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT NOT NULL, sub_id TEXT, day TEXT NOT NULL, created_at TEXT NOT NULL)",
+    "CREATE INDEX IF NOT EXISTS mc_clicks_code ON mc_clicks (code, day)",
+    "CREATE TABLE IF NOT EXISTS mc_fields (name TEXT PRIMARY KEY, label TEXT NOT NULL, value TEXT, draft TEXT, approvals TEXT, edited_by TEXT, updated_at TEXT, pushed_at TEXT, push_error TEXT, sort INTEGER NOT NULL DEFAULT 0, builtin INTEGER NOT NULL DEFAULT 0)",
+  ]) await env.DB.prepare(sql).run();
+  const n = await env.DB.prepare("SELECT COUNT(*) AS n FROM mc_fields").first();
+  if (!n.n) {
+    for (const [i, [name, label]] of MC_FIELDS_DEFAULT.entries())
+      await env.DB.prepare("INSERT OR IGNORE INTO mc_fields (name, label, value, sort, builtin) VALUES (?1, ?2, '', ?3, 1)").bind(name, label, i).run();
+  }
+  mcReady = true;
+}
+
+async function mcCall(env, method, path, body) {
+  if (!env.MANYCHAT_API_KEY) throw new HttpError(400, "ManyChat isn't connected yet — the API key hasn't been added.");
+  const res = await fetch(MC_API + path, {
+    method, headers: { Authorization: "Bearer " + env.MANYCHAT_API_KEY, Accept: "application/json", ...(body ? { "Content-Type": "application/json" } : {}) },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok || d.status !== "success") {
+    const msgs = d.details && Array.isArray(d.details.messages) ? d.details.messages.map((m) => m && m.message).filter(Boolean).join("; ") : "";
+    const why = String(d.message || msgs || "error " + res.status).slice(0, 200);
+    if (res.status === 401 || res.status === 403) throw new HttpError(400, "ManyChat didn't accept the API key (" + why + ").");
+    throw new HttpError(502, "ManyChat: " + why);
+  }
+  return d.data;
+}
+
+function mcSame(a, b) {
+  a = String(a || ""); b = String(b || "");
+  if (!a || a.length !== b.length) return false;
+  let x = 0;
+  for (let i = 0; i < a.length; i++) x |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return x === 0;
+}
+async function mcHookSecret(env, rotate) {
+  let s = rotate ? null : await kvGet(env, "mc_hook_secret");
+  if (!s) {
+    const b = new Uint8Array(18); crypto.getRandomValues(b);
+    s = [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
+    await kvSet(env, "mc_hook_secret", s);
+  }
+  return s;
+}
+function mcBase(env, url) {
+  return /^(localhost|127\.0\.0\.1)$/.test(url.hostname) ? url.origin : String(env.PUBLIC_URL || url.origin).replace(/\/$/, "");
+}
+
+// What an automation sent. Works with ManyChat's "full contact data" body, a hand-made body, or just ?key=…&type=… in the link.
+function mcPick(body, url) {
+  body = body && typeof body === "object" && !Array.isArray(body) ? body : {};
+  const q = (k) => (url ? url.searchParams.get(k) : null);
+  const c = (typeof body.contact === "object" && body.contact) || (typeof body.subscriber === "object" && body.subscriber) || body;
+  const s = (v, n) => (v == null || typeof v === "object" ? "" : String(v)).trim().slice(0, n);
+  const id = s(c.id ?? body.subscriber_id ?? body.contact_id ?? body.user_id ?? q("id"), 30);
+  const keyword = s(body.keyword || q("keyword"), 40).toUpperCase();
+  let type = s(body.type || q("type"), 30).toLowerCase().replace(/[\s-]+/g, "_");
+  if (!type) type = keyword ? "keyword" : "dm";
+  if (!MC_TYPES.includes(type)) type = "other";
+  const tags = Array.isArray(c.tags) ? c.tags.map((t) => s(t && typeof t === "object" ? t.name : t, 40)).filter(Boolean).slice(0, 30) : [];
+  return {
+    subId: /^\d{1,30}$/.test(id) ? id : null, type, keyword,
+    automation: s(body.automation || q("automation"), 80),
+    reason: s(body.reason || q("reason"), 120),
+    text: s(body.text || body.message || c.last_input_text, 600),
+    name: s(c.name || [c.first_name, c.last_name].filter(Boolean).join(" "), 80),
+    username: s(c.ig_username || body.ig_username || body.username, 40).replace(/^@/, ""),
+    pic: /^https:\/\//.test(String(c.profile_pic || "")) ? s(c.profile_pic, 800) : "",
+    chatUrl: /^https:\/\/([a-z0-9-]+\.)*manychat\.com\//i.test(String(c.live_chat_url || "")) ? s(c.live_chat_url, 300) : "",
+    tags,
+  };
+}
+
+// POST /api/manychat/hook?key=… — called by ManyChat's servers (no sign-in; the key proves it's our ManyChat).
+async function mcHook(request, env, url, ctx) {
+  await ensureMcTables(env);
+  const secret = await kvGet(env, "mc_hook_secret");
+  const given = request.headers.get("X-Sanjugo-Key") || url.searchParams.get("key");
+  if (!secret || !mcSame(given, secret)) return json({ error: "Wrong key" }, 401);
+  let body = {};
+  if (request.method === "POST") {
+    const raw = await request.text();
+    if (raw.length > 100000) return json({ error: "Too big" }, 413);
+    try { body = raw.trim() ? JSON.parse(raw) : {}; } catch (e) { return json({ error: "Send JSON" }, 400); }
+  }
+  const ev = mcPick(body, url);
+  const now = new Date().toISOString();
+  await env.DB.prepare("INSERT INTO mc_events (type, sub_id, automation, keyword, text, day, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)")
+    .bind(ev.type, ev.subId, ev.automation || null, ev.keyword || null, ev.text || null, londonDay(), now).run();
+  if (ev.subId) await mcUpsertPerson(env, ev, now);
+  const handover = ev.type === "human" ? await mcOpenHandover(env, ev, now) : null;
+  await kvSet(env, "mc_last_event", { at: now, type: ev.type, automation: ev.automation || ev.keyword || "" });
+  // ManyChat waits at most 10 seconds, so name look-ups, Team Chat and phone alerts happen after we've answered.
+  ctx.waitUntil(mcAfterEvent(env, ev, handover).catch((e) => console.error("manychat follow-up failed", e)));
+  return json({ ok: true });
+}
+
+async function mcUpsertPerson(env, ev, now) {
+  const row = await env.DB.prepare("SELECT keywords, tags FROM mc_people WHERE sub_id = ?1").bind(ev.subId).first();
+  let kws = []; try { kws = row ? JSON.parse(row.keywords || "[]") : []; } catch (e) {}
+  if (ev.keyword && !kws.includes(ev.keyword)) kws.push(ev.keyword);
+  let tags = ev.tags; if (!tags.length && row) { try { tags = JSON.parse(row.tags || "[]"); } catch (e) {} }
+  await env.DB.prepare(`INSERT INTO mc_people (sub_id, name, username, pic, chat_url, first_seen, last_seen, events, keywords, tags) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, 1, ?7, ?8)
+    ON CONFLICT(sub_id) DO UPDATE SET name = COALESCE(NULLIF(excluded.name, ''), mc_people.name), username = COALESCE(NULLIF(excluded.username, ''), mc_people.username),
+      pic = COALESCE(NULLIF(excluded.pic, ''), mc_people.pic), chat_url = COALESCE(NULLIF(excluded.chat_url, ''), mc_people.chat_url),
+      last_seen = excluded.last_seen, events = mc_people.events + 1, keywords = excluded.keywords, tags = excluded.tags`)
+    .bind(ev.subId, ev.name, ev.username, ev.pic, ev.chatUrl, now, JSON.stringify(kws.slice(-30)), JSON.stringify(tags)).run();
+}
+
+async function mcOpenHandover(env, ev, now) {
+  const urgent = MC_URGENT.test(ev.text + " " + ev.reason) ? 1 : 0;
+  // One open request per person: another message while it's still open updates it instead of adding a second one.
+  const open = ev.subId ? await env.DB.prepare("SELECT id, urgent FROM mc_handover WHERE sub_id = ?1 AND status = 'open'").bind(ev.subId).first() : null;
+  if (open) {
+    await env.DB.prepare("UPDATE mc_handover SET text = COALESCE(NULLIF(?2, ''), text), reason = COALESCE(NULLIF(?3, ''), reason), urgent = MAX(urgent, ?4) WHERE id = ?1")
+      .bind(open.id, ev.text, ev.reason, urgent).run();
+    // Still tell the team if a repeat message turns it into an allergy / complaint.
+    return { id: open.id, repeat: !(urgent && !open.urgent), urgent };
+  }
+  const id = "h_" + crypto.randomUUID().replace(/-/g, "").slice(0, 14);
+  await env.DB.prepare("INSERT INTO mc_handover (id, sub_id, reason, text, urgent, status, created_at) VALUES (?1, ?2, ?3, ?4, ?5, 'open', ?6)")
+    .bind(id, ev.subId, ev.reason || null, ev.text || null, urgent, now).run();
+  return { id, repeat: false, urgent };
+}
+
+async function mcAfterEvent(env, ev, handover) {
+  // Fill in the name, photo and chat link from ManyChat when the automation didn't send them.
+  if (ev.subId && env.MANYCHAT_API_KEY && (!ev.name || !ev.chatUrl || (handover && !ev.text))) {
+    try {
+      const more = mcPick({ ...(await mcCall(env, "GET", "/fb/subscriber/getInfo?subscriber_id=" + ev.subId)), type: ev.type }, null);
+      ev.name = ev.name || more.name; ev.username = ev.username || more.username; ev.pic = ev.pic || more.pic; ev.chatUrl = ev.chatUrl || more.chatUrl;
+      await env.DB.prepare("UPDATE mc_people SET name = COALESCE(NULLIF(?2, ''), name), username = COALESCE(NULLIF(?3, ''), username), pic = COALESCE(NULLIF(?4, ''), pic), chat_url = COALESCE(NULLIF(?5, ''), chat_url), tags = CASE WHEN ?6 = '[]' THEN tags ELSE ?6 END WHERE sub_id = ?1")
+        .bind(ev.subId, ev.name, ev.username, ev.pic, ev.chatUrl, JSON.stringify(more.tags)).run();
+      if (handover && !ev.text && more.text) {
+        ev.text = more.text;
+        await env.DB.prepare("UPDATE mc_handover SET text = ?2 WHERE id = ?1 AND (text IS NULL OR text = '')").bind(handover.id, more.text).run();
+      }
+    } catch (e) { console.error("manychat getInfo failed", e.message); }
+  }
+  if (!handover || handover.repeat) return;
+  const reviewers = await mcReviewers(env);
+  const who = reviewers.map((m) => m.id);
+  const person = ev.name ? ev.name + (ev.username ? " (@" + ev.username + ")" : "") : ev.username ? "@" + ev.username : "Someone";
+  const said = ev.text ? ` “${ev.text.slice(0, 160)}”` : "";
+  const text = `${handover.urgent ? "⚠️" : "🙋"} ${person} wants a person on Instagram${ev.reason ? " — " + ev.reason : ""}.${said} Reply in ManyChat, then tick it off in Engagement. ${reviewers.map((m) => "@" + m.name).join(" ")}`;
+  const posted = await postSystemChat(env, { text, mentions: who, eventId: "mc_human_" + handover.id + (handover.urgent ? "_u" : "") });
+  if (posted) await pushToUsers(env, who, { title: (handover.urgent ? "⚠️ " : "🙋 ") + "Instagram: needs a person", body: person + (ev.reason ? " — " + ev.reason : "") + (said ? ":" + said : ""), url: "/#/engagement?tab=human", tag: "mc-" + handover.id }).catch(() => {});
+}
+
+async function mcReviewers(env) {
+  const { members } = await listTeam(env);
+  return members.filter((m) => m.active && (m.role === "admin" || m.role === "approver")).map((m) => ({ id: m.id, name: m.name }));
+}
+
+// GET /go/<code> — tracked link. Counts the click, then sends the person on to the real page.
+async function mcGo(request, env, url, code, ctx) {
+  await ensureMcTables(env);
+  code = code.toLowerCase();
+  const link = await env.DB.prepare("SELECT url FROM mc_links WHERE code = ?1 AND deleted = 0").bind(code).first();
+  if (!link) return new Response(null, { status: 302, headers: { Location: "https://sanjugo.co.uk/", "Cache-Control": "no-store" } });
+  const s = url.searchParams.get("s") || "";
+  // Instagram and other apps open links once to draw a preview — those aren't people.
+  const ua = request.headers.get("User-Agent") || "";
+  if (!/bot|crawl|spider|preview|facebookexternalhit|meta-externalagent|slurp|WhatsApp|TelegramBot/i.test(ua))
+    ctx.waitUntil(env.DB.prepare("INSERT INTO mc_clicks (code, sub_id, day, created_at) VALUES (?1, ?2, ?3, ?4)")
+      .bind(code, /^\d{1,30}$/.test(s) ? s : null, londonDay(), new Date().toISOString()).run().catch(() => {}));
+  return new Response(null, { status: 302, headers: { Location: link.url, "Cache-Control": "no-store" } });
+}
+
+async function mcPage(env, force) {
+  if (!env.MANYCHAT_API_KEY) return { connected: false };
+  const cached = await kvGet(env, "mc_page");
+  if (!force && cached && !cached.error && Date.now() - Date.parse(cached.at || 0) < 6 * 3600e3) return cached;
+  try {
+    const p = await mcCall(env, "GET", "/fb/page/getInfo");
+    const out = { connected: true, at: new Date().toISOString(), id: p.id, name: p.name || "", username: p.username || "", avatar: p.avatar_link || "", isPro: !!p.is_pro };
+    await kvSet(env, "mc_page", out);
+    return out;
+  } catch (e) {
+    return { connected: true, error: e.message };
+  }
+}
+
+const mcFieldOut = (r) => {
+  let approvals = {}; try { approvals = r.approvals ? JSON.parse(r.approvals) : {}; } catch (e) {}
+  return { name: r.name, label: r.label, value: r.value || "", draft: r.draft == null ? null : r.draft, approvals, editedBy: r.edited_by || null,
+    updatedAt: r.updated_at || null, pushedAt: r.pushed_at || null, pushError: r.push_error || null, builtin: !!r.builtin };
+};
+async function mcFields(env) {
+  const { results } = await env.DB.prepare("SELECT * FROM mc_fields ORDER BY sort, label").all();
+  return (results || []).map(mcFieldOut);
+}
+
+async function mcPushField(env, name) {
+  const row = await env.DB.prepare("SELECT * FROM mc_fields WHERE name = ?1").bind(name).first();
+  if (!row) return;
+  const mark = (ok, err) => env.DB.prepare("UPDATE mc_fields SET pushed_at = ?2, push_error = ?3 WHERE name = ?1").bind(name, ok ? new Date().toISOString() : row.pushed_at, err).run();
+  if (!env.MANYCHAT_API_KEY) return mark(false, "Waiting for ManyChat to be connected");
+  try {
+    const existing = await mcCall(env, "GET", "/fb/page/getBotFields");
+    if ((existing || []).some((f) => f && f.name === name)) await mcCall(env, "POST", "/fb/page/setBotFieldByName", { field_name: name, field_value: row.value || "" });
+    else await mcCall(env, "POST", "/fb/page/createBotField", { name, type: "text", description: row.label + " (set from Sanjugo Creator Studio)", value: row.value || "" });
+    await mark(true, null);
+  } catch (e) {
+    await mark(false, e.message);
+  }
+}
+
+// A change goes live (and to ManyChat) once every reviewer has approved it. The person who made it counts as approving.
+async function mcMaybeGoLive(env, name) {
+  const row = await env.DB.prepare("SELECT draft, approvals FROM mc_fields WHERE name = ?1").bind(name).first();
+  if (!row || row.draft == null) return false;
+  let approvals = {}; try { approvals = JSON.parse(row.approvals || "{}"); } catch (e) {}
+  const reviewers = await mcReviewers(env);
+  if (reviewers.length && !reviewers.every((r) => approvals[r.id])) return false;
+  await env.DB.prepare("UPDATE mc_fields SET value = draft, draft = NULL, approvals = NULL, updated_at = ?2 WHERE name = ?1").bind(name, new Date().toISOString()).run();
+  await mcPushField(env, name);
+  return true;
+}
+
+const MC_DRAFT_SYSTEM = `You write the short automatic Instagram DM text for SANJUGO, a modern Japanese comfort restaurant group in London (Shoreditch, Angel, Victoria). The text is dropped into a DM that a guest asked for (they commented a keyword or tapped a button). Rules:
+- Warm, simple, human and quietly confident. 1 to 3 short sentences, at most 2 emoji. Plain words, no poetry.
+- Say "guests", never customers. Never use: amazing, best ever, must try, OMG, epic, crazy, insane, cheap, discount, deal, hurry, limited time, order now, fast food, quick bite, budget, loaded, massive, monster.
+- End with a soft invitation (e.g. "We'll save you a seat."). Never a hard sell.
+- Lines about walk-in portions, limited availability or booking terms only as one short last line, never the main message.
+- Use only facts given to you. Never invent prices, dates, dishes or links.
+Reply with only the DM text, nothing else.`;
+
+async function mcOverview(env) {
+  const since = londonDay(Date.now() - 29 * 86400e3), since7 = londonDay(Date.now() - 6 * 86400e3);
+  const sinceIso = new Date(Date.now() - 30 * 86400e3).toISOString();
+  const all = (sql, ...b) => env.DB.prepare(sql).bind(...b).all().then((r) => r.results || []);
+  const one = (sql, ...b) => env.DB.prepare(sql).bind(...b).first();
+  const [byDay, byType, top, newPeople, people, clicks, open, done, page, last] = await Promise.all([
+    all("SELECT day, COUNT(*) AS n FROM mc_events WHERE day >= ?1 GROUP BY day", since),
+    all("SELECT type, COUNT(*) AS n FROM mc_events WHERE day >= ?1 GROUP BY type", since),
+    all("SELECT COALESCE(NULLIF(keyword, ''), NULLIF(automation, ''), type) AS name, COUNT(*) AS n, COUNT(DISTINCT sub_id) AS people, SUM(day >= ?2) AS n7 FROM mc_events WHERE day >= ?1 GROUP BY name ORDER BY n DESC LIMIT 12", since, since7),
+    one("SELECT COUNT(*) AS n, SUM(first_seen >= ?2) AS n7 FROM mc_people WHERE first_seen >= ?1", sinceIso, new Date(Date.now() - 7 * 86400e3).toISOString()),
+    one("SELECT COUNT(*) AS n FROM mc_people"),
+    one("SELECT COUNT(*) AS n, COUNT(DISTINCT sub_id) AS people FROM mc_clicks WHERE day >= ?1", since),
+    one("SELECT COUNT(*) AS n, SUM(urgent) AS urgent FROM mc_handover WHERE status = 'open'"),
+    all("SELECT created_at, done_at FROM mc_handover WHERE status = 'done' AND done_at >= ?1", sinceIso),
+    mcPage(env, false), kvGet(env, "mc_last_event"),
+  ]);
+  const mins = done.map((r) => (Date.parse(r.done_at) - Date.parse(r.created_at)) / 60e3).filter((m) => m >= 0).sort((a, b) => a - b);
+  return {
+    page, last,
+    days: byDay, types: byType, top,
+    newPeople: newPeople.n || 0, newPeople7: newPeople.n7 || 0, people: people.n || 0,
+    clicks: clicks.n || 0, clickPeople: clicks.people || 0,
+    open: open.n || 0, openUrgent: open.urgent || 0,
+    replyMins: mins.length ? Math.round(mins[Math.floor(mins.length / 2)]) : null, replied: mins.length,
+  };
+}
+
+async function manychatRoute(request, env, url, viewer, ctx) {
+  await ensureMcTables(env);
+  if (viewer.accessEnabled && !viewer.member) throw new HttpError(401, "Sign in first.");
+  if (viewer.member && viewer.member.role === "video") throw new HttpError(403, "Engagement isn't part of your role.");
+  const path = url.pathname.replace(/^\/api\/manychat\/?/, "");
+  const body = request.method === "POST" ? await request.json().catch(() => ({})) : {};
+  const by = viewer.member ? viewer.member.id : String(body.userId || url.searchParams.get("userId") || "").slice(0, 64) || null;
+  const isAdmin = !viewer.accessEnabled || (viewer.member && viewer.member.role === "admin");
+  const adminOnly = () => { if (!isAdmin) throw new HttpError(403, "Only admins can do that."); };
+  const now = new Date().toISOString();
+  const GET = request.method === "GET", POST = request.method === "POST";
+
+  if (GET && path === "") return json(await mcOverview(env));
+  if (GET && path === "count") {
+    const r = await env.DB.prepare("SELECT COUNT(*) AS n, SUM(urgent) AS urgent FROM mc_handover WHERE status = 'open'").first();
+    return json({ open: r.n || 0, urgent: r.urgent || 0 });
+  }
+  if (GET && path === "setup") {
+    adminOnly();
+    const base = mcBase(env, url);
+    const [secret, page, last] = await Promise.all([mcHookSecret(env), mcPage(env, url.searchParams.get("refresh") === "1"), kvGet(env, "mc_last_event")]);
+    return json({ hookUrl: base + "/api/manychat/hook?key=" + secret, goBase: base + "/go/", page, last, hasKey: !!env.MANYCHAT_API_KEY });
+  }
+  if (POST && path === "setup/rotate") {
+    adminOnly();
+    const secret = await mcHookSecret(env, true);
+    return json({ hookUrl: mcBase(env, url) + "/api/manychat/hook?key=" + secret });
+  }
+  if (GET && path === "flows") {
+    const d = await mcCall(env, "GET", "/fb/page/getFlows");
+    return json({ flows: (d && d.flows || []).map((f) => ({ ns: f.ns, name: f.name })).sort((a, b) => String(a.name).localeCompare(String(b.name))) });
+  }
+
+  // ---- Needs a person ----
+  if (GET && path === "human") {
+    const status = url.searchParams.get("status") === "done" ? "done" : "open";
+    const { results } = await env.DB.prepare(`SELECT h.*, p.name, p.username, p.pic, p.chat_url FROM mc_handover h LEFT JOIN mc_people p ON p.sub_id = h.sub_id
+      WHERE h.status = ?1 ORDER BY ${status === "open" ? "h.urgent DESC, h.created_at ASC" : "h.done_at DESC"} LIMIT 100`).bind(status).all();
+    const page = await mcPage(env, false);
+    return json({ pageId: page && page.id || null, items: (results || []).map((r) => ({ id: r.id, subId: r.sub_id, reason: r.reason || "", text: r.text || "", urgent: !!r.urgent, status: r.status,
+      createdAt: r.created_at, doneAt: r.done_at, doneBy: r.done_by, name: r.name || "", username: r.username || "", pic: r.pic || "", chatUrl: r.chat_url || "" })) });
+  }
+  if (POST && (path === "human/done" || path === "human/reopen")) {
+    const id = String(body.id || "");
+    if (path === "human/done") await env.DB.prepare("UPDATE mc_handover SET status = 'done', done_at = ?2, done_by = ?3 WHERE id = ?1 AND status = 'open'").bind(id, now, by).run();
+    else await env.DB.prepare("UPDATE mc_handover SET status = 'open', done_at = NULL, done_by = NULL WHERE id = ?1").bind(id).run();
+    return json({ ok: true });
+  }
+
+  // ---- People ----
+  if (GET && path === "people") {
+    const q = String(url.searchParams.get("q") || "").trim().slice(0, 60);
+    const like = "%" + q.replace(/[%_]/g, "") + "%";
+    const { results } = await env.DB.prepare(`SELECT * FROM mc_people WHERE (?1 = '' OR name LIKE ?2 OR username LIKE ?2 OR keywords LIKE ?2) ORDER BY last_seen DESC LIMIT 300`).bind(q, like).all();
+    const total = await env.DB.prepare("SELECT COUNT(*) AS n FROM mc_people").first();
+    const parse = (s) => { try { return JSON.parse(s || "[]"); } catch (e) { return []; } };
+    return json({ total: total.n || 0, people: (results || []).map((r) => ({ subId: r.sub_id, name: r.name || "", username: r.username || "", pic: r.pic || "", chatUrl: r.chat_url || "",
+      firstSeen: r.first_seen, lastSeen: r.last_seen, events: r.events, keywords: parse(r.keywords), tags: parse(r.tags) })) });
+  }
+  if (GET && path === "person") {
+    const id = String(url.searchParams.get("id") || "");
+    const [events, clicks, handovers] = await Promise.all([
+      env.DB.prepare("SELECT type, automation, keyword, text, created_at FROM mc_events WHERE sub_id = ?1 ORDER BY id DESC LIMIT 60").bind(id).all(),
+      env.DB.prepare("SELECT c.code, l.name, c.created_at FROM mc_clicks c LEFT JOIN mc_links l ON l.code = c.code WHERE c.sub_id = ?1 ORDER BY c.id DESC LIMIT 40").bind(id).all(),
+      env.DB.prepare("SELECT id, reason, status, created_at, done_at, done_by FROM mc_handover WHERE sub_id = ?1 ORDER BY created_at DESC LIMIT 20").bind(id).all(),
+    ]);
+    return json({ events: events.results || [], clicks: clicks.results || [], handovers: handovers.results || [] });
+  }
+  if (POST && path === "people/delete") {
+    adminOnly();
+    const id = String(body.subId || "");
+    if (!/^\d{1,30}$/.test(id)) throw new HttpError(400, "Unknown person");
+    await env.DB.batch(["mc_people", "mc_events", "mc_clicks", "mc_handover"].map((t) => env.DB.prepare(`DELETE FROM ${t} WHERE sub_id = ?1`).bind(id)));
+    return json({ ok: true });
+  }
+
+  // ---- DM texts (ManyChat bot fields) ----
+  if (GET && path === "fields") {
+    const [fields, reviewers] = await Promise.all([mcFields(env), mcReviewers(env)]);
+    return json({ fields, reviewers, connected: !!env.MANYCHAT_API_KEY });
+  }
+  if (POST && path === "fields/save") {
+    adminOnly();
+    const value = String(body.value ?? "").replace(/\r\n/g, "\n").slice(0, 1000);
+    const label = String(body.label || "").trim().slice(0, 60);
+    let name = String(body.name || "");
+    let row = name ? await env.DB.prepare("SELECT * FROM mc_fields WHERE name = ?1").bind(name).first() : null;
+    if (!row) {
+      if (!label) throw new HttpError(400, "Give the text a name.");
+      name = "sj_" + label.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 40);
+      if (name === "sj_") throw new HttpError(400, "Use letters or numbers in the name.");
+      if (await env.DB.prepare("SELECT 1 FROM mc_fields WHERE name = ?1").bind(name).first()) throw new HttpError(400, "There's already a text with that name.");
+      const m = await env.DB.prepare("SELECT COALESCE(MAX(sort), 0) AS s FROM mc_fields").first();
+      await env.DB.prepare("INSERT INTO mc_fields (name, label, value, sort) VALUES (?1, ?2, '', ?3)").bind(name, label, (m.s || 0) + 1).run();
+      row = { value: "", draft: null };
+    } else if (label && label !== row.label) {
+      await env.DB.prepare("UPDATE mc_fields SET label = ?2 WHERE name = ?1").bind(name, label).run();
+    }
+    if (row.draft != null && value === (row.value || "")) {
+      await env.DB.prepare("UPDATE mc_fields SET draft = NULL, approvals = NULL WHERE name = ?1").bind(name).run();
+    } else if (value !== (row.value || "") && value !== row.draft) {
+      const reviewers = await mcReviewers(env);
+      const approvals = by && reviewers.some((r) => r.id === by) ? { [by]: now } : {};
+      await env.DB.prepare("UPDATE mc_fields SET draft = ?2, approvals = ?3, edited_by = ?4, updated_at = ?5 WHERE name = ?1").bind(name, value, JSON.stringify(approvals), by, now).run();
+      const live = await mcMaybeGoLive(env, name);
+      if (!live) {
+        const waiting = reviewers.filter((r) => !approvals[r.id]);
+        const f = mcFieldOut(await env.DB.prepare("SELECT * FROM mc_fields WHERE name = ?1").bind(name).first());
+        ctx.waitUntil(postSystemChat(env, { text: `✏️ DM text “${f.label}” was changed and needs approval before ManyChat uses it: “${value.slice(0, 200)}” ${waiting.map((r) => "@" + r.name).join(" ")}`,
+          mentions: waiting.map((r) => r.id), eventId: "mc_field_" + name + "_" + now }).then((ok) => ok && pushToUsers(env, waiting.map((r) => r.id), { title: "DM text needs approval", body: f.label + ": " + value.slice(0, 120), url: "/#/engagement?tab=texts", tag: "mc-field-" + name })).catch(() => {}));
+      }
+    }
+    return json({ fields: await mcFields(env) });
+  }
+  if (POST && path === "fields/approve") {
+    const name = String(body.name || "");
+    const reviewers = await mcReviewers(env);
+    if (viewer.accessEnabled && !reviewers.some((r) => r.id === by)) throw new HttpError(403, "Only reviewers can approve DM texts.");
+    const row = await env.DB.prepare("SELECT draft, approvals FROM mc_fields WHERE name = ?1").bind(name).first();
+    if (!row || row.draft == null) throw new HttpError(409, "That change was already approved or dropped.");
+    let approvals = {}; try { approvals = JSON.parse(row.approvals || "{}"); } catch (e) {}
+    approvals[by || "someone"] = now;
+    await env.DB.prepare("UPDATE mc_fields SET approvals = ?2 WHERE name = ?1").bind(name, JSON.stringify(approvals)).run();
+    await mcMaybeGoLive(env, name);
+    return json({ fields: await mcFields(env) });
+  }
+  if (POST && path === "fields/discard") {
+    adminOnly();
+    await env.DB.prepare("UPDATE mc_fields SET draft = NULL, approvals = NULL WHERE name = ?1").bind(String(body.name || "")).run();
+    return json({ fields: await mcFields(env) });
+  }
+  if (POST && path === "fields/delete") {
+    adminOnly();
+    await env.DB.prepare("DELETE FROM mc_fields WHERE name = ?1 AND builtin = 0").bind(String(body.name || "")).run();
+    return json({ fields: await mcFields(env) });
+  }
+  if (POST && path === "fields/push") {
+    adminOnly();
+    const names = body.name ? [String(body.name)] : (await mcFields(env)).filter((f) => f.value).map((f) => f.name);
+    for (const n of names) await mcPushField(env, n);
+    return json({ fields: await mcFields(env) });
+  }
+  if (POST && path === "draft") {
+    const facts = String(body.facts || "").slice(0, 4000);
+    if (facts.trim().length < 10) throw new HttpError(400, "Pick a campaign with some details first.");
+    const user = `This DM text is "${String(body.label || "Current offer").slice(0, 60)}".\n${body.current ? "Current text: " + String(body.current).slice(0, 600) + "\n" : ""}Facts:\n${facts}`;
+    const text = tidyBotText(String(await aiText(env, MC_DRAFT_SYSTEM, user, 300)).trim()).replace(/^["“]|["”]$/g, "").slice(0, 1000);
+    if (!text) throw new HttpError(502, "Couldn't get a draft — try again.");
+    return json({ text });
+  }
+
+  // ---- Tracked links ----
+  if (GET && path === "links") {
+    const since7 = londonDay(Date.now() - 6 * 86400e3);
+    const [{ results: links }, { results: counts }] = await Promise.all([
+      env.DB.prepare("SELECT * FROM mc_links WHERE deleted = 0 ORDER BY created_at DESC").all(),
+      env.DB.prepare("SELECT code, COUNT(*) AS n, SUM(day >= ?1) AS n7, COUNT(DISTINCT sub_id) AS people FROM mc_clicks GROUP BY code").bind(since7).all(),
+    ]);
+    const byCode = new Map((counts || []).map((c) => [c.code, c]));
+    return json({ goBase: mcBase(env, url) + "/go/", links: (links || []).map((l) => { const c = byCode.get(l.code) || {};
+      return { code: l.code, name: l.name, url: l.url, campaign: l.campaign || "", createdBy: l.created_by, createdAt: l.created_at, clicks: c.n || 0, clicks7: c.n7 || 0, people: c.people || 0 }; }) });
+  }
+  if (POST && path === "links/save") {
+    adminOnly();
+    const name = String(body.name || "").trim().slice(0, 80);
+    const dest = String(body.url || "").trim().slice(0, 1000);
+    const code = String(body.code || "").trim().toLowerCase();
+    if (!name) throw new HttpError(400, "Give the link a name.");
+    if (!/^https:\/\/[^\s]+\.[^\s]+$/.test(dest)) throw new HttpError(400, "The page address has to start with https://");
+    if (!/^[a-z0-9][a-z0-9-]{1,39}$/.test(code)) throw new HttpError(400, "Short name: 2–40 letters, numbers or dashes.");
+    const existing = await env.DB.prepare("SELECT deleted FROM mc_links WHERE code = ?1").bind(code).first();
+    if (existing && !existing.deleted && body.editing !== code) throw new HttpError(400, "That short name is taken — pick another.");
+    await env.DB.prepare(`INSERT INTO mc_links (code, name, url, campaign, created_by, created_at, deleted) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)
+      ON CONFLICT(code) DO UPDATE SET name = excluded.name, url = excluded.url, campaign = excluded.campaign, deleted = 0`)
+      .bind(code, name, dest, String(body.campaign || "").slice(0, 80) || null, by, now).run();
+    return json({ ok: true });
+  }
+  if (POST && path === "links/delete") {
+    adminOnly();
+    await env.DB.prepare("UPDATE mc_links SET deleted = 1 WHERE code = ?1").bind(String(body.code || "")).run();
+    return json({ ok: true });
+  }
+  throw new HttpError(404, "Unknown request");
+}
+
+// Nightly: keep a little over a year of people, messages and clicks (personal data shouldn't sit here forever).
+async function mcPrune(env) {
+  await ensureMcTables(env);
+  const day = londonDay(Date.now() - MC_KEEP_DAYS * 86400e3), iso = new Date(Date.now() - MC_KEEP_DAYS * 86400e3).toISOString();
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM mc_events WHERE day < ?1").bind(day),
+    env.DB.prepare("DELETE FROM mc_clicks WHERE day < ?1").bind(day),
+    env.DB.prepare("DELETE FROM mc_handover WHERE status = 'done' AND created_at < ?1").bind(iso),
+    env.DB.prepare("DELETE FROM mc_people WHERE last_seen < ?1").bind(iso),
+  ]);
+}
+
+// ---------------------------------------------------------------------------
+// Engagement through Make — Instagram comments and Google reviews (Engagement → Comments / Reviews).
+// In:  "Engage · Instagram comments" (Instagram "Watch events", instant) posts every comment to /api/engage/in?key=…
+//      (key in app_kv engage_in_key; admins copy the link from Settings → Engagement into the scenario's HTTP step).
+//      "Engage · Google reviews" is a webhook the worker calls every few hours (and on "Check now") with a one-time
+//      token; Make lists each branch's reviews and answers on /api/make/callback (make_jobs kind "reviews").
+// Out: replies go through "Engage · Instagram reply" / "Engage · Google review reply" (webhook → reply → callback),
+//      tracked in make_jobs as kind reply_ig / reply_review, like publishing.
+// The three webhook addresses and the "left to ManyChat" keywords live in app_kv engage_config.
+// ---------------------------------------------------------------------------
+const ENG_IG_USERNAME = "sanjugo_restaurant";
+const ENG_BRANCH_BY_LOCATION = Object.fromEntries(Object.entries(GBP_LOCATIONS).map(([k, v]) => [`${GBP_ACCOUNT}/locations/${v}`, k]));
+const ENG_STARS = { ONE: 1, TWO: 2, THREE: 3, FOUR: 4, FIVE: 5 };
+const ENG_REVIEW_EVERY_MS = 4 * 3600e3;
+const ENG_REPLY_TIMEOUT_MS = 10 * 60e3;
+const ENG_REPLY_TIMEOUT_NOTE = "No answer from Make after 10 minutes — check the reply scenario is switched on.";
+let engReady = false;
+
+async function ensureEngTables(env) {
+  if (engReady) return;
+  for (const sql of [
+    `CREATE TABLE IF NOT EXISTS eng_comments (id TEXT PRIMARY KEY, platform TEXT NOT NULL, media_id TEXT, parent_id TEXT, username TEXT, user_id TEXT, text TEXT,
+      mine INTEGER NOT NULL DEFAULT 0, urgent INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL, received_at TEXT NOT NULL,
+      reply_text TEXT, reply_state TEXT, reply_error TEXT, reply_id TEXT, replied_by TEXT, replied_at TEXT, done_by TEXT, done_at TEXT)`,
+    "CREATE INDEX IF NOT EXISTS eng_comments_recv ON eng_comments (received_at)",
+    "CREATE INDEX IF NOT EXISTS eng_comments_parent ON eng_comments (parent_id)",
+    `CREATE TABLE IF NOT EXISTS eng_reviews (name TEXT PRIMARY KEY, location TEXT NOT NULL, branch TEXT, reviewer TEXT, photo TEXT, stars INTEGER, comment TEXT,
+      created_at TEXT, updated_at TEXT, reply TEXT, reply_at TEXT, reply_state TEXT, reply_error TEXT, replied_by TEXT, first_seen TEXT NOT NULL, done_by TEXT, done_at TEXT)`,
+    "CREATE INDEX IF NOT EXISTS eng_reviews_created ON eng_reviews (created_at)",
+  ]) await env.DB.prepare(sql).run();
+  engReady = true;
+}
+
+async function engConfig(env) {
+  const c = (await kvGet(env, "engage_config")) || {};
+  return { igReply: c.igReply || "", reviewsPull: c.reviewsPull || "", reviewReply: c.reviewReply || "",
+    keywords: Array.isArray(c.keywords) ? c.keywords : [], updatedAt: c.updatedAt || null };
+}
+async function engInKey(env, rotate) {
+  let s = rotate ? null : await kvGet(env, "engage_in_key");
+  if (!s) {
+    const b = new Uint8Array(18); crypto.getRandomValues(b);
+    s = [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
+    await kvSet(env, "engage_in_key", s);
+  }
+  return s;
+}
+const engEscRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const engKeywordHit = (text, keywords) => keywords.find((k) => k && new RegExp("(^|[^\\p{L}\\p{N}])" + engEscRe(k) + "($|[^\\p{L}\\p{N}])", "iu").test(text));
+
+// POST /api/engage/in?key=… — one Instagram comment from Make (no sign-in; the key proves it's our scenario).
+async function engIn(request, env, url, ctx) {
+  await ensureEngTables(env);
+  const key = await kvGet(env, "engage_in_key");
+  if (!key || !mcSame(request.headers.get("X-Sanjugo-Key") || url.searchParams.get("key"), key)) return json({ error: "Wrong key" }, 401);
+  const raw = await request.text();
+  if (raw.length > 60000) return json({ error: "Too big" }, 413);
+  let b; try { b = JSON.parse(raw || "{}"); } catch (e) { return json({ error: "Send JSON" }, 400); }
+  const now = new Date().toISOString();
+  const field = String(b.field || "comments").slice(0, 30);
+  await kvSet(env, "engage_last_in", { at: now, field });
+  if (field !== "comments" && field !== "live_comments") return json({ ok: true, ignored: field });
+  const id = String(b.id || "").trim();
+  if (!/^\d{5,40}$/.test(id)) return json({ error: "No comment id" }, 400);
+  const text = dec(b.text).slice(0, 2200);
+  const username = String(b.from || "").replace(/^@/, "").trim().slice(0, 60);
+  const mine = username.toLowerCase() === ENG_IG_USERNAME;
+  const parent = /^\d{5,40}$/.test(String(b.parent || "")) ? String(b.parent) : null;
+  const media = /^\d{5,40}$/.test(String(b.media || "")) ? String(b.media) : null;
+  const cfg = await engConfig(env);
+  const urgent = !mine && MC_URGENT.test(text) ? 1 : 0;
+  const status = mine ? "answered" : !urgent && engKeywordHit(text, cfg.keywords) ? "manychat" : "new";
+  const res = await env.DB.prepare(`INSERT OR IGNORE INTO eng_comments (id, platform, media_id, parent_id, username, user_id, text, mine, urgent, status, received_at)
+    VALUES (?1, 'instagram', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)`)
+    .bind(id, media, parent, username || null, String(b.fromId || "").slice(0, 40) || null, text, mine ? 1 : 0, urgent, status, now).run();
+  // Our own reply — sent from Creator Studio or straight from the Instagram app — answers the comment it sits under.
+  if (mine && parent) {
+    await env.DB.prepare(`UPDATE eng_comments SET status = 'answered', reply_text = COALESCE(reply_text, ?2), reply_state = 'sent', reply_error = NULL,
+      reply_id = COALESCE(reply_id, ?3), replied_at = COALESCE(replied_at, ?4) WHERE id = ?1 AND (status != 'answered' OR reply_state IS NULL OR reply_state != 'sent')`)
+      .bind(parent, text, id, now).run();
+  }
+  if (urgent && res.meta && res.meta.changes) ctx.waitUntil(engAlert(env, {
+    eventId: "eng_c_" + id, title: "⚠️ Instagram comment needs care",
+    text: `⚠️ Instagram comment from @${username || "someone"} may need care: “${text.slice(0, 200)}” Reply in Engagement → Comments.`,
+    body: "@" + (username || "someone") + ": " + text.slice(0, 140), url: "/#/engagement?tab=comments", tag: "eng-c-" + id,
+  }).catch((e) => console.error("engage alert failed", e)));
+  return json({ ok: true });
+}
+
+async function engAlert(env, { eventId, title, text, body, url, tag }) {
+  const reviewers = await mcReviewers(env);
+  const who = reviewers.map((r) => r.id);
+  const posted = await postSystemChat(env, { text: text + " " + reviewers.map((r) => "@" + r.name).join(" "), mentions: who, eventId });
+  if (posted) await pushToUsers(env, who, { title, body, url, tag }).catch(() => {});
+}
+
+async function engPullReviews(env, trigger) {
+  const cfg = await engConfig(env);
+  if (!cfg.reviewsPull) throw new HttpError(400, "Add the Google reviews webhook in Settings → Engagement first.");
+  await ensureMakeTables(env);
+  const id = "rev_" + crypto.randomUUID().slice(0, 12);
+  const token = crypto.randomUUID() + crypto.randomUUID().slice(0, 8);
+  const now = new Date().toISOString();
+  await env.DB.prepare("INSERT INTO make_jobs (id, kind, token, status, trigger, detail, created_at, updated_at) VALUES (?1, 'reviews', ?2, 'sent', ?3, '{}', ?4, ?4)")
+    .bind(id, token, trigger, now).run();
+  await kvSet(env, "engage_reviews_pull", { at: now, id, trigger });
+  try {
+    await callHook(cfg.reviewsPull, { token, locations: Object.keys(ENG_BRANCH_BY_LOCATION).join(",") });
+  } catch (e) {
+    await env.DB.prepare("UPDATE make_jobs SET status = 'failed', error = ?2, updated_at = ?3 WHERE id = ?1").bind(id, e.message, now).run();
+    await kvSet(env, "engage_reviews_pull", { at: now, id, trigger, error: e.message });
+    throw e;
+  }
+  return { requestedAt: now };
+}
+
+// Every 5 minutes: fetch Google reviews every few hours (8am–10pm London) and give up on replies Make never answered.
+async function engageCron(env) {
+  await ensureEngTables(env);
+  const cutoff = new Date(Date.now() - ENG_REPLY_TIMEOUT_MS).toISOString();
+  await env.DB.batch([
+    env.DB.prepare("UPDATE eng_comments SET reply_state = 'failed', reply_error = ?2 WHERE reply_state = 'sending' AND replied_at < ?1").bind(cutoff, ENG_REPLY_TIMEOUT_NOTE),
+    env.DB.prepare("UPDATE eng_reviews SET reply_state = 'failed', reply_error = ?2 WHERE reply_state = 'sending' AND reply_at < ?1").bind(cutoff, ENG_REPLY_TIMEOUT_NOTE),
+  ]);
+  const cfg = await engConfig(env);
+  if (!cfg.reviewsPull) return;
+  const { hour } = londonClock();
+  if (hour < 8 || hour >= 22) return;
+  const last = await kvGet(env, "engage_reviews_pull");
+  if (last && Date.now() - Date.parse(last.at || 0) < ENG_REVIEW_EVERY_MS) return;
+  await engPullReviews(env, "auto");
+}
+
+// Make's answers for engagement jobs (called from handleMakeCallback).
+async function engageCallback(env, job, body) {
+  await ensureEngTables(env);
+  const now = new Date().toISOString();
+  if (job.kind === "reviews") {
+    if (Date.now() - Date.parse(job.created_at) > 60 * 60e3) return json({ error: "Expired" }, 403);
+    const location = String(body.location || "");
+    if (!ENG_BRANCH_BY_LOCATION[location]) return json({ error: "Unknown location" }, 400);
+    if (body.error) { // Google didn't answer for this branch — show it in Reviews / Settings instead of clearing anything
+      const last = (await kvGet(env, "engage_reviews_pull")) || { at: now };
+      const where = ENG_BRANCH_BY_LOCATION[location];
+      last.error = (where.charAt(0).toUpperCase() + where.slice(1)) + ": " + dec(body.error).slice(0, 160);
+      await kvSet(env, "engage_reviews_pull", last);
+      return json({ ok: true });
+    }
+    let data = body.data;
+    if (typeof data === "string") { try { data = JSON.parse(data); } catch (e) { data = null; } }
+    data = data && typeof data === "object" ? data : {};
+    const reviews = Array.isArray(data.reviews) ? data.reviews.slice(0, 100) : [];
+    const branch = ENG_BRANCH_BY_LOCATION[location];
+    const known = new Set(((await env.DB.prepare("SELECT name FROM eng_reviews WHERE location = ?1").bind(location).all()).results || []).map((r) => r.name));
+    const firstTime = known.size === 0;
+    const fresh = [];
+    for (const r of reviews) {
+      const name = String((r && r.name) || "");
+      if (!name.startsWith(location + "/reviews/")) continue;
+      const stars = ENG_STARS[r.starRating] || num(r.starRating) || null;
+      const rr = r.reviewReply && r.reviewReply.comment ? r.reviewReply : null;
+      const reviewer = r.reviewer || {};
+      await env.DB.prepare(`INSERT INTO eng_reviews (name, location, branch, reviewer, photo, stars, comment, created_at, updated_at, reply, reply_at, reply_state, first_seen)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+        ON CONFLICT(name) DO UPDATE SET reviewer = excluded.reviewer, photo = excluded.photo, stars = excluded.stars, comment = excluded.comment,
+          updated_at = excluded.updated_at,
+          reply = CASE WHEN excluded.reply IS NOT NULL THEN excluded.reply ELSE eng_reviews.reply END,
+          reply_at = CASE WHEN excluded.reply IS NOT NULL THEN excluded.reply_at ELSE eng_reviews.reply_at END,
+          reply_state = CASE WHEN excluded.reply IS NOT NULL AND COALESCE(eng_reviews.reply_state, '') != 'sending' THEN 'sent' ELSE eng_reviews.reply_state END`)
+        .bind(name, location, branch, String(reviewer.isAnonymous ? "A Google user" : reviewer.displayName || "A Google user").slice(0, 80),
+          /^https:\/\//.test(String(reviewer.profilePhotoUrl || "")) ? String(reviewer.profilePhotoUrl).slice(0, 600) : null, stars,
+          String(r.comment || "").slice(0, 4000) || null, toIsoDate(r.createTime), toIsoDate(r.updateTime),
+          rr ? String(rr.comment).slice(0, 4096) : null, rr ? toIsoDate(rr.updateTime) : null, rr ? "sent" : null, now).run();
+      if (!known.has(name)) fresh.push({ name, stars, reviewer: reviewer.displayName || "A Google user", comment: String(r.comment || ""), created: toIsoDate(r.createTime), replied: !!rr });
+    }
+    const summary = (await kvGet(env, "engage_review_summary")) || {};
+    summary[location] = { avg: Number(data.averageRating) || null, total: num(data.totalReviewCount), at: now };
+    await kvSet(env, "engage_review_summary", summary);
+    let detail = {}; try { detail = JSON.parse(job.detail || "{}"); } catch (e) {}
+    detail[branch] = reviews.length;
+    await env.DB.prepare("UPDATE make_jobs SET status = 'done', detail = ?2, updated_at = ?3 WHERE id = ?1").bind(job.id, JSON.stringify(detail), now).run();
+    // Tell Cyrus and Yan Yan about new 1–2 star reviews (not the old ones found on the very first check).
+    if (!firstTime) for (const f of fresh.filter((x) => x.stars && x.stars <= 2 && !x.replied && Date.now() - Date.parse(x.created || 0) < 3 * 86400e3)) {
+      const where = branch.charAt(0).toUpperCase() + branch.slice(1);
+      await engAlert(env, {
+        eventId: "eng_r_" + f.name.split("/").pop(), title: `⚠️ ${f.stars}★ Google review — ${where}`,
+        text: `⚠️ New ${f.stars}★ Google review for ${where} from ${f.reviewer}${f.comment ? ": “" + f.comment.slice(0, 200) + "”" : "."} Reply in Engagement → Reviews.`,
+        body: f.reviewer + (f.comment ? ": " + f.comment.slice(0, 140) : ""), url: "/#/engagement?tab=reviews", tag: "eng-r-" + f.name.split("/").pop(),
+      }).catch(() => {});
+    }
+    return json({ ok: true, saved: reviews.length });
+  }
+  // A reply finished (or failed) in Make.
+  if (job.status !== "sent") return json({ ok: true, duplicate: true });
+  const ok = !body.error && body.ok !== false && body.ok !== "false";
+  const error = ok ? null : dec(body.error || "Make couldn't post the reply").slice(0, 300);
+  let detail = {}; try { detail = JSON.parse(job.detail || "{}"); } catch (e) {}
+  await env.DB.prepare("UPDATE make_jobs SET status = ?2, post_id = ?3, error = ?4, updated_at = ?5 WHERE id = ?1")
+    .bind(job.id, ok ? "done" : "failed", String(body.replyId || "").slice(0, 80) || null, error, now).run();
+  if (job.kind === "reply_ig") {
+    await env.DB.prepare(`UPDATE eng_comments SET reply_state = ?2, reply_error = ?3, reply_id = COALESCE(?4, reply_id), replied_at = ?5,
+      status = CASE WHEN ?2 = 'sent' THEN 'answered' ELSE status END WHERE id = ?1`)
+      .bind(job.content_id, ok ? "sent" : "failed", error, String(body.replyId || "").slice(0, 40) || null, now).run();
+  } else if (job.kind === "reply_review") {
+    if (ok) await env.DB.prepare("UPDATE eng_reviews SET reply = ?2, reply_at = ?3, reply_state = 'sent', reply_error = NULL WHERE name = ?1").bind(job.content_id, String(detail.text || "").slice(0, 4096), now).run();
+    else await env.DB.prepare("UPDATE eng_reviews SET reply_state = 'failed', reply_error = ?2 WHERE name = ?1").bind(job.content_id, error).run();
+  }
+  return json({ ok: true });
+}
+
+const ENG_COMMENT_SYSTEM = `You reply to Instagram comments for SANJUGO, a modern Japanese comfort restaurant group in London (Shoreditch, Angel, Victoria).
+Style: one short, funny line plus one or two emoji. Playful and human, never corporate, no long thank-yous. Moves that work: let the dish speak as a character ("Accepting this on behalf of the Unagi Don 🥹🥇", "The rice would like to thank its agent 🍚🥇"), or hand the praise to the chef ("Passing this straight to our chef 🥇👨‍🍳" — say "they" for the chef). Riff on the comment or the post.
+Rules: You don't know the menu, prices, which branch serves what, opening times or offers. If the comment asks any question like that, don't answer the fact — keep it warm, invite them to DM us, and put the question in "check". Never say a video has no AI or isn't edited — if someone asks about AI or a prompt, say the food is real, keep it light, and set "check" so the team confirms how the video was made. Never invent prices, dates, offers, opening times or menu items. Bookings, allergies, complaints or anything serious: be kind, no jokes, ask them to send us a DM, and set "check". Don't use: amazing, best ever, must try, OMG, epic, crazy, insane, cheap, deal, platter. Reply in the comment's language.
+Answer with JSON only: {"pick":"the best reply","alts":["another option","another option"],"check":"what the team should check, or empty"}`;
+const ENG_REVIEW_SYSTEM = `You write replies to Google reviews for SANJUGO, a modern Japanese comfort restaurant group in London.
+Voice: warm, simple, human and quietly confident ("luxury brands never panic"). 2 to 4 short sentences. Thank the guest by first name when you have it and mention one specific thing they said.
+4–5 stars: grateful and warm, end with a soft invitation back ("We'll save you a seat."). 1–3 stars: thank them, apologise sincerely for what went wrong without excuses or arguing, say the team will look into it, and invite them to get in touch so we can put it right — never invent an email address or phone number. A rating with no text: one or two warm sentences.
+Never offer refunds, discounts or free food. Never invent facts. Say "guests", never customers. Don't use: amazing, best ever, must try, OMG, epic, crazy, insane, cheap, discount, deal. Sign off "— The SANJUGO team". Reply in the review's language.
+Answer with JSON only: {"pick":"the best reply","alts":["another option"],"check":"anything the manager should check first, or empty"}`;
+
+function engParseDraft(raw) {
+  const s = String(raw || "").trim();
+  const m = s.match(/\{[\s\S]*\}/);
+  let d = null;
+  if (m) { try { d = JSON.parse(m[0]); } catch (e) {} }
+  const clean = (t) => { t = String(t || "").trim(); return t ? tidyBotText(t).replace(/^["“]|["”]$/g, "").slice(0, 2000) : ""; };
+  if (d && d.pick) return { pick: clean(d.pick), alts: (Array.isArray(d.alts) ? d.alts : []).map(clean).filter(Boolean).slice(0, 3), check: clean(d.check || "").slice(0, 300) };
+  return { pick: clean(s.replace(/^\{|\}$/g, "")), alts: [], check: "" };
+}
+
+function engCommentOut(r) {
+  return { id: r.id, mediaId: r.media_id, parentId: r.parent_id, username: r.username || "", text: r.text || "", mine: !!r.mine, urgent: !!r.urgent,
+    status: r.status, receivedAt: r.received_at, replyText: r.reply_text || "", replyState: r.reply_state || null, replyError: r.reply_error || null,
+    repliedBy: r.replied_by || null, repliedAt: r.replied_at || null, doneBy: r.done_by || null,
+    post: r.sp_permalink || r.sp_caption || r.sp_thumb ? { permalink: r.sp_permalink || "", caption: r.sp_caption || "", thumb: r.sp_thumb || "", type: r.sp_type || "" } : null };
+}
+function engReviewOut(r) {
+  return { name: r.name, branch: r.branch, reviewer: r.reviewer || "A Google user", photo: r.photo || "", stars: r.stars, comment: r.comment || "",
+    createdAt: r.created_at, updatedAt: r.updated_at, reply: r.reply || "", replyAt: r.reply_at || null, replyState: r.reply_state || null,
+    replyError: r.reply_error || null, repliedBy: r.replied_by || null, done: !!r.done_at, doneBy: r.done_by || null };
+}
+
+async function engageRoute(request, env, url, viewer, ctx) {
+  await ensureEngTables(env);
+  if (viewer.accessEnabled && !viewer.member) throw new HttpError(401, "Sign in first.");
+  const role = viewer.member ? viewer.member.role : "admin";
+  if (role === "video") throw new HttpError(403, "Engagement isn't part of your role.");
+  const isAdmin = !viewer.accessEnabled || role === "admin";
+  const isReviewer = !viewer.accessEnabled || role === "admin" || role === "approver";
+  const path = url.pathname.replace(/^\/api\/engage\/?/, "");
+  const GET = request.method === "GET", POST = request.method === "POST";
+  const body = POST ? await request.json().catch(() => ({})) : {};
+  const by = viewer.member ? viewer.member.id : String(body.userId || "").slice(0, 64) || null;
+  const now = new Date().toISOString();
+  const recent = new Date(Date.now() - 30 * 86400e3).toISOString();
+
+  if (GET && (path === "" || path === "count")) {
+    const [c, r, mc, cfg, lastIn, lastPull, summary] = await Promise.all([
+      env.DB.prepare("SELECT SUM(status = 'new') AS todo, SUM(status = 'new' AND urgent = 1) AS urgent, SUM(status = 'manychat') AS manychat, SUM(status = 'answered' AND replied_at >= ?1) AS answered7, COUNT(*) AS total FROM eng_comments WHERE mine = 0")
+        .bind(new Date(Date.now() - 7 * 86400e3).toISOString()).first(),
+      env.DB.prepare("SELECT SUM(reply IS NULL AND done_at IS NULL AND created_at >= ?1) AS todo, SUM(reply IS NULL AND done_at IS NULL AND stars <= 2 AND created_at >= ?1) AS low, COUNT(*) AS total FROM eng_reviews").bind(recent).first(),
+      ensureMcTables(env).then(() => env.DB.prepare("SELECT COUNT(*) AS n, SUM(urgent) AS urgent FROM mc_handover WHERE status = 'open'").first()),
+      engConfig(env), kvGet(env, "engage_last_in"), kvGet(env, "engage_reviews_pull"), kvGet(env, "engage_review_summary"),
+    ]);
+    const out = {
+      comments: { todo: c.todo || 0, urgent: c.urgent || 0, manychat: c.manychat || 0, answered7: c.answered7 || 0, total: c.total || 0 },
+      reviews: { todo: r.todo || 0, low: r.low || 0, total: r.total || 0 },
+      handover: { open: mc.n || 0, urgent: mc.urgent || 0 },
+      badge: (c.urgent || 0) + (r.todo || 0) + (mc.n || 0), badgeUrgent: !!((c.urgent || 0) + (r.low || 0) + (mc.urgent || 0)),
+    };
+    if (path === "count") return json(out);
+    return json({ ...out, setup: { comments: !!lastIn, igReply: !!cfg.igReply, reviews: !!cfg.reviewsPull, reviewReply: !!cfg.reviewReply },
+      lastIn, lastPull, summary: Object.fromEntries(Object.entries(summary || {}).map(([loc, s]) => [ENG_BRANCH_BY_LOCATION[loc] || loc, s])) });
+  }
+
+  // ---- Settings (admins) ----
+  if (GET && path === "config") {
+    if (!isAdmin) throw new HttpError(403, "Only admins can see this.");
+    const [cfg, key, lastIn, lastPull] = await Promise.all([engConfig(env), engInKey(env), kvGet(env, "engage_last_in"), kvGet(env, "engage_reviews_pull")]);
+    return json({ ...cfg, inLink: mcBase(env, url) + "/api/engage/in?key=" + key, lastIn, lastPull });
+  }
+  if (POST && path === "config") {
+    if (!isAdmin) throw new HttpError(403, "Only admins can change this.");
+    const cfg = await engConfig(env);
+    for (const k of ["igReply", "reviewsPull", "reviewReply"]) {
+      if (body[k] === undefined) continue;
+      const v = String(body[k] || "").trim();
+      if (v && !MAKE_HOOK_RE.test(v)) throw new HttpError(400, "That doesn't look like a Make webhook address (https://hook.eu1.make.com/…).");
+      cfg[k] = v;
+    }
+    if (body.keywords !== undefined) cfg.keywords = String(body.keywords || "").split(/[,\n]/).map((k) => k.trim().toUpperCase()).filter((k) => k.length >= 2).slice(0, 40);
+    cfg.updatedAt = now;
+    await kvSet(env, "engage_config", cfg);
+    return json({ ok: true, ...cfg });
+  }
+  if (POST && path === "config/rotate") {
+    if (!isAdmin) throw new HttpError(403, "Only admins can change this.");
+    return json({ inLink: mcBase(env, url) + "/api/engage/in?key=" + (await engInKey(env, true)) });
+  }
+
+  // ---- Comments ----
+  if (GET && path === "comments") {
+    const filter = url.searchParams.get("filter") || "todo";
+    const where = { todo: "c.status = 'new'", urgent: "c.status = 'new' AND c.urgent = 1", answered: "c.status = 'answered'", manychat: "c.status = 'manychat'", done: "c.status = 'done'", all: "1 = 1" }[filter] || "c.status = 'new'";
+    const order = filter === "todo" || filter === "urgent" ? "c.urgent DESC, c.received_at DESC" : "c.received_at DESC";
+    await ensureMakeTables(env);
+    const { results } = await env.DB.prepare(`SELECT c.*, sp.permalink AS sp_permalink, sp.caption AS sp_caption, sp.thumb AS sp_thumb, sp.type AS sp_type
+      FROM eng_comments c LEFT JOIN social_posts sp ON sp.platform = 'instagram' AND sp.post_id = c.media_id
+      WHERE c.mine = 0 AND ${where} ORDER BY ${order} LIMIT 150`).all();
+    const items = (results || []).map(engCommentOut);
+    // Our replies under these comments (sent from here or from the Instagram app).
+    const ids = items.map((i) => i.id);
+    let mine = [];
+    if (ids.length) {
+      const q = await env.DB.prepare(`SELECT id, parent_id, text, received_at FROM eng_comments WHERE mine = 1 AND parent_id IN (${ids.map(() => "?").join(",")})`).bind(...ids).all();
+      mine = q.results || [];
+    }
+    const byParent = {};
+    for (const m of mine) (byParent[m.parent_id] = byParent[m.parent_id] || []).push({ id: m.id, text: m.text, at: m.received_at });
+    return json({ items: items.map((i) => ({ ...i, ourReplies: byParent[i.id] || [] })), keywords: (await engConfig(env)).keywords });
+  }
+  if (POST && (path === "comments/done" || path === "comments/reopen")) {
+    const id = String(body.id || "");
+    if (path === "comments/done") await env.DB.prepare("UPDATE eng_comments SET status = 'done', done_by = ?2, done_at = ?3 WHERE id = ?1 AND status IN ('new', 'manychat')").bind(id, by, now).run();
+    else await env.DB.prepare("UPDATE eng_comments SET status = 'new', done_by = NULL, done_at = NULL WHERE id = ?1 AND status IN ('done', 'manychat')").bind(id).run();
+    return json({ ok: true });
+  }
+  if (POST && path === "comments/done-emoji") {
+    // Emoji-only comments ("🔥🔥", "😍") rarely need an answer — clear them in one go.
+    const { results } = await env.DB.prepare("SELECT id, text FROM eng_comments WHERE status = 'new' AND mine = 0 AND urgent = 0 LIMIT 500").all();
+    const ids = (results || []).filter((r) => !/[\p{L}\p{N}]/u.test(r.text || "")).map((r) => r.id);
+    if (ids.length) await env.DB.batch(ids.map((id) => env.DB.prepare("UPDATE eng_comments SET status = 'done', done_by = ?2, done_at = ?3 WHERE id = ?1").bind(id, by, now)));
+    return json({ cleared: ids.length });
+  }
+
+  // ---- Reviews ----
+  if (GET && path === "reviews") {
+    const filter = url.searchParams.get("filter") || "todo";
+    const branch = url.searchParams.get("branch") || "";
+    const where = { todo: "reply IS NULL AND done_at IS NULL", low: "stars <= 3", replied: "reply IS NOT NULL", all: "1 = 1" }[filter] || "reply IS NULL AND done_at IS NULL";
+    const { results } = await env.DB.prepare(`SELECT * FROM eng_reviews WHERE ${where} AND (?1 = '' OR branch = ?1) ORDER BY created_at DESC LIMIT 150`).bind(branch).all();
+    const summary = (await kvGet(env, "engage_review_summary")) || {};
+    return json({ items: (results || []).map(engReviewOut), lastPull: await kvGet(env, "engage_reviews_pull"),
+      summary: Object.fromEntries(Object.entries(summary).map(([loc, s]) => [ENG_BRANCH_BY_LOCATION[loc] || loc, s])) });
+  }
+  if (POST && path === "reviews/pull") return json(await engPullReviews(env, "manual"));
+  if (POST && (path === "reviews/done" || path === "reviews/reopen")) {
+    if (!isReviewer) throw new HttpError(403, "Only admins and approvers can do that.");
+    const name = String(body.name || "");
+    if (path === "reviews/done") await env.DB.prepare("UPDATE eng_reviews SET done_by = ?2, done_at = ?3 WHERE name = ?1").bind(name, by, now).run();
+    else await env.DB.prepare("UPDATE eng_reviews SET done_by = NULL, done_at = NULL WHERE name = ?1").bind(name).run();
+    return json({ ok: true });
+  }
+
+  // ---- AI drafts + sending replies ----
+  if (POST && path === "draft") {
+    if (body.kind === "review") {
+      const r = await env.DB.prepare("SELECT * FROM eng_reviews WHERE name = ?1").bind(String(body.id || "")).first();
+      if (!r) throw new HttpError(404, "Review not found");
+      const where = r.branch ? r.branch.charAt(0).toUpperCase() + r.branch.slice(1) : "one of our";
+      const user = `Branch: SANJUGO ${where}\nGuest: ${r.reviewer}\nStars: ${r.stars || "?"} of 5\nReview: ${r.comment || "(no text, just the rating)"}${body.current ? "\nCurrent draft (improve it): " + String(body.current).slice(0, 800) : ""}`;
+      return json(engParseDraft(await aiText(env, ENG_REVIEW_SYSTEM, user, 600)));
+    }
+    await ensureMakeTables(env);
+    const c = await env.DB.prepare(`SELECT c.*, sp.caption AS sp_caption FROM eng_comments c LEFT JOIN social_posts sp ON sp.platform = 'instagram' AND sp.post_id = c.media_id WHERE c.id = ?1`).bind(String(body.id || "")).first();
+    if (!c) throw new HttpError(404, "Comment not found");
+    const user = `Post caption: ${String(c.sp_caption || "(unknown)").slice(0, 600)}\nComment from @${c.username || "someone"}: ${c.text || ""}${body.current ? "\nCurrent draft (improve it): " + String(body.current).slice(0, 400) : ""}`;
+    return json(engParseDraft(await aiText(env, ENG_COMMENT_SYSTEM, user, 400)));
+  }
+  if (POST && path === "reply") {
+    const kind = body.kind === "review" ? "review" : "comment";
+    const text = String(body.text || "").replace(/\r\n/g, "\n").trim();
+    if (!text) throw new HttpError(400, "Write a reply first.");
+    const cfg = await engConfig(env);
+    await ensureMakeTables(env);
+    const jobId = "rpl_" + crypto.randomUUID().slice(0, 12);
+    const token = crypto.randomUUID() + crypto.randomUUID().slice(0, 8);
+    let hook, payload;
+    if (kind === "comment") {
+      if (text.length > 2200) throw new HttpError(400, "Instagram replies can be up to 2,200 characters.");
+      const c = await env.DB.prepare("SELECT * FROM eng_comments WHERE id = ?1").bind(String(body.id || "")).first();
+      if (!c || c.mine) throw new HttpError(404, "Comment not found");
+      if (c.reply_state === "sending") throw new HttpError(409, "A reply is already on its way.");
+      if (!cfg.igReply) throw new HttpError(400, "Add the Instagram reply webhook in Settings → Engagement first.");
+      hook = cfg.igReply; payload = { token, commentId: c.id, message: text };
+      await env.DB.prepare("UPDATE eng_comments SET reply_text = ?2, reply_state = 'sending', reply_error = NULL, replied_by = ?3, replied_at = ?4 WHERE id = ?1").bind(c.id, text, by, now).run();
+    } else {
+      if (!isReviewer) throw new HttpError(403, "Only admins and approvers can reply to Google reviews.");
+      if (text.length > 4096) throw new HttpError(400, "Google replies can be up to 4,096 characters.");
+      const r = await env.DB.prepare("SELECT * FROM eng_reviews WHERE name = ?1").bind(String(body.id || "")).first();
+      if (!r) throw new HttpError(404, "Review not found");
+      if (r.reply_state === "sending") throw new HttpError(409, "A reply is already on its way.");
+      if (!cfg.reviewReply) throw new HttpError(400, "Add the Google review reply webhook in Settings → Engagement first.");
+      hook = cfg.reviewReply; payload = { token, review: r.name, comment: text };
+      await env.DB.prepare("UPDATE eng_reviews SET reply_state = 'sending', reply_error = NULL, replied_by = ?2, reply_at = ?3 WHERE name = ?1").bind(r.name, by, now).run();
+    }
+    const contentId = String(body.id || "");
+    await env.DB.prepare("INSERT INTO make_jobs (id, kind, content_id, platform, token, status, requested_by, trigger, detail, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, 'sent', ?6, 'manual', ?7, ?8, ?8)")
+      .bind(jobId, kind === "comment" ? "reply_ig" : "reply_review", contentId, kind === "comment" ? "instagram" : "gbp", token, by, JSON.stringify({ text }), now).run();
+    try {
+      await callHook(hook, payload);
+    } catch (e) {
+      await env.DB.prepare("UPDATE make_jobs SET status = 'failed', error = ?2, updated_at = ?3 WHERE id = ?1").bind(jobId, e.message, now).run();
+      if (kind === "comment") await env.DB.prepare("UPDATE eng_comments SET reply_state = 'failed', reply_error = ?2 WHERE id = ?1").bind(contentId, e.message).run();
+      else await env.DB.prepare("UPDATE eng_reviews SET reply_state = 'failed', reply_error = ?2 WHERE name = ?1").bind(contentId, e.message).run();
+      throw e;
+    }
+    return json({ ok: true, sending: true });
+  }
+  throw new HttpError(404, "Unknown request");
+}
+
+async function engPrune(env) {
+  await ensureEngTables(env);
+  const iso = new Date(Date.now() - MC_KEEP_DAYS * 86400e3).toISOString();
+  await env.DB.prepare("DELETE FROM eng_comments WHERE received_at < ?1").bind(iso).run();
 }

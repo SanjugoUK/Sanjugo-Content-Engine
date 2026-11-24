@@ -1116,7 +1116,7 @@ function baseReducer(state, action){
     case "SET_ME": return {...state, me: action.me, lock: action.lock || null, ...(action.me && action.me.member ? {currentUserId: action.me.member.id} : {})};
     case "SET_BRAND": return {...state, currentBrandId: action.id};
     case "SET_ROUTE": return {...state, route: action.route, createPrefill: action.createPrefill || null, libraryQuery: action.libraryQuery || "", driveReturn: action.driveReturn || state.driveReturn || null,
-      queueTab: action.queueTab || null, calendarPreset: action.calendarPreset || null, workspaceProject: action.workspaceProject || null};
+      queueTab: action.queueTab || null, calendarPreset: action.calendarPreset || null, workspaceProject: action.workspaceProject || null, engagementTab: action.engagementTab || null};
     case "CLEAR_DRIVE_RETURN": return {...state, driveReturn: null};
     case "SET_THEME": return {...state, theme: action.theme};
     case "ADD_TOAST": return {...state, toasts:[...state.toasts, {id:uid("toast"), message:action.message, variant:action.variant||"ok"}]};
@@ -1367,6 +1367,7 @@ const NAV_ITEMS = [
   {id:"queue", label:"Approval Queue", short:"Approvals", icon:"queue", tile:true},
   {id:"workspace", label:"Workspace", short:"Workspace", icon:"workspace", tile:true},
   {id:"chat", label:"Team Chat", icon:"chat"},
+  {id:"engagement", label:"Engagement", icon:"heart"},
   {id:"library", label:"Content Library", icon:"grid"},
   {id:"published", label:"Published Content", icon:"published"},
   {id:"campaigns", label:"Campaigns", icon:"megaphone"},
@@ -1394,6 +1395,17 @@ function Sidebar({open, onClose}){
     check(); const t = setInterval(check, 60000);
     return ()=>{ alive = false; clearInterval(t); };
   }, [user.id, state.route]);
+
+  // Engagement badge: urgent Instagram comments, recent Google reviews without a reply, and ManyChat "wants a person".
+  const [engWaiting, setEngWaiting] = useState({open:0, urgent:0});
+  const engAllowed = canGo(perms, "engagement");
+  useEffect(()=>{
+    if(!engAllowed) return;
+    let alive = true;
+    const check = ()=>{ if(document.hidden) return; fetch("/api/engage/count", {cache:"no-store"}).then(r=>r.ok? r.json() : null).then(d=>{ if(alive && d) setEngWaiting({open:d.badge||0, urgent:!!d.badgeUrgent}); }).catch(()=>{}); };
+    check(); const t = setInterval(check, 60000);
+    return ()=>{ alive = false; clearInterval(t); };
+  }, [engAllowed, state.route]);
 
   return (
     <>
@@ -1437,6 +1449,7 @@ function Sidebar({open, onClose}){
               <Icon name={it.icon} size={17}/>
               <span style={{flex:1}}>{it.label}</span>
               {it.id==="chat" && chat.unread>0 && <span title={chat.mentionUnread? "You were mentioned" : "Unread messages"} style={{background: chat.mentionUnread? "var(--red)" : "var(--accent)", color:"#fff", fontSize:10.5, fontWeight:700, borderRadius:99, padding:"1px 7px"}}>{chat.mentionUnread? "@"+chat.mentionUnread : chat.unread}</span>}
+              {it.id==="engagement" && engWaiting.open>0 && <span title={engWaiting.urgent? "Something urgent is waiting" : "Comments or reviews waiting"} style={{background: engWaiting.urgent? "var(--red)" : "var(--accent)", color:"#fff", fontSize:10.5, fontWeight:700, borderRadius:99, padding:"1px 7px"}}>{engWaiting.open}</span>}
               {it.id==="workspace" && wsWaiting>0 && <span title="Waiting for you" style={{background:"var(--blue)", color:"#fff", fontSize:10.5, fontWeight:700, borderRadius:99, padding:"1px 7px"}}>{wsWaiting}</span>}
               {it.id==="queue" && pendingCount>0 && !locked && <span style={{background:"var(--accent)", color:"#fff", fontSize:10.5, fontWeight:700, borderRadius:99, padding:"1px 7px"}}>{pendingCount}</span>}
             </button>
@@ -10526,6 +10539,712 @@ function WsFiled({p, drafts}){
     </Card>
   );
 }
+/* ============================== ENGAGEMENT (ManyChat) ==============================
+   Instagram DMs and comment keywords run in ManyChat. ManyChat's automations report to /api/manychat/hook, so this page
+   shows what happened (counts, people, who wants a person) and controls the texts automations send (ManyChat bot fields,
+   changed only once every reviewer approves) plus tracked links (/go/<name>). Server: manychatRoute in src/worker.js.
+   ManyChat's API can't build automations or show the inbox — those stay in ManyChat. */
+const ENG_TABS = [["overview","Overview"],["human","Needs a person"],["people","People"],["texts","DM texts"],["links","Links"]];
+const ENG_TYPES = {keyword:"Keyword", human:"Wants a person", story_mention:"Story mention", story_reply:"Story reply", welcome:"New chat", dm:"DM", other:"Other"};
+
+function useEng(){
+  const {state, dispatch} = useApp();
+  const toast = (message, variant)=>dispatch({type:"ADD_TOAST", message, variant});
+  const get = async path=>{ const r = await fetch("/api/manychat"+path, {cache:"no-store"}); const d = await r.json().catch(()=>({})); if(!r.ok) throw new Error(d.error || "Couldn't load ("+r.status+")"); return d; };
+  const post = async (path, body)=>{ const r = await fetch("/api/manychat/"+path, {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({...(body||{}), userId: state.currentUserId})});
+    const d = await r.json().catch(()=>({})); if(!r.ok) throw new Error(d.error || "Couldn't save ("+r.status+")"); return d; };
+  const copy = (text, what)=>{ try{ navigator.clipboard.writeText(text).then(()=>toast((what||"Link")+" copied"), ()=>toast("Couldn't copy — select it and copy by hand", "warn")); }catch(e){ toast("Couldn't copy — select it and copy by hand", "warn"); } };
+  return {get, post, toast, copy};
+}
+function engAgo(iso){
+  if(!iso) return "";
+  const m = Math.round((Date.now() - new Date(iso).getTime())/60000);
+  if(m < 1) return "just now"; if(m < 60) return m+" min ago";
+  const h = Math.round(m/60); if(h < 24) return h+" h ago";
+  const d = Math.round(h/24); if(d < 7) return d+(d===1?" day":" days")+" ago";
+  return fmtDate(iso, {day:"numeric", month:"short"});
+}
+const engMins = m => m==null ? "—" : m < 60 ? m+" min" : m < 1440 ? (Math.round(m/6)/10)+" h" : Math.round(m/1440)+" d";
+const engLondonDay = t => new Date(t).toLocaleDateString("en-CA", {timeZone:"Europe/London"});
+const engChatLink = (p, pageId) => p.chatUrl || (pageId && p.subId ? "https://app.manychat.com/fb"+pageId+"/chat/"+p.subId : null);
+
+function EngFace({p, size=38}){
+  const [broken, setBroken] = useState(false);
+  const label = (p.name || p.username || "?").trim();
+  if(p.pic && !broken) return <img src={p.pic} alt="" onError={()=>setBroken(true)} style={{width:size, height:size, borderRadius:99, objectFit:"cover", flexShrink:0, background:"var(--surface-2)"}}/>;
+  const initials = label.split(/\s+/).map(s=>s[0]).slice(0,2).join("").toUpperCase();
+  return <span style={{width:size, height:size, borderRadius:99, background:"var(--violet-soft)", color:"var(--violet)", display:"inline-flex", alignItems:"center", justifyContent:"center", fontWeight:700, fontSize:size*0.38, flexShrink:0}}>{initials}</span>;
+}
+function EngWho({p}){
+  return <div style={{minWidth:0}}>
+    <div style={{fontWeight:600, fontSize:14, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>{p.name || (p.username? "@"+p.username : "Someone on Instagram")}</div>
+    {p.username && p.name && <a href={"https://www.instagram.com/"+encodeURIComponent(p.username)+"/"} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()} style={{fontSize:12, color:"var(--ink-mute)", textDecoration:"none"}}>@{p.username}</a>}
+  </div>;
+}
+function EngChip({children, color, soft}){ return <span style={{fontSize:11.5, fontWeight:600, padding:"2px 8px", borderRadius:99, background: soft||"var(--surface-2)", color: color||"var(--ink-soft)", whiteSpace:"nowrap"}}>{children}</span>; }
+
+const ENG_MC_TABS = ["overview","human","people","texts"];
+const ENG_BRANCHES = [["shoreditch","Shoreditch"],["angel","Angel"],["victoria","Victoria"]];
+const engBranchName = b => (ENG_BRANCHES.find(x=>x[0]===b) || [b, b ? b.charAt(0).toUpperCase()+b.slice(1) : ""])[1];
+function useEngage(){
+  const {state, dispatch} = useApp();
+  const toast = (message, variant)=>dispatch({type:"ADD_TOAST", message, variant});
+  const get = async path=>{ const r = await fetch("/api/engage"+path, {cache:"no-store"}); const d = await r.json().catch(()=>({})); if(!r.ok) throw new Error(d.error || "Couldn't load ("+r.status+")"); return d; };
+  const post = async (path, body)=>{ const r = await fetch("/api/engage/"+path, {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({...(body||{}), userId: state.currentUserId})});
+    const d = await r.json().catch(()=>({})); if(!r.ok) throw new Error(d.error || "Couldn't save ("+r.status+")"); return d; };
+  return {get, post, toast};
+}
+
+function EngagementPage(){
+  const {state, dispatch} = useApp();
+  const {get} = useEng();
+  const eg = useEngage();
+  const user = USERS.find(u=>u.id===state.currentUserId);
+  const admin = !!(PERMS[user.role] && PERMS[user.role].manageSettings);
+  const reviewer = user.role==="admin" || user.role==="approver";
+  const [ov, setOv] = useState(null);
+  const [eng, setEng] = useState(null);
+  const [err, setErr] = useState("");
+  const load = ()=>{
+    eg.get("").then(d=>{ setEng(d); setErr(""); }).catch(e=>setErr(e.message));
+    get("").then(setOv).catch(()=>setOv({}));
+  };
+  useEffect(()=>{ load(); const t = setInterval(()=>{ if(!document.hidden) load(); }, 60000); return ()=>clearInterval(t); }, []);
+  const page = ov && ov.page;
+  const mcOk = !!(page && page.connected && !page.error);
+  const mcActive = mcOk || !!(ov && (ov.people>0 || ov.last)) || ENG_MC_TABS.includes(state.engagementTab);
+  const tabs = [["comments","Comments"],["reviews","Reviews"],["links","Links"], ...(mcActive ? [["overview","DMs"],["human","Needs a person"],["people","People"],["texts","DM texts"]] : [])];
+  const [tab, setTab] = useState(()=> state.engagementTab && (["comments","reviews","links"].includes(state.engagementTab) || ENG_MC_TABS.includes(state.engagementTab)) ? state.engagementTab : "comments");
+  const counts = eng ? {comments:[eng.comments.todo, eng.comments.urgent>0], reviews:[eng.reviews.todo, eng.reviews.low>0], human:[ov ? ov.open||0 : 0, ov ? ov.openUrgent>0 : false]} : {};
+  const missing = eng ? [!eng.setup.comments && "Instagram comments", !eng.setup.igReply && "Instagram replies", !eng.setup.reviews && "Google reviews", !eng.setup.reviewReply && "review replies"].filter(Boolean) : [];
+  return (
+    <div>
+      <PageHeader title="Engagement" subtitle="Instagram comments and Google reviews, with replies drafted by AI"
+        action={mcActive && ov && ov.page ? (mcOk
+          ? <Badge label={"ManyChat · "+(page.name || "connected")} color="var(--green)" soft="var(--green-soft)"/>
+          : <Badge label="ManyChat not connected" color="var(--amber)" soft="var(--amber-soft)"/>) : null}/>
+      {err && <Card style={{padding:14, marginBottom:16, color:"var(--red)", fontSize:13}}>{err}</Card>}
+      {eng && missing.length>0 && <Card style={{padding:"12px 16px", marginBottom:16, background:"var(--amber-soft)", border:"1px solid color-mix(in srgb, var(--amber) 35%, transparent)", fontSize:13, lineHeight:1.5}}>
+        Not connected yet: {missing.join(", ")}. {admin ? <button onClick={()=>dispatch({type:"SET_ROUTE", route:"settings"})} style={{border:"none", background:"none", padding:0, color:"var(--accent)", fontWeight:600, cursor:"pointer", fontSize:13}}>Settings → Engagement</button> : "An admin needs to finish the set-up in Make."}
+      </Card>}
+      <div className="cf-noscrollbar" style={{display:"flex", gap:4, borderBottom:"1px solid var(--border)", marginBottom:18, overflowX:"auto"}}>
+        {tabs.map(([k,l])=>{
+          const active = tab===k, c = counts[k];
+          return <button key={k} onClick={()=>setTab(k)} className="cf-qtab" style={{padding:"9px 14px", border:"none", borderBottom:"2px solid "+(active? "var(--accent)":"transparent"), marginBottom:-1, background:"transparent", color: active? "var(--ink)":"var(--ink-soft)", fontWeight: active? 600:500, fontSize:13.5, cursor:"pointer", whiteSpace:"nowrap", display:"flex", alignItems:"center", gap:7}}>
+            {l}{c && c[0]>0 && <span className="num" style={{fontSize:11, fontWeight:700, padding:"1px 7px", borderRadius:99, background: c[1]? "var(--red)" : "var(--accent)", color:"#fff"}}>{c[0]>99 ? "99+" : c[0]}</span>}
+          </button>;
+        })}
+      </div>
+      {tab==="comments" && <EngComments onChange={load}/>}
+      {tab==="reviews" && <EngReviews reviewer={reviewer} onChange={load}/>}
+      {tab==="links" && <EngLinks admin={admin}/>}
+      {tab==="overview" && <EngOverview ov={ov && ov.page ? ov : null} go={setTab} connected={mcOk}/>}
+      {tab==="human" && <EngHuman onChange={load}/>}
+      {tab==="people" && <EngPeople admin={admin}/>}
+      {tab==="texts" && <EngTexts admin={admin}/>}
+    </div>
+  );
+}
+
+/* Write, draft with AI, send. Used for Instagram comments and Google reviews. */
+function EngReplyBox({kind, id, canSend, cantSendNote, initial="", onSent, onCancel}){
+  const eg = useEngage();
+  const [text, setText] = useState(initial);
+  const [ai, setAi] = useState(null);
+  const [busy, setBusy] = useState("");
+  const max = kind==="review" ? 4096 : 2200;
+  async function draft(){
+    setBusy("draft");
+    try{ const d = await eg.post("draft", {kind, id, current: text || undefined}); setAi(d); setText(d.pick || text); }catch(e){ eg.toast(e.message, "danger"); }
+    setBusy("");
+  }
+  async function send(){
+    setBusy("send");
+    try{ await eg.post("reply", {kind, id, text}); eg.toast("Sending your reply…"); onSent && onSent(); }catch(e){ eg.toast(e.message, "danger"); }
+    setBusy("");
+  }
+  return (
+    <div style={{marginTop:12}}>
+      {ai && ai.check && <div style={{fontSize:12.5, color:"var(--amber)", background:"var(--amber-soft)", borderRadius:8, padding:"7px 10px", marginBottom:8}}>Check first: {ai.check}</div>}
+      <textarea value={text} onChange={e=>setText(e.target.value)} rows={kind==="review"? 4 : 2} maxLength={max} placeholder={kind==="review" ? "Your reply to this review" : "Your reply"}
+        style={{width:"100%", borderRadius:10, border:"1px solid var(--border)", padding:10, fontSize:13.5, fontFamily:"inherit", lineHeight:1.5, resize:"vertical", background:"var(--surface)", color:"var(--ink)"}}/>
+      {ai && ai.alts && ai.alts.length>0 && <div style={{display:"flex", gap:6, flexWrap:"wrap", marginTop:6}}>
+        {ai.alts.map((a, i)=><button key={i} onClick={()=>setText(a)} title="Use this one" style={{textAlign:"left", fontSize:12.5, padding:"5px 9px", borderRadius:8, border:"1px solid var(--border)", background: text===a? "var(--accent-soft)" : "var(--surface-2)", color:"var(--ink)", cursor:"pointer", maxWidth:"100%"}}>{a}</button>)}
+      </div>}
+      <div style={{display:"flex", gap:8, marginTop:8, flexWrap:"wrap", alignItems:"center"}}>
+        <Button size="sm" icon="zap" disabled={!!busy} onClick={draft}>{busy==="draft" ? "Writing…" : text ? "Redo with AI" : "Draft with AI"}</Button>
+        <Button size="sm" variant="primary" icon="send" disabled={!!busy || !text.trim() || !canSend} onClick={send}>{busy==="send" ? "Sending…" : "Send reply"}</Button>
+        {onCancel && <Button size="sm" variant="ghost" onClick={onCancel}>Cancel</Button>}
+        {!canSend && cantSendNote && <span style={{fontSize:12, color:"var(--ink-mute)"}}>{cantSendNote}</span>}
+      </div>
+    </div>
+  );
+}
+function EngReplyState({item, who}){
+  if(item.replyState==="sending") return <div style={{fontSize:12.5, color:"var(--blue)", marginTop:8}}>⏳ Sending “{(item.replyText || "").slice(0, 80)}”…</div>;
+  if(item.replyState==="failed") return <div style={{fontSize:12.5, color:"var(--red)", marginTop:8}}>Didn't send: {item.replyError || "unknown error"}</div>;
+  return null;
+}
+
+function EngComments({onChange}){
+  const eg = useEngage();
+  const [filter, setFilter] = useState("todo");
+  const [data, setData] = useState(null);
+  const [open, setOpen] = useState(null);
+  const [busy, setBusy] = useState("");
+  const load = ()=>eg.get("/comments?filter="+filter).then(setData).catch(e=>eg.toast(e.message, "danger"));
+  const sending = !!(data && data.items.some(i=>i.replyState==="sending"));
+  useEffect(()=>{ setData(null); load(); }, [filter]);
+  useEffect(()=>{ const t = setInterval(()=>{ if(!document.hidden) load(); }, sending ? 8000 : 45000); return ()=>clearInterval(t); }, [filter, sending]);
+  async function act(path, id, msg){ setBusy(id); try{ await eg.post(path, {id}); msg && eg.toast(msg); await load(); onChange && onChange(); }catch(e){ eg.toast(e.message, "danger"); } setBusy(""); }
+  async function clearEmoji(){ setBusy("emoji"); try{ const d = await eg.post("comments/done-emoji"); eg.toast(d.cleared ? d.cleared+" emoji-only comment"+(d.cleared===1?"":"s")+" cleared" : "No emoji-only comments"); await load(); onChange && onChange(); }catch(e){ eg.toast(e.message, "danger"); } setBusy(""); }
+  const name = id => { const u = USERS.find(x=>x.id===id); return u ? u.name : null; };
+  const filters = [["todo","To answer"],["urgent","Urgent"],["answered","Answered"],["manychat","ManyChat"],["done","No reply needed"],["all","All"]];
+  return (
+    <div>
+      <div style={{display:"flex", gap:6, marginBottom:14, flexWrap:"wrap", alignItems:"center"}}>
+        {filters.map(([k,l])=><ChipToggle key={k} active={filter===k} onClick={()=>setFilter(k)}>{l}</ChipToggle>)}
+        {filter==="todo" && data && data.items.length>0 && <Button size="sm" variant="text" disabled={busy==="emoji"} onClick={clearEmoji}>Clear emoji-only</Button>}
+      </div>
+      {!data ? <div style={{display:"grid", gap:10}}><Skeleton h={110}/><Skeleton h={110}/></div>
+        : !data.items.length ? <Card><EmptyState icon="comment" title={filter==="todo" ? "All answered" : "Nothing here"} subtitle={filter==="todo" ? "New Instagram comments land here within seconds. Urgent ones also go to Team Chat." : null}/></Card>
+        : <div style={{display:"grid", gap:12}}>{data.items.map(c=>{
+            const replying = open===c.id;
+            return (
+              <Card key={c.id} style={{padding:14, border:"1px solid "+(c.urgent && c.status==="new" ? "color-mix(in srgb, var(--red) 45%, transparent)" : "var(--border)")}}>
+                <div style={{display:"flex", gap:12, alignItems:"flex-start"}}>
+                  {c.post && c.post.thumb
+                    ? <a href={c.post.permalink || undefined} target="_blank" rel="noopener noreferrer" title="Open the post" style={{flexShrink:0}}><img src={c.post.thumb} alt="" style={{width:44, height:56, objectFit:"cover", borderRadius:6, background:"var(--surface-2)", display:"block"}}/></a>
+                    : <div style={{width:44, height:56, borderRadius:6, background:"var(--surface-2)", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0, color:"var(--ink-mute)"}}><Icon name="image" size={16}/></div>}
+                  <div style={{flex:1, minWidth:0}}>
+                    <div style={{display:"flex", gap:8, alignItems:"baseline", flexWrap:"wrap"}}>
+                      <a href={"https://www.instagram.com/"+encodeURIComponent(c.username)+"/"} target="_blank" rel="noopener noreferrer" style={{fontWeight:600, fontSize:13.5, color:"var(--ink)", textDecoration:"none"}}>@{c.username || "someone"}</a>
+                      <span style={{fontSize:12, color:"var(--ink-mute)"}}>{engAgo(c.receivedAt)}{c.parentId ? " · reply in a thread" : ""}</span>
+                    </div>
+                    {c.post && c.post.caption && <div style={{fontSize:11.5, color:"var(--ink-mute)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", marginTop:1}}>on “{c.post.caption.slice(0, 90)}”</div>}
+                    <div style={{fontSize:14, lineHeight:1.45, marginTop:6, whiteSpace:"pre-wrap", wordBreak:"break-word"}}>{c.text || <i style={{color:"var(--ink-mute)"}}>(no text)</i>}</div>
+                    <div style={{display:"flex", gap:6, flexWrap:"wrap", marginTop:8}}>
+                      {c.urgent && c.status==="new" && <EngChip color="var(--red)" soft="var(--red-soft)">⚠️ Allergy or complaint — reply with care</EngChip>}
+                      {c.status==="manychat" && <EngChip color="var(--violet)" soft="var(--violet-soft)">ManyChat replies to this</EngChip>}
+                      {c.status==="done" && <EngChip>No reply needed{name(c.doneBy) ? " · "+name(c.doneBy) : ""}</EngChip>}
+                    </div>
+                    {c.ourReplies.map(r=><div key={r.id} style={{marginTop:8, padding:"7px 10px", background:"var(--accent-soft)", borderRadius:10, fontSize:13, lineHeight:1.45}}><b>Sanjugo:</b> {r.text}</div>)}
+                    {!c.ourReplies.length && c.replyState==="sent" && c.replyText && <div style={{marginTop:8, padding:"7px 10px", background:"var(--accent-soft)", borderRadius:10, fontSize:13}}><b>Sanjugo:</b> {c.replyText}{name(c.repliedBy) ? <span style={{color:"var(--ink-mute)"}}> · {name(c.repliedBy)}</span> : null}</div>}
+                    <EngReplyState item={c}/>
+                    {replying
+                      ? <EngReplyBox kind="comment" id={c.id} canSend initial={c.replyState==="failed" ? c.replyText : ""} onCancel={()=>setOpen(null)} onSent={()=>{ setOpen(null); load(); }}/>
+                      : c.replyState!=="sending" && <div style={{display:"flex", gap:8, marginTop:10, flexWrap:"wrap"}}>
+                          {c.status!=="answered" && <Button size="sm" variant={c.status==="new" ? "primary" : "ghost"} icon="comment" onClick={()=>setOpen(c.id)}>{c.replyState==="failed" ? "Try again" : c.status==="manychat" ? "Reply anyway" : "Reply"}</Button>}
+                          {c.status==="answered" && <Button size="sm" variant="ghost" icon="comment" onClick={()=>setOpen(c.id)}>Reply again</Button>}
+                          {c.status==="new" && <Button size="sm" variant="ghost" disabled={busy===c.id} onClick={()=>act("comments/done", c.id)}>No reply needed</Button>}
+                          {(c.status==="done" || c.status==="manychat") && <Button size="sm" variant="ghost" icon="undo" disabled={busy===c.id} onClick={()=>act("comments/reopen", c.id, "Back in To answer")}>Back to To answer</Button>}
+                        </div>}
+                  </div>
+                </div>
+              </Card>
+            );
+          })}</div>}
+    </div>
+  );
+}
+
+const engStars = n => n ? "★".repeat(n)+"☆".repeat(Math.max(0, 5-n)) : "";
+function EngReviews({reviewer, onChange}){
+  const eg = useEngage();
+  const [filter, setFilter] = useState("todo");
+  const [branch, setBranch] = useState("");
+  const [data, setData] = useState(null);
+  const [open, setOpen] = useState(null);
+  const [busy, setBusy] = useState("");
+  const load = ()=>eg.get("/reviews?filter="+filter+"&branch="+branch).then(setData).catch(e=>eg.toast(e.message, "danger"));
+  const sending = !!(data && data.items.some(i=>i.replyState==="sending"));
+  useEffect(()=>{ setData(null); load(); }, [filter, branch]);
+  useEffect(()=>{ const t = setInterval(()=>{ if(!document.hidden) load(); }, sending ? 8000 : 60000); return ()=>clearInterval(t); }, [filter, branch, sending]);
+  async function pull(){ setBusy("pull"); try{ await eg.post("reviews/pull"); eg.toast("Checking Google — new reviews show up in a minute"); setTimeout(load, 20000); setTimeout(load, 45000); }catch(e){ eg.toast(e.message, "danger"); } setBusy(""); }
+  async function act(path, name, msg){ setBusy(name); try{ await eg.post(path, {name}); msg && eg.toast(msg); await load(); onChange && onChange(); }catch(e){ eg.toast(e.message, "danger"); } setBusy(""); }
+  const summary = (data && data.summary) || {};
+  const last = data && data.lastPull;
+  return (
+    <div>
+      <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(150px, 1fr))", gap:10, marginBottom:14}}>
+        {ENG_BRANCHES.map(([k, l])=>{ const s = summary[k]; const on = branch===k;
+          return <Card key={k} onClick={()=>setBranch(on ? "" : k)} style={{padding:"12px 14px", border:"1px solid "+(on? "var(--accent)" : "var(--border)")}}>
+            <div style={{fontSize:12, fontWeight:700, color:"var(--ink-mute)"}}>{l}</div>
+            <div style={{display:"flex", alignItems:"baseline", gap:6, marginTop:4}}><span className="num font-display" style={{fontSize:22, fontWeight:600}}>{s && s.avg ? Number(s.avg).toFixed(1) : "—"}</span><span style={{color:"var(--amber)", fontSize:13}}>★</span></div>
+            <div style={{fontSize:12, color:"var(--ink-mute)"}}>{s && s.total ? fmtNum(s.total)+" reviews" : "Not checked yet"}</div>
+          </Card>; })}
+      </div>
+      <div style={{display:"flex", gap:6, marginBottom:14, flexWrap:"wrap", alignItems:"center"}}>
+        {[["todo","To reply"],["low","1–3 stars"],["replied","Replied"],["all","All"]].map(([k,l])=><ChipToggle key={k} active={filter===k} onClick={()=>setFilter(k)}>{l}</ChipToggle>)}
+        <span style={{flex:1}}/>
+        <span style={{fontSize:12, color: last && last.error ? "var(--red)" : "var(--ink-mute)"}}>{last ? (last.error ? "Last check failed: "+last.error : "Checked "+engAgo(last.at)) : ""}</span>
+        <Button size="sm" icon="refresh" disabled={busy==="pull"} onClick={pull}>Check now</Button>
+      </div>
+      {!data ? <div style={{display:"grid", gap:10}}><Skeleton h={120}/><Skeleton h={120}/></div>
+        : !data.items.length ? <Card><EmptyState icon="check" title={filter==="todo" ? "Every review has a reply" : "Nothing here"} subtitle={filter==="todo" ? "Google is checked every 4 hours (8am–10pm). New 1–2 star reviews also go to Team Chat." : null}/></Card>
+        : <div style={{display:"grid", gap:12}}>{data.items.map(r=>{
+            const replying = open===r.name;
+            return (
+              <Card key={r.name} style={{padding:14, border:"1px solid "+(!r.reply && r.stars && r.stars<=2 ? "color-mix(in srgb, var(--red) 45%, transparent)" : "var(--border)")}}>
+                <div style={{display:"flex", gap:12, alignItems:"center"}}>
+                  <EngFace p={{name:r.reviewer, pic:r.photo}} size={36}/>
+                  <div style={{flex:1, minWidth:0}}>
+                    <div style={{fontWeight:600, fontSize:13.5, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>{r.reviewer}</div>
+                    <div style={{fontSize:12, color:"var(--ink-mute)"}}><span style={{color:"var(--amber)", letterSpacing:1}}>{engStars(r.stars)}</span> · {engBranchName(r.branch)} · {r.createdAt ? engAgo(r.createdAt) : ""}</div>
+                  </div>
+                </div>
+                {r.comment ? <div style={{fontSize:14, lineHeight:1.5, marginTop:10, whiteSpace:"pre-wrap", wordBreak:"break-word"}}>{r.comment}</div> : <div style={{fontSize:13, color:"var(--ink-mute)", marginTop:8, fontStyle:"italic"}}>Rating only, no text</div>}
+                {r.reply && <div style={{marginTop:10, padding:"8px 11px", background:"var(--accent-soft)", borderRadius:10, fontSize:13, lineHeight:1.5, whiteSpace:"pre-wrap"}}><b>Our reply:</b> {r.reply}</div>}
+                <EngReplyState item={r}/>
+                {r.done && !r.reply && <div style={{marginTop:8}}><EngChip>No reply needed</EngChip></div>}
+                {replying
+                  ? <EngReplyBox kind="review" id={r.name} canSend={reviewer} cantSendNote="Only admins and approvers can send review replies." initial={r.reply || ""} onCancel={()=>setOpen(null)} onSent={()=>{ setOpen(null); load(); onChange && onChange(); }}/>
+                  : r.replyState!=="sending" && <div style={{display:"flex", gap:8, marginTop:10, flexWrap:"wrap"}}>
+                      <Button size="sm" variant={!r.reply && !r.done ? "primary" : "ghost"} icon={r.reply ? "edit" : "comment"} onClick={()=>setOpen(r.name)}>{r.reply ? "Edit reply" : r.replyState==="failed" ? "Try again" : "Reply"}</Button>
+                      {reviewer && !r.reply && !r.done && <Button size="sm" variant="ghost" disabled={busy===r.name} onClick={()=>act("reviews/done", r.name)}>No reply needed</Button>}
+                      {reviewer && r.done && !r.reply && <Button size="sm" variant="ghost" icon="undo" disabled={busy===r.name} onClick={()=>act("reviews/reopen", r.name)}>Back to To reply</Button>}
+                    </div>}
+              </Card>
+            );
+          })}</div>}
+    </div>
+  );
+}
+
+/* Settings → Engagement (admins): the Make links for comments and reviews. */
+function EngHookRow({label, hint, on, value, onSave, children, first}){
+  const [v, setV] = useState(value || "");
+  const [editing, setEditing] = useState(!value);
+  useEffect(()=>{ setV(value || ""); setEditing(!value); }, [value]);
+  return (
+    <SettingRow first={first} on={on} label={label} hint={hint}>
+      {editing
+        ? <><input value={v} onChange={e=>setV(e.target.value.trim())} placeholder="https://hook.eu1.make.com/…" style={{width:240, maxWidth:"100%", padding:"6px 9px", borderRadius:8, border:"1px solid var(--border)", background:"var(--surface)", color:"var(--ink)", fontSize:12.5}}/>
+            <Button size="sm" variant="primary" disabled={!v || v===value} onClick={async ()=>{ if(await onSave(v)) setEditing(false); }}>Save</Button>
+            {value && <Button size="sm" variant="ghost" onClick={()=>{ setV(value); setEditing(false); }}>Cancel</Button>}</>
+        : <><Button size="sm" variant="ghost" onClick={()=>setEditing(true)}>Change</Button>{children}</>}
+    </SettingRow>
+  );
+}
+function EngageSettings(){
+  const eg = useEngage();
+  const {copy} = useEng();
+  const [d, setD] = useState(null);
+  const [kw, setKw] = useState("");
+  const load = ()=>eg.get("/config").then(x=>{ setD(x); setKw((x.keywords||[]).join(", ")); }).catch(e=>setD({error:e.message}));
+  useEffect(()=>{ load(); }, []);
+  if(!d) return <Skeleton h={60}/>;
+  if(d.error) return <div style={{fontSize:13, color:"var(--red)", padding:"12px 0"}}>{d.error}</div>;
+  async function save(patch, msg){ try{ const r = await eg.post("config", patch); setD(x=>({...x, ...r})); eg.toast(msg || "Saved"); return true; }catch(e){ eg.toast(e.message, "danger"); return false; } }
+  async function rotate(){ try{ const r = await eg.post("config/rotate"); setD(x=>({...x, inLink:r.inLink})); eg.toast("New link made — paste it into Make again"); }catch(e){ eg.toast(e.message, "danger"); } }
+  async function pull(){ try{ await eg.post("reviews/pull"); eg.toast("Checking Google reviews…"); setTimeout(load, 20000); }catch(e){ eg.toast(e.message, "danger"); } }
+  return (
+    <div>
+      <SettingRow first on={!!d.lastIn} label="Instagram comments" hint={d.lastIn ? "Last comment "+engAgo(d.lastIn.at) : "Nothing received yet"}>
+        <Button size="sm" variant="primary" icon="link" onClick={()=>copy(d.inLink, "Incoming link")}>Copy incoming link</Button>
+        <ConfirmButton confirmLabel="Old link stops working — sure?" onConfirm={rotate}>New link</ConfirmButton>
+      </SettingRow>
+      <EngHookRow label="Instagram replies" on={!!d.igReply} value={d.igReply} hint={d.igReply ? "Make webhook set" : "Paste the “Engage · Instagram reply” webhook"} onSave={v=>save({igReply:v}, "Instagram reply webhook saved")}/>
+      <EngHookRow label="Google reviews" on={!!d.reviewsPull} value={d.reviewsPull} hint={d.lastPull ? (d.lastPull.error ? "Last check failed: "+d.lastPull.error : "Checked "+engAgo(d.lastPull.at)+" · every 4 hours") : "Paste the “Engage · Google reviews” webhook"} onSave={v=>save({reviewsPull:v}, "Google reviews webhook saved")}>
+        <Button size="sm" variant="ghost" icon="refresh" onClick={pull}>Check now</Button>
+      </EngHookRow>
+      <EngHookRow label="Google review replies" on={!!d.reviewReply} value={d.reviewReply} hint={d.reviewReply ? "Make webhook set" : "Paste the “Engage · Google review reply” webhook"} onSave={v=>save({reviewReply:v}, "Review reply webhook saved")}/>
+      <SettingRow label="Left to ManyChat" hint="Comments with these keywords get ManyChat's reply, so they skip To answer">
+        <input value={kw} onChange={e=>setKw(e.target.value)} placeholder="WAGYU, MENU" style={{width:200, maxWidth:"100%", padding:"6px 9px", borderRadius:8, border:"1px solid var(--border)", background:"var(--surface)", color:"var(--ink)", fontSize:12.5}}/>
+        <Button size="sm" variant="ghost" disabled={kw===(d.keywords||[]).join(", ")} onClick={()=>save({keywords:kw}, "Keywords saved")}>Save</Button>
+      </SettingRow>
+      <MoreInfo label="How to set up in Make">
+        <ol style={{margin:0, paddingLeft:18, display:"grid", gap:6}}>
+          <li>In Make, open <b>Engage · Instagram comments</b>, click the HTTP step and paste the incoming link as its URL.</li>
+          <li>Open each other <b>Engage ·</b> scenario, copy its webhook address and paste it in the matching row above.</li>
+          <li>Switch the four <b>Engage ·</b> scenarios on.</li>
+        </ol>
+      </MoreInfo>
+    </div>
+  );
+}
+
+function EngOverview({ov, go, connected}){
+  const {get} = useEng();
+  const [flows, setFlows] = useState(null);
+  if(!ov) return <div style={{display:"grid", gap:12}}><Skeleton h={90}/><Skeleton h={220}/></div>;
+  const total = (ov.types||[]).reduce((a,t)=>a+t.n, 0);
+  const byDay = new Map((ov.days||[]).map(d=>[d.day, d.n]));
+  const bars = Array.from({length:14}, (_, i)=>{ const t = Date.now() - (13-i)*86400000; const day = engLondonDay(t); const d = new Date(t);
+    return {label: d.toLocaleDateString("en-GB", {weekday:"short", day:"numeric", month:"short"}), shortLabel: String(d.getDate()), value: byDay.get(day) || 0}; });
+  const maxTop = Math.max(1, ...(ov.top||[]).map(t=>t.n));
+  const nothing = !total && !ov.people;
+  return (
+    <div>
+      <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(150px, 1fr))", gap:12, marginBottom:20}}>
+        <StatTile icon="chat" label="Conversations" value={fmtNum(total)} sub="last 30 days"/>
+        <StatTile icon="heart" label="New people" value={fmtNum(ov.newPeople)} sub={ov.newPeople7+" this week · "+fmtNum(ov.people)+" in all"}/>
+        <StatTile icon="link" label="Link clicks" value={fmtNum(ov.clicks)} sub={ov.clickPeople ? ov.clickPeople+" people · 30 days" : "last 30 days"} onClick={()=>go("links")} hint="Links"/>
+        <StatTile icon="bell" label="Needs a person" value={ov.open} sub={ov.openUrgent ? ov.openUrgent+" urgent" : "waiting now"} onClick={()=>go("human")} hint="Open"/>
+        <StatTile icon="clock" label="Reply time" value={engMins(ov.replyMins)} sub={ov.replied ? "typical, "+ov.replied+" replied" : "after someone asks"}/>
+      </div>
+      {nothing ? (
+        <Card><EmptyState icon="chat" title="Nothing from ManyChat yet" subtitle="Once an automation sends to Creator Studio, keywords, people and requests show up here."/></Card>
+      ) : <>
+        <SectionTitle>Conversations per day</SectionTitle>
+        <Card style={{padding:"18px 16px 10px", marginBottom:22}}><BarChart data={bars} height={180}/></Card>
+        <SectionTitle>Top keywords and automations <span style={{fontWeight:500, fontSize:12, color:"var(--ink-mute)"}}>· 30 days</span></SectionTitle>
+        <Card style={{padding:"6px 16px", marginBottom:22}}>
+          {(ov.top||[]).map((t, i)=>(
+            <div key={t.name} style={{display:"flex", alignItems:"center", gap:12, padding:"10px 0", borderTop: i? "1px solid var(--border)" : "none"}}>
+              <div style={{flex:"0 1 190px", minWidth:0, fontWeight:600, fontSize:13.5, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>{ENG_TYPES[t.name] || t.name}</div>
+              <div style={{flex:1, height:8, background:"var(--surface-2)", borderRadius:99, overflow:"hidden", minWidth:40}}><div style={{width:(t.n/maxTop*100)+"%", height:"100%", background:"var(--accent)", borderRadius:99}}/></div>
+              <div className="num" style={{fontSize:12.5, color:"var(--ink-soft)", whiteSpace:"nowrap", textAlign:"right", minWidth:92}}><b style={{color:"var(--ink)"}}>{t.n}</b> · {t.people} {t.people===1?"person":"people"}</div>
+            </div>
+          ))}
+        </Card>
+      </>}
+      <div style={{fontSize:12, color:"var(--ink-mute)", display:"flex", gap:10, alignItems:"center", flexWrap:"wrap"}}>
+        <span>{ov.last ? "Last from ManyChat: "+engAgo(ov.last.at)+(ov.last.automation ? " ("+ov.last.automation+")" : "") : "Nothing received from ManyChat yet."}</span>
+        {connected && flows===null && <Button size="sm" variant="text" onClick={()=>{ setFlows("loading"); get("/flows").then(d=>setFlows(d.flows||[])).catch(e=>setFlows({error:e.message})); }}>Show ManyChat automations</Button>}
+      </div>
+      {flows && flows!=="loading" && <Card style={{padding:14, marginTop:10}}>
+        {flows.error ? <div style={{fontSize:13, color:"var(--red)"}}>{flows.error}</div>
+          : !flows.length ? <div style={{fontSize:13, color:"var(--ink-mute)"}}>No automations in ManyChat yet.</div>
+          : <div style={{display:"flex", gap:6, flexWrap:"wrap"}}>{flows.map(f=><EngChip key={f.ns}>{f.name}</EngChip>)}</div>}
+      </Card>}
+    </div>
+  );
+}
+
+function EngHuman({onChange}){
+  const {get, post, toast} = useEng();
+  const [status, setStatus] = useState("open");
+  const [data, setData] = useState(null);
+  const [busy, setBusy] = useState("");
+  const load = ()=>get("/human?status="+status).then(setData).catch(e=>toast(e.message, "danger"));
+  useEffect(()=>{ setData(null); load(); const t = setInterval(()=>{ if(!document.hidden) load(); }, 45000); return ()=>clearInterval(t); }, [status]);
+  async function act(path, id, msg){ setBusy(id); try{ await post(path, {id}); toast(msg); await load(); onChange && onChange(); }catch(e){ toast(e.message, "danger"); } setBusy(""); }
+  const name = id => { const u = USERS.find(x=>x.id===id); return u ? u.name : "someone"; };
+  return (
+    <div>
+      <div style={{display:"flex", gap:6, marginBottom:14}}>
+        {[["open","Waiting"],["done","Done"]].map(([k,l])=><ChipToggle key={k} active={status===k} onClick={()=>setStatus(k)}>{l}</ChipToggle>)}
+      </div>
+      {!data ? <div style={{display:"grid", gap:10}}><Skeleton h={110}/><Skeleton h={110}/></div>
+        : !data.items.length ? <Card><EmptyState icon="check" title={status==="open" ? "No one waiting" : "Nothing done yet"} subtitle={status==="open" ? "When someone asks for a person in a ManyChat automation, they show up here and in Team Chat." : null}/></Card>
+        : <div style={{display:"grid", gap:12}}>{data.items.map(h=>{
+            const link = engChatLink(h, data.pageId);
+            return (
+              <Card key={h.id} style={{padding:16, border:"1px solid "+(h.urgent && h.status==="open" ? "color-mix(in srgb, var(--red) 45%, transparent)" : "var(--border)")}}>
+                <div style={{display:"flex", gap:12, alignItems:"center"}}>
+                  <EngFace p={h}/>
+                  <div style={{flex:1, minWidth:0}}><EngWho p={h}/></div>
+                  <div style={{fontSize:12, color:"var(--ink-mute)", whiteSpace:"nowrap"}}>{engAgo(h.createdAt)}</div>
+                </div>
+                <div style={{display:"flex", gap:6, flexWrap:"wrap", marginTop:10}}>
+                  {h.urgent && <EngChip color="var(--red)" soft="var(--red-soft)">⚠️ Allergy or complaint — reply first</EngChip>}
+                  {h.reason && <EngChip>{h.reason}</EngChip>}
+                </div>
+                {h.text && <div style={{marginTop:10, padding:"10px 12px", background:"var(--surface-2)", borderRadius:10, fontSize:13.5, lineHeight:1.45, whiteSpace:"pre-wrap", wordBreak:"break-word"}}>“{h.text}”</div>}
+                {h.status==="done" && <div style={{fontSize:12, color:"var(--ink-mute)", marginTop:10}}>Done by {name(h.doneBy)} · {engMins(Math.round((new Date(h.doneAt)-new Date(h.createdAt))/60000))} after they asked</div>}
+                <div style={{display:"flex", gap:8, marginTop:12, flexWrap:"wrap"}}>
+                  {link && <a href={link} target="_blank" rel="noopener noreferrer" style={{textDecoration:"none"}}><Button size="sm" variant={h.status==="open"? "primary":"ghost"} icon="external">Reply in ManyChat</Button></a>}
+                  {h.status==="open"
+                    ? <Button size="sm" variant="success" icon="check" disabled={busy===h.id} onClick={()=>act("human/done", h.id, "Marked as done")}>Done</Button>
+                    : <Button size="sm" variant="ghost" icon="undo" disabled={busy===h.id} onClick={()=>act("human/reopen", h.id, "Moved back to waiting")}>Reopen</Button>}
+                </div>
+              </Card>
+            );
+          })}</div>}
+    </div>
+  );
+}
+
+function EngPeople({admin}){
+  const {get, toast} = useEng();
+  const [q, setQ] = useState("");
+  const [data, setData] = useState(null);
+  const [open, setOpen] = useState(null);
+  const load = query=>get("/people?q="+encodeURIComponent(query)).then(setData).catch(e=>toast(e.message, "danger"));
+  useEffect(()=>{ const t = setTimeout(()=>load(q), q ? 300 : 0); return ()=>clearTimeout(t); }, [q]);
+  return (
+    <div>
+      <div style={{display:"flex", gap:10, alignItems:"center", marginBottom:14, flexWrap:"wrap"}}>
+        <div style={{position:"relative", flex:"1 1 220px", maxWidth:360}}>
+          <Icon name="search" size={15} style={{position:"absolute", left:10, top:10, color:"var(--ink-mute)"}}/>
+          <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Name, @username or keyword" style={{width:"100%", padding:"8px 11px 8px 32px", borderRadius:8, border:"1px solid var(--border)", background:"var(--surface)", color:"var(--ink)", fontSize:13.5}}/>
+        </div>
+        {data && <span style={{fontSize:12.5, color:"var(--ink-mute)"}}>{fmtNum(data.total)} {data.total===1?"person":"people"} have talked to Sanjugo through ManyChat</span>}
+      </div>
+      {!data ? <div style={{display:"grid", gap:8}}><Skeleton h={58}/><Skeleton h={58}/><Skeleton h={58}/></div>
+        : !data.people.length ? <Card><EmptyState icon="heart" title={q ? "No one matches" : "No people yet"} subtitle={q ? null : "Everyone who triggers a ManyChat automation is listed here."}/></Card>
+        : <Card style={{padding:"4px 0"}}>{data.people.map((p, i)=>(
+            <div key={p.subId} role="button" tabIndex={0} onClick={()=>setOpen(p)} onKeyDown={e=>{ if(e.key==="Enter") setOpen(p); }} className="cf-clickcard"
+              style={{display:"flex", gap:12, alignItems:"center", padding:"10px 16px", borderTop: i? "1px solid var(--border)" : "none", cursor:"pointer"}}>
+              <EngFace p={p} size={36}/>
+              <div style={{flex:"1 1 auto", minWidth:0}}><EngWho p={p}/>
+                {p.keywords.length>0 && <div style={{display:"flex", gap:4, flexWrap:"wrap", marginTop:4}}>{p.keywords.slice(-4).map(k=><EngChip key={k}>{k}</EngChip>)}</div>}
+              </div>
+              <div style={{textAlign:"right", fontSize:12, color:"var(--ink-mute)", whiteSpace:"nowrap"}}><div><b className="num" style={{color:"var(--ink)"}}>{p.events}</b> {p.events===1?"time":"times"}</div><div>{engAgo(p.lastSeen)}</div></div>
+            </div>
+          ))}</Card>}
+      <EngPersonDrawer person={open} admin={admin} onClose={()=>setOpen(null)} onDeleted={()=>{ setOpen(null); load(q); }}/>
+    </div>
+  );
+}
+
+function EngPersonDrawer({person, admin, onClose, onDeleted}){
+  const {get, post, toast} = useEng();
+  const [d, setD] = useState(null);
+  useEffect(()=>{ setD(null); if(person) get("/person?id="+encodeURIComponent(person.subId)).then(setD).catch(e=>toast(e.message, "danger")); }, [person && person.subId]);
+  if(!person) return null;
+  const p = person;
+  async function del(){ try{ await post("people/delete", {subId:p.subId}); toast("Their data was deleted from Creator Studio"); onDeleted(); }catch(e){ toast(e.message, "danger"); } }
+  return (
+    <Drawer open={!!person} onClose={onClose} width={460}>
+      <div style={{padding:"18px 20px", borderBottom:"1px solid var(--border)", display:"flex", gap:12, alignItems:"center"}}>
+        <EngFace p={p} size={48}/>
+        <div style={{flex:1, minWidth:0}}><EngWho p={p}/></div>
+        <IconButton icon="x" title="Close" onClick={onClose}/>
+      </div>
+      <div style={{padding:"16px 20px"}}>
+        <div style={{display:"flex", gap:8, flexWrap:"wrap", marginBottom:16}}>
+          {p.chatUrl && <a href={p.chatUrl} target="_blank" rel="noopener noreferrer" style={{textDecoration:"none"}}><Button size="sm" variant="primary" icon="external">Chat in ManyChat</Button></a>}
+          {p.username && <a href={"https://www.instagram.com/"+encodeURIComponent(p.username)+"/"} target="_blank" rel="noopener noreferrer" style={{textDecoration:"none"}}><Button size="sm" icon="external">Instagram profile</Button></a>}
+        </div>
+        <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, marginBottom:16}}>
+          <InfoField label="First talked to us" value={fmtDate(p.firstSeen)}/>
+          <InfoField label="Last time" value={engAgo(p.lastSeen)}/>
+        </div>
+        {(p.keywords.length>0 || p.tags.length>0) && <div style={{display:"flex", gap:5, flexWrap:"wrap", marginBottom:16}}>
+          {p.keywords.map(k=><EngChip key={"k"+k} color="var(--accent)" soft="var(--accent-soft)">{k}</EngChip>)}
+          {p.tags.map(t=><EngChip key={"t"+t}>🏷 {t}</EngChip>)}
+        </div>}
+        <SectionTitle>What happened</SectionTitle>
+        {!d ? <Skeleton h={80}/> : <div style={{display:"grid", gap:8}}>
+          {d.events.map((e, i)=>(
+            <div key={i} style={{fontSize:13, borderLeft:"2px solid var(--border)", paddingLeft:10}}>
+              <div><b>{ENG_TYPES[e.type] || e.type}</b>{e.keyword ? " · "+e.keyword : ""}{e.automation ? " · "+e.automation : ""} <span style={{color:"var(--ink-mute)", fontSize:12}}>· {engAgo(e.created_at)}</span></div>
+              {e.text && <div style={{color:"var(--ink-soft)", marginTop:2, wordBreak:"break-word"}}>“{e.text}”</div>}
+            </div>
+          ))}
+          {d.clicks.length>0 && <div style={{fontSize:12.5, color:"var(--ink-soft)", marginTop:6}}>Opened links: {d.clicks.map(c=>c.name || c.code).filter((v, i, a)=>a.indexOf(v)===i).join(", ")}</div>}
+        </div>}
+        {admin && <div style={{marginTop:24, paddingTop:14, borderTop:"1px solid var(--border)"}}>
+          <ConfirmButton confirmLabel="Delete everything about them?" onConfirm={del}>Delete this person's data</ConfirmButton>
+          <div style={{fontSize:11.5, color:"var(--ink-mute)", marginTop:6}}>Removes them from Creator Studio only (not from ManyChat). People not seen for over a year are deleted automatically.</div>
+        </div>}
+      </div>
+    </Drawer>
+  );
+}
+
+function EngTexts({admin}){
+  const {state} = useApp();
+  const {get, post, toast, copy} = useEng();
+  const [data, setData] = useState(null);
+  const [editing, setEditing] = useState(null);
+  const [adding, setAdding] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [links, setLinks] = useState(null);
+  const load = ()=>get("/fields").then(setData).catch(e=>toast(e.message, "danger"));
+  useEffect(()=>{ load(); get("/links").then(setLinks).catch(()=>setLinks({links:[]})); }, []);
+  async function run(path, body, msg){ setBusy(true); try{ const d = await post(path, body); if(d.fields) setData(x=>({...x, fields:d.fields})); msg && toast(msg); return true; }catch(e){ toast(e.message, "danger"); return false; } finally{ setBusy(false); } }
+  if(!data) return <div style={{display:"grid", gap:10}}><Skeleton h={90}/><Skeleton h={90}/></div>;
+  const me = state.currentUserId;
+  const reviewers = data.reviewers || [];
+  const amReviewer = reviewers.some(r=>r.id===me);
+  const names = reviewers.map(r=>r.name);
+  return (
+    <div>
+      <div style={{fontSize:12.5, color:"var(--ink-mute)", marginBottom:14, lineHeight:1.5}}>
+        ManyChat automations fill these in. In ManyChat, add <b>Personalize → Bot fields</b> to a message and pick the name.
+        {names.length>1 && <> Changes go live after {names.join(" and ")} approve.</>}
+      </div>
+      <div style={{display:"grid", gap:12}}>
+        {data.fields.map(f=>{
+          const pending = f.draft!=null;
+          const waiting = reviewers.filter(r=>!f.approvals[r.id]);
+          const isEditing = editing && editing.name===f.name;
+          return (
+            <Card key={f.name} style={{padding:16}}>
+              <div style={{display:"flex", alignItems:"center", gap:8, flexWrap:"wrap"}}>
+                <div style={{fontWeight:600, fontSize:14, flex:"1 1 auto"}}>{f.label}</div>
+                <button onClick={()=>copy(f.name, "Field name")} title="Copy the ManyChat name" style={{fontFamily:"ui-monospace, SFMono-Regular, Menlo, monospace", fontSize:11.5, color:"var(--ink-mute)", background:"var(--surface-2)", border:"1px solid var(--border)", borderRadius:6, padding:"2px 7px", cursor:"pointer"}}>{f.name}</button>
+              </div>
+              {!isEditing && <div style={{marginTop:8, fontSize:13.5, lineHeight:1.5, whiteSpace:"pre-wrap", wordBreak:"break-word", color: f.value? "var(--ink)" : "var(--ink-mute)"}}>{f.value || "Empty"}</div>}
+              {!isEditing && f.value && <div style={{fontSize:11.5, marginTop:6, color: f.pushError? "var(--red)" : "var(--ink-mute)"}}>
+                {f.pushError ? "Not in ManyChat: "+f.pushError : f.pushedAt ? "✓ In ManyChat · "+engAgo(f.pushedAt) : "Not sent to ManyChat yet"}
+              </div>}
+              {pending && !isEditing && <div style={{marginTop:12, padding:12, borderRadius:10, background:"var(--amber-soft)", border:"1px solid color-mix(in srgb, var(--amber) 35%, transparent)"}}>
+                <div style={{fontSize:12, fontWeight:700, color:"var(--amber)", marginBottom:6}}>Change waiting for approval</div>
+                <div style={{fontSize:13.5, lineHeight:1.5, whiteSpace:"pre-wrap", wordBreak:"break-word"}}>{f.draft || <i>Empty</i>}</div>
+                <div style={{fontSize:12, color:"var(--ink-soft)", marginTop:8}}>{Object.keys(f.approvals).length>0 && <>✓ {Object.keys(f.approvals).map(id=>(USERS.find(u=>u.id===id)||{name:id}).name).join(", ")} · </>}waiting for {waiting.map(r=>r.name).join(", ") || "no one"}</div>
+                <div style={{display:"flex", gap:8, marginTop:10, flexWrap:"wrap"}}>
+                  {(amReviewer || !reviewers.length) && !f.approvals[me] && <Button size="sm" variant="success" icon="check" disabled={busy} onClick={()=>run("fields/approve", {name:f.name}, "Approved")}>Approve</Button>}
+                  {admin && <Button size="sm" variant="ghost" disabled={busy} onClick={()=>run("fields/discard", {name:f.name}, "Change dropped")}>Drop change</Button>}
+                </div>
+              </div>}
+              {isEditing ? <EngTextEditor f={f} value={editing.value} setValue={v=>setEditing(x=>({...x, value:v}))} busy={busy} links={links}
+                  onCancel={()=>setEditing(null)}
+                  onSave={async ()=>{ if(await run("fields/save", {name:f.name, value:editing.value}, reviewers.length>1 ? "Saved — sent for approval" : "Saved")) setEditing(null); }}/>
+                : admin && <div style={{display:"flex", gap:8, marginTop:12, flexWrap:"wrap"}}>
+                  <Button size="sm" icon="edit" onClick={()=>setEditing({name:f.name, value: pending ? f.draft : f.value})}>Edit</Button>
+                  {!f.builtin && <ConfirmButton confirmLabel="Remove from Creator Studio?" onConfirm={()=>run("fields/delete", {name:f.name}, "Removed")}>Remove</ConfirmButton>}
+                </div>}
+            </Card>
+          );
+        })}
+      </div>
+      {admin && <Card style={{padding:14, marginTop:14, display:"flex", gap:8, alignItems:"center", flexWrap:"wrap"}}>
+        <input value={adding} onChange={e=>setAdding(e.target.value)} placeholder="New DM text, e.g. Christmas menu" maxLength={60} style={{flex:"1 1 200px", padding:"8px 11px", borderRadius:8, border:"1px solid var(--border)", background:"var(--surface)", color:"var(--ink)", fontSize:13.5}}/>
+        <Button size="sm" variant="primary" icon="plus" disabled={busy || adding.trim().length<2} onClick={async ()=>{ if(await run("fields/save", {label:adding.trim(), value:""}, "Added — now fill it in")) setAdding(""); }}>Add</Button>
+      </Card>}
+    </div>
+  );
+}
+
+function EngTextEditor({f, value, setValue, busy, links, onSave, onCancel}){
+  const {state} = useApp();
+  const {post, toast} = useEng();
+  const [camp, setCamp] = useState("");
+  const [drafting, setDrafting] = useState(false);
+  const isLink = /_link$/.test(f.name) || /link/i.test(f.label);
+  const camps = (state.campaigns || CAMPAIGNS).filter(c=>c && c.name && (!c.brand || c.brand==="sanjugo"));
+  async function draft(){
+    const c = camps.find(x=>x.id===camp); if(!c) return;
+    setDrafting(true);
+    try{ const d = await post("draft", {label:f.label, current:value, facts:"Campaign: "+c.name+"\n"+(c.details||"")}); setValue(d.text); }catch(e){ toast(e.message, "danger"); }
+    setDrafting(false);
+  }
+  return (
+    <div style={{marginTop:10}}>
+      <textarea value={value} onChange={e=>setValue(e.target.value)} rows={isLink? 2 : 4} maxLength={1000} autoFocus
+        placeholder={isLink ? "https://…" : "What the DM should say"}
+        style={{width:"100%", borderRadius:10, border:"1px solid var(--border)", padding:10, fontSize:13.5, fontFamily:"inherit", lineHeight:1.5, resize:"vertical", background:"var(--surface)", color:"var(--ink)"}}/>
+      <div style={{display:"flex", gap:8, marginTop:8, flexWrap:"wrap", alignItems:"center"}}>
+        {!isLink && camps.length>0 && <>
+          <Select value={camp} onChange={setCamp} placeholder="Draft from a campaign…" options={camps.map(c=>({value:c.id, label:c.name}))} style={{flex:"1 1 200px", maxWidth:300}}/>
+          <Button size="sm" icon="zap" disabled={!camp || drafting} onClick={draft}>{drafting ? "Writing…" : "Draft with AI"}</Button>
+        </>}
+        {isLink && links && links.links && links.links.length>0 && <Select value="" onChange={code=>code && setValue(links.goBase+code)} placeholder="Use a tracked link…" options={links.links.map(l=>({value:l.code, label:l.name+" (/go/"+l.code+")"}))} style={{flex:"1 1 200px", maxWidth:300}}/>}
+      </div>
+      <div style={{display:"flex", gap:8, marginTop:10}}>
+        <Button size="sm" variant="primary" disabled={busy} onClick={onSave}>Save</Button>
+        <Button size="sm" variant="ghost" onClick={onCancel}>Cancel</Button>
+      </div>
+      {!isLink && <div style={{fontSize:11.5, color:"var(--ink-mute)", marginTop:8}}>Short and warm. Walk-in or booking limits only as a small last line.</div>}
+    </div>
+  );
+}
+
+const engSlug = s => String(s||"").toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
+function EngLinks({admin}){
+  const {state} = useApp();
+  const {get, post, toast, copy} = useEng();
+  const [data, setData] = useState(null);
+  const [form, setForm] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const load = ()=>get("/links").then(setData).catch(e=>toast(e.message, "danger"));
+  useEffect(()=>{ load(); }, []);
+  const camps = (state.campaigns || CAMPAIGNS).filter(c=>c && c.name && (!c.brand || c.brand==="sanjugo"));
+  async function save(){
+    setBusy(true);
+    try{ await post("links/save", form); toast(form.editing ? "Link saved" : "Link ready to use"); setForm(null); await load(); }catch(e){ toast(e.message, "danger"); }
+    setBusy(false);
+  }
+  async function del(code){ try{ await post("links/delete", {code}); toast("Link removed — it now opens sanjugo.co.uk"); await load(); }catch(e){ toast(e.message, "danger"); } }
+  const input = {width:"100%", padding:"8px 11px", borderRadius:8, border:"1px solid var(--border)", background:"var(--surface)", color:"var(--ink)", fontSize:13.5};
+  return (
+    <div>
+      <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", gap:10, marginBottom:14, flexWrap:"wrap"}}>
+        <div style={{fontSize:12.5, color:"var(--ink-mute)", maxWidth:560, lineHeight:1.5}}>Put these on ManyChat buttons instead of the real address, so we can count who opens them.</div>
+        {admin && !form && <Button size="sm" variant="primary" icon="plus" onClick={()=>setForm({name:"", code:"", url:"https://", campaign:"", auto:true})}>New link</Button>}
+      </div>
+      {form && <Card style={{padding:16, marginBottom:14}}>
+        <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(220px, 1fr))", gap:12}}>
+          <label style={{fontSize:12.5, fontWeight:600}}>Name<input style={{...input, marginTop:5}} value={form.name} placeholder="Wagyu roll offer" onChange={e=>{ const name = e.target.value; setForm(x=>({...x, name, code: x.auto && !x.editing ? engSlug(name) : x.code})); }}/></label>
+          <label style={{fontSize:12.5, fontWeight:600}}>Short name<input style={{...input, marginTop:5}} value={form.code} disabled={!!form.editing} placeholder="wagyu" onChange={e=>setForm(x=>({...x, code: engSlug(e.target.value), auto:false}))}/></label>
+          <label style={{fontSize:12.5, fontWeight:600, gridColumn:"1 / -1"}}>Opens this page<input style={{...input, marginTop:5}} value={form.url} placeholder="https://sanjugo.co.uk/…" onChange={e=>setForm(x=>({...x, url:e.target.value.trim()}))}/></label>
+          {camps.length>0 && <label style={{fontSize:12.5, fontWeight:600}}>Campaign (optional)<Select value={form.campaign} onChange={v=>setForm(x=>({...x, campaign:v}))} placeholder="None" options={camps.map(c=>({value:c.id, label:c.name}))} style={{marginTop:5}}/></label>}
+        </div>
+        {data && form.code && <div style={{fontSize:12, color:"var(--ink-mute)", marginTop:10, wordBreak:"break-all"}}>Link: {data.goBase}{form.code}</div>}
+        <div style={{display:"flex", gap:8, marginTop:12}}>
+          <Button size="sm" variant="primary" disabled={busy || !form.name.trim() || form.code.length<2 || !/^https:\/\/\S+\.\S+/.test(form.url)} onClick={save}>{busy ? "Saving…" : "Save"}</Button>
+          <Button size="sm" variant="ghost" onClick={()=>setForm(null)}>Cancel</Button>
+        </div>
+      </Card>}
+      {!data ? <div style={{display:"grid", gap:10}}><Skeleton h={80}/><Skeleton h={80}/></div>
+        : !data.links.length ? (!form && <Card><EmptyState icon="link" title="No tracked links yet" subtitle={admin ? "Make one for each offer, menu or booking page you send in DMs." : "An admin can add links for offers, the menu and bookings."}/></Card>)
+        : <div style={{display:"grid", gap:10}}>{data.links.map(l=>{
+            const short = data.goBase + l.code;
+            const camp = camps.find(c=>c.id===l.campaign);
+            return (
+              <Card key={l.code} style={{padding:14}}>
+                <div style={{display:"flex", gap:12, alignItems:"flex-start", flexWrap:"wrap"}}>
+                  <div style={{flex:"1 1 260px", minWidth:0}}>
+                    <div style={{fontWeight:600, fontSize:14}}>{l.name}{camp && <span style={{fontWeight:500, fontSize:12, color:"var(--ink-mute)"}}> · {camp.name}</span>}</div>
+                    <button onClick={()=>copy(short)} title="Copy link" style={{display:"flex", alignItems:"center", gap:5, marginTop:4, border:"none", background:"none", padding:0, cursor:"pointer", color:"var(--accent)", fontSize:12.5, fontWeight:600, maxWidth:"100%"}}>
+                      <Icon name="link" size={13}/><span style={{overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>/go/{l.code}</span>
+                    </button>
+                    <div style={{fontSize:12, color:"var(--ink-mute)", marginTop:3, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>→ {l.url}</div>
+                  </div>
+                  <div style={{display:"flex", gap:16}}>
+                    {[["Clicks", l.clicks], ["7 days", l.clicks7], ["People", l.people]].map(([k, v])=><div key={k} style={{textAlign:"center"}}><div className="num" style={{fontSize:18, fontWeight:600}}>{fmtNum(v)}</div><div style={{fontSize:11, color:"var(--ink-mute)"}}>{k}</div></div>)}
+                  </div>
+                </div>
+                <div style={{display:"flex", gap:8, marginTop:10, flexWrap:"wrap"}}>
+                  <Button size="sm" icon="link" onClick={()=>copy(short)}>Copy link</Button>
+                  {admin && <Button size="sm" icon="edit" onClick={()=>setForm({name:l.name, code:l.code, url:l.url, campaign:l.campaign, editing:l.code})}>Edit</Button>}
+                  {admin && <ConfirmButton confirmLabel="Remove this link?" onConfirm={()=>del(l.code)}>Remove</ConfirmButton>}
+                </div>
+              </Card>
+            );
+          })}</div>}
+      <MoreInfo label="Count people, not just clicks">On the ManyChat button, add <b>?s=</b> to the end of the link and insert ManyChat's <b>Contact Id</b> field after it. Each person's opens then show on their page under People.</MoreInfo>
+    </div>
+  );
+}
+
+/* Settings → ManyChat (admins): connection check, the automation link to paste into ManyChat, and re-sending DM texts. */
+function ManyChatSettings(){
+  const {get, post, toast, copy} = useEng();
+  const [d, setD] = useState(null);
+  const [busy, setBusy] = useState("");
+  const load = refresh=>get("/setup"+(refresh? "?refresh=1" : "")).then(setD).catch(e=>setD({error:e.message}));
+  useEffect(()=>{ load(false); }, []);
+  if(!d) return <Skeleton h={60}/>;
+  if(d.error) return <div style={{fontSize:13, color:"var(--red)", padding:"12px 0"}}>{d.error}</div>;
+  const page = d.page || {};
+  const ok = page.connected && !page.error;
+  async function rotate(){ setBusy("rotate"); try{ const r = await post("setup/rotate"); setD(x=>({...x, hookUrl:r.hookUrl})); toast("New link made — paste it into every ManyChat automation again"); }catch(e){ toast(e.message, "danger"); } setBusy(""); }
+  async function pushAll(){ setBusy("push"); try{ const r = await post("fields/push"); const bad = (r.fields||[]).filter(f=>f.value && f.pushError); toast(bad.length ? bad.length+" didn't go through: "+bad[0].pushError : "All DM texts sent to ManyChat", bad.length? "danger" : undefined); }catch(e){ toast(e.message, "danger"); } setBusy(""); }
+  const code = {fontFamily:"ui-monospace, SFMono-Regular, Menlo, monospace", fontSize:11.5, background:"var(--surface-2)", padding:"1px 5px", borderRadius:5};
+  return (
+    <div>
+      <SettingRow first on={ok} label="Connection" hint={ok ? (page.name || "Connected")+(page.username ? " · @"+page.username : "")+(page.isPro ? " · Pro" : "") : page.error || "API key not added yet"}>
+        <Button size="sm" variant="ghost" icon="refresh" disabled={busy==="check"} onClick={async ()=>{ setBusy("check"); await load(true); setBusy(""); }}>Check again</Button>
+      </SettingRow>
+      {!ok && <MoreInfo label="How to add the API key">In ManyChat: <b>Settings → API → Generate your API key</b>. The developer saves it in Cloudflare as <span style={code}>MANYCHAT_API_KEY</span>. Never paste it in chat or anywhere in the app.</MoreInfo>}
+      <SettingRow on={!!d.last} label="Automation link" hint={d.last ? "Last message "+engAgo(d.last.at)+(d.last.automation? " · "+d.last.automation : "") : "Nothing received yet"}>
+        <Button size="sm" variant="primary" icon="link" onClick={()=>copy(d.hookUrl, "Automation link")}>Copy link</Button>
+        <ConfirmButton confirmLabel="Old link stops working — sure?" disabled={busy==="rotate"} onConfirm={rotate}>New link</ConfirmButton>
+      </SettingRow>
+      <MoreInfo label="How to set up in ManyChat">
+        <ol style={{margin:"0 0 6px", paddingLeft:18, display:"grid", gap:6}}>
+          <li>In an automation, add <b>Action → External Request</b>, method <b>POST</b>.</li>
+          <li>Paste the automation link, then add what happened to the end:<br/>
+            <span style={code}>&amp;type=keyword&amp;keyword=WAGYU</span> comment or DM keyword<br/>
+            <span style={code}>&amp;type=human&amp;reason=Booking</span> wants a person (Team Chat + phone alert)<br/>
+            <span style={code}>&amp;type=story_mention</span> · <span style={code}>&amp;type=story_reply</span> · <span style={code}>&amp;type=welcome</span></li>
+          <li>Body: <b>Add full contact data</b>.</li>
+          <li><b>Test the request</b> — it shows up in Engagement.</li>
+        </ol>
+        For “wants a person”, ask their question first (a User Input step) so the team sees it. Allergy and complaint words are marked urgent. Allergy questions always go to a person, never the AI.
+      </MoreInfo>
+      <SettingRow label="DM texts" hint="Send every approved text to ManyChat again">
+        <Button size="sm" variant="ghost" disabled={!ok || busy==="push"} onClick={pushAll}>{busy==="push" ? "Sending…" : "Send all"}</Button>
+      </SettingRow>
+    </div>
+  );
+}
+
 function ChatText({text, me}){
   const meName = (USERS.find(u=>u.id===me)||{}).name||"";
   return text.split(mentionRe()).map((part,i)=>{
@@ -11225,6 +11944,10 @@ function SettingsPage(){
       {canManage && <>
         <SectionTitle>Make.com connections</SectionTitle>
         <Card style={{padding:18, marginBottom:26}}><MakeSettings/></Card>
+        <SectionTitle>Engagement</SectionTitle>
+        <Card style={{padding:"6px 18px 14px", marginBottom:26}}><EngageSettings/></Card>
+        <SectionTitle>ManyChat</SectionTitle>
+        <Card style={{padding:"6px 18px 14px", marginBottom:26}}><ManyChatSettings/></Card>
       </>}
 
       {canManage && <>
@@ -11369,7 +12092,7 @@ function App(){
   // Deep links from outside the app (e.g. the Drive content library page, push alerts): #/library?q=G219, #/create?barcode=G219, #/chat, #/queue?tab=changes
   useEffect(()=>{
     const openFromHash = ()=>{
-      const m = /^#\/(library|create|settings|chat|queue|workspace)(?:\?(.*))?$/.exec(window.location.hash || "");
+      const m = /^#\/(library|create|settings|chat|queue|workspace|engagement)(?:\?(.*))?$/.exec(window.location.hash || "");
       if(!m) return;
       const params = new URLSearchParams(m[2] || "");
       if(m[1]==="chat") dispatch({type:"SET_ROUTE", route:"chat"});
@@ -11377,6 +12100,7 @@ function App(){
       else if(m[1]==="settings") dispatch({type:"SET_ROUTE", route:"settings", driveReturn: params.get("drive") ? {drive: params.get("drive"), msg: params.get("msg")} : null});
       else if(m[1]==="library") dispatch({type:"SET_ROUTE", route:"library", libraryQuery: params.get("q") || ""});
       else if(m[1]==="workspace") dispatch({type:"SET_ROUTE", route:"workspace", workspaceProject: params.get("p") || null});
+      else if(m[1]==="engagement") dispatch({type:"SET_ROUTE", route:"engagement", engagementTab: params.get("tab") || null});
       else dispatch({type:"SET_ROUTE", route:"create", createPrefill: params.get("barcode") ? {libraryBarcode: params.get("barcode")} : null});
       try{ history.replaceState(null, "", window.location.pathname + window.location.search); }catch(e){}
     };
@@ -11482,9 +12206,9 @@ function App(){
     dashboard: <DashboardPage/>, calendar: <ContentCalendarPage/>, queue: <ApprovalQueuePage key={state.queueTab||""}/>,
     create: <CreateContentPage key={JSON.stringify(state.createPrefill||{})}/>, published: <PublishedContentPage/>, analytics: <AnalyticsPage/>,
     team: <SettingsPage/>, settings: <SettingsPage/>, chat: <ChatPage/>, library: <LibraryPage key={state.libraryQuery||""}/>,
-    workspace: <WorkspacePage key={state.workspaceProject||""}/>, campaigns: <CampaignsPage/>,
+    workspace: <WorkspacePage key={state.workspaceProject||""}/>, campaigns: <CampaignsPage/>, engagement: <EngagementPage key={state.engagementTab||""}/>,
   };
-  const titles = {dashboard:"Sanjugo Dashboard", calendar:"Calendar", queue:"Approval Queue", create:"Create Content", published:"Published", analytics:"Analytics", team:"Team", settings:"Settings", chat:"Team Chat", library:"Content Library", workspace:"Workspace", campaigns:"Campaigns"};
+  const titles = {dashboard:"Sanjugo Dashboard", calendar:"Calendar", queue:"Approval Queue", create:"Create Content", published:"Published", analytics:"Analytics", team:"Team", settings:"Settings", chat:"Team Chat", library:"Content Library", workspace:"Workspace", campaigns:"Campaigns", engagement:"Engagement"};
 
   if(state.lock) return <LockScreen lock={state.lock}/>;
   const accessOn = !!(state.me && state.me.accessEnabled);

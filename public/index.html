@@ -2932,6 +2932,50 @@ function cleanMusic(m){ const title = String((m && m.title) || "").trim().slice(
    (public/vendor; the 32 MB engine is split in two because hosted files are capped at 25 MB). The video picture is
    copied as is (no quality loss); only the sound is rebuilt: the song (from the chosen start, with a fade-out) plus
    the original sound at the chosen volume. The result is uploaded as the post's new video. */
+/* Openverse and Apple Music rate-limit Cloudflare's shared servers, so the browser asks them directly (each person's own
+   connection has its own allowance) and only falls back to /api/music/… if that fails. */
+const OPENVERSE_API = "https://api.openverse.org/v1/audio/";
+const MUSIC_LICENCES = ["cc0", "by", "pdm"];
+function musicTrackOf(r){
+  const lic = String(r.license || "").toLowerCase();
+  const label = lic === "cc0" ? "CC0" : lic === "pdm" ? "Public domain" : "CC " + lic.toUpperCase() + (r.license_version ? " " + r.license_version : "");
+  return { id: r.id, title: String(r.title || "Untitled").slice(0, 120), artist: String(r.creator || "Unknown artist").slice(0, 80),
+    duration: r.duration ? Math.round(r.duration / 1000) : null, license: lic, licenseLabel: label, licenseUrl: r.license_url || "",
+    page: r.foreign_landing_url || "", source: r.source || r.provider || "", genres: (r.genres || []).slice(0, 3), src: r.url || "",
+    needsCredit: !["cc0", "pdm"].includes(lic), credit: `🎵 Music: “${String(r.title || "Untitled").slice(0, 80)}” by ${String(r.creator || "Unknown").slice(0, 60)} (${label})` };
+}
+async function musicSearchApi(q, page){
+  try{
+    const qs = new URLSearchParams({ q, license: MUSIC_LICENCES.join(","), category: "music", page_size: "20", page: String(page), mature: "false" });
+    const r = await fetch(OPENVERSE_API + "?" + qs, {headers:{Accept:"application/json"}});
+    if(r.ok){ const d = await r.json();
+      const tracks = (d.results || []).filter(x=>x.url && (!x.duration || x.duration >= 10000) && MUSIC_LICENCES.includes(String(x.license))).map(musicTrackOf);
+      return { tracks, total: d.result_count || tracks.length, page, pages: d.page_count || 1 }; }
+  }catch(e){}
+  const r = await fetch("/api/music/search?q="+encodeURIComponent(q)+"&page="+page); const d = await r.json().catch(()=>({}));
+  if(!r.ok) throw new Error(d.error || "Search failed");
+  return d;
+}
+async function applePreviewApi(q){
+  const term = String(q||"").replace(/[—–-]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 100);
+  if(!term) return [];
+  try{
+    const r = await fetch("https://itunes.apple.com/search?"+new URLSearchParams({term, media:"music", entity:"song", limit:"5", country:"GB"}));
+    if(r.ok){ const d = await r.json();
+      return (d.results || []).filter(x=>x.previewUrl && /^https:\/\/[a-z0-9.-]+\.(apple|mzstatic)\.com\//.test(x.previewUrl)).slice(0, 3).map(x=>({
+        id: String(x.trackId), name: String(x.trackName || "").slice(0, 120), artist: String(x.artistName || "").slice(0, 80),
+        art: String(x.artworkUrl100 || "").replace(/^http:/, "https:"), preview: x.previewUrl, link: x.trackViewUrl || "" })); }
+  }catch(e){}
+  const r = await fetch("/api/music/preview?q="+encodeURIComponent(term)); const d = await r.json().catch(()=>({}));
+  if(!r.ok) throw new Error(d.error || "Couldn't find a preview");
+  return d.songs || [];
+}
+// The song file through our server, with its address as a backup (saved songs only keep the Jamendo page, so it's rebuilt from that).
+function musicAudioUrl(t){
+  const jm = /jamendo\.com\/track\/(\d+)/.exec(String(t.page||""));
+  const src = t.src || (jm ? "https://prod-1.storage.jamendo.com/?trackid="+jm[1]+"&format=mp32" : "");
+  return "/api/music/audio/"+t.id+(src ? "?src="+encodeURIComponent(src) : "");
+}
 let FF_LOADING = null;
 function loadFFmpeg(onStatus){
   if(!FF_LOADING) FF_LOADING = (async ()=>{
@@ -2959,7 +3003,7 @@ async function mixMusicIntoVideo({videoUrl, track, start, musicVol, origVol, fad
   onStatus && onStatus("Loading the video and the song…");
   const [vid, aud] = await Promise.all([
     fetch(videoUrl).then(r=>{ if(!r.ok) throw new Error("Couldn't load the video ("+r.status+")"); return r.arrayBuffer(); }),
-    fetch("/api/music/audio/"+track.id).then(r=>{ if(!r.ok) throw new Error("Couldn't load the song ("+r.status+")"); return r.arrayBuffer(); })]);
+    fetch(musicAudioUrl(track)).then(r=>{ if(!r.ok) throw new Error("Couldn't load the song ("+r.status+")"); return r.arrayBuffer(); })]);
   await ff.writeFile("in.mp4", new Uint8Array(vid)); await ff.writeFile("song.mp3", new Uint8Array(aud));
   const D = Math.max(1, Number(duration) || 30);
   const song = `[1:a]atrim=start=${Number(start)||0},asetpts=PTS-STARTPTS,volume=${musicVol.toFixed(2)}${fade? `,afade=t=out:st=${Math.max(0, D-1.5).toFixed(2)}:d=1.5` : ""}`;
@@ -3067,9 +3111,7 @@ function ApplePreviewFinder({value, onChange}){
     const t = setTimeout(async ()=>{
       searched.current = title; setStatus("Finding a preview…");
       try{
-        const r = await fetch("/api/music/preview?q="+encodeURIComponent(title)); const d = await r.json().catch(()=>({}));
-        if(!r.ok) throw new Error(d.error || "Couldn't find a preview");
-        const songs = (d.songs||[]).map(cleanPreview).filter(Boolean);
+        const songs = (await applePreviewApi(title)).map(cleanPreview).filter(Boolean);
         setMatches(songs); setStatus(songs.length ? "" : "No preview found. Check the name (Song — artist).");
         if(String(latest.current.title||"").trim()===title) onChange({...latest.current, preview: songs[0] || null});
       }catch(e){ setStatus(e.message); }
@@ -3079,7 +3121,7 @@ function ApplePreviewFinder({value, onChange}){
   async function showOthers(){
     setOpen(o=>!o);
     if(matches || !title) return;
-    try{ const d = await fetch("/api/music/preview?q="+encodeURIComponent(title)).then(r=>r.json()); setMatches((d.songs||[]).map(cleanPreview).filter(Boolean)); }catch(e){}
+    try{ setMatches((await applePreviewApi(title)).map(cleanPreview).filter(Boolean)); }catch(e){}
   }
   const pv = m.preview;
   if(!title) return null;
@@ -3123,14 +3165,13 @@ function MusicSearch({onPick, pickLabel="Use", selectedId, onClose, startQuery="
   function stopSong(){ stopMusicPreview(); setPlaying(null); }
   function playSong(t){
     if(playing===t.id){ stopSong(); return; }
-    stopSong(); const a = new Audio("/api/music/audio/"+t.id); a.volume = .8; a.play().catch(()=>{}); a.onended = ()=>setPlaying(null); MUSIC_PREVIEW = a; setPlaying(t.id);
+    stopSong(); const a = new Audio(musicAudioUrl(t)); a.volume = .8; a.play().catch(()=>{}); a.onended = ()=>setPlaying(null); MUSIC_PREVIEW = a; setPlaying(t.id);
   }
   async function search(term, page=1){
     const t = (term!=null? term : q).trim() || "upbeat";
     setLoading(true);
     try{
-      const r = await fetch("/api/music/search?q="+encodeURIComponent(t)+"&page="+page); const d = await r.json();
-      if(!r.ok) throw new Error(d.error || "Search failed");
+      const d = await musicSearchApi(t, page);
       setRes(x=> page>1 && x ? {...d, q:t, tracks:[...x.tracks, ...d.tracks]} : {...d, q:t});
     }catch(e){ dispatch({type:"ADD_TOAST", message:e.message, variant:"danger"}); }
     setLoading(false);
@@ -3185,7 +3226,7 @@ function MusicFitter({videoUrl, duration, track, init, applyLabel="Add to video"
     const v = vref.current; if(!v) return;
     if(previewing){ v.pause(); stopPreview(); return; }
     stopMusicPreview();
-    if(!aref.current){ aref.current = new Audio("/api/music/audio/"+track.id); }
+    if(!aref.current){ aref.current = new Audio(musicAudioUrl(track)); }
     const a = aref.current;
     v.currentTime = 0; v.muted = origVol===0; v.volume = Math.min(1, origVol/100);
     a.currentTime = start; a.volume = Math.min(1, musicVol/100);
@@ -9948,7 +9989,7 @@ function WsPlanMusic({p, act, ro}){
   useEffect(()=>()=>stopMusicPreview(), []);
   function listen(){
     if(playing){ stopMusicPreview(); setPlaying(false); return; }
-    stopMusicPreview(); const a = new Audio("/api/music/audio/"+t.id); a.play().catch(()=>{}); a.onended = ()=>setPlaying(false); MUSIC_PREVIEW = a; setPlaying(true);
+    stopMusicPreview(); const a = new Audio(musicAudioUrl(t)); a.play().catch(()=>{}); a.onended = ()=>setPlaying(false); MUSIC_PREVIEW = a; setPlaying(true);
   }
   const save = (music, msg)=> act("/project", {id:p.id, music}, msg);
   const head = <div style={{display:"flex", alignItems:"center", gap:7, fontWeight:600, fontSize:13.5, marginBottom:8}}><span style={{color:"var(--violet)", display:"inline-flex"}}><Icon name="musicNote" size={15}/></span>Music</div>;

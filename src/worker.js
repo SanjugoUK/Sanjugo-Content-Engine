@@ -1739,7 +1739,7 @@ function musicTrack(r) {
   const label = lic === "cc0" ? "CC0" : lic === "pdm" ? "Public domain" : "CC " + lic.toUpperCase() + (r.license_version ? " " + r.license_version : "");
   return { id: r.id, title: String(r.title || "Untitled").slice(0, 120), artist: String(r.creator || "Unknown artist").slice(0, 80),
     duration: r.duration ? Math.round(r.duration / 1000) : null, license: lic, licenseLabel: label, licenseUrl: r.license_url || "",
-    page: r.foreign_landing_url || "", source: r.source || r.provider || "", genres: (r.genres || []).slice(0, 3),
+    page: r.foreign_landing_url || "", source: r.source || r.provider || "", genres: (r.genres || []).slice(0, 3), src: r.url || "",
     needsCredit: !["cc0", "pdm"].includes(lic), credit: `🎵 Music: “${String(r.title || "Untitled").slice(0, 80)}” by ${String(r.creator || "Unknown").slice(0, 60)} (${label})` };
 }
 async function musicRoute(url) {
@@ -1769,11 +1769,19 @@ async function musicRoute(url) {
   }
   const m = url.pathname.match(/^\/api\/music\/audio\/([0-9a-f-]{36})$/);
   if (m) { // the song file, fetched through here so the editor can read it (only tracks from the library)
-    const info = await fetch(OPENVERSE + m[1] + "/", { headers: MUSIC_UA, cf: { cacheTtl: 86400, cacheEverything: true } });
-    if (!info.ok) throw new HttpError(404, "That song isn't in the library any more.");
-    const t = await info.json();
-    if (!t.url || !["cc0", "by", "pdm"].includes(String(t.license))) throw new HttpError(404, "That song can't be used.");
-    const a = await fetch(t.url, { headers: { "User-Agent": MUSIC_UA["User-Agent"] }, cf: { cacheTtl: 86400, cacheEverything: true } });
+    // Openverse rate-limits Cloudflare's shared servers (429), so the browser sends the song's file address too
+    // (?src=, from its own search). It's only used when Openverse can't be asked, and only from the music hosts below.
+    const src = String(url.searchParams.get("src") || "");
+    const srcOk = /^https:\/\/([a-z0-9-]+\.storage\.jamendo\.com|cdn\.freesound\.org|ccmixter\.org|upload\.wikimedia\.org)\//i.test(src) ? src : "";
+    let fileUrl = "";
+    const info = await fetch(OPENVERSE + m[1] + "/", { headers: MUSIC_UA, cf: { cacheTtl: 86400, cacheEverything: true } }).catch(() => null);
+    if (info && info.ok) {
+      const t = await info.json();
+      if (!t.url || !["cc0", "by", "pdm"].includes(String(t.license))) throw new HttpError(404, "That song can't be used.");
+      fileUrl = t.url;
+    } else if (srcOk && (!info || info.status === 429 || info.status >= 500)) fileUrl = srcOk;
+    else throw new HttpError(info && info.status === 404 ? 404 : 502, info && info.status === 404 ? "That song isn't in the library any more." : "The music library is busy (" + (info ? info.status : "no answer") + "). Try again in a minute.");
+    const a = await fetch(fileUrl, { headers: { "User-Agent": MUSIC_UA["User-Agent"] }, cf: { cacheTtl: 86400, cacheEverything: true } });
     if (!a.ok || !a.body) throw new HttpError(502, "Couldn't load the song (" + a.status + ").");
     return new Response(a.body, { headers: { "Content-Type": a.headers.get("Content-Type") || "audio/mpeg", "Cache-Control": "private, max-age=86400", ...(a.headers.get("Content-Length") ? { "Content-Length": a.headers.get("Content-Length") } : {}) } });
   }

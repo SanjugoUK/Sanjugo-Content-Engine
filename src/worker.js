@@ -2958,8 +2958,21 @@ async function workspaceRoute(request, env, url, viewer, ctx) {
       // null = a note on the whole cut rather than one moment
       it.t = body.t === null ? null : Math.max(0, Math.round((Number(body.t) || 0) * 10) / 10);
     }
+    // @mentions in a comment or review note: only the people tagged hear about it (Team Chat + phone alert).
+    const tagged = (kind === "comment" || kind === "note") && Array.isArray(body.mentions)
+      ? [...new Set(body.mentions.map(String))].filter((id) => id !== me.id && members.some((m) => m.id === id && m.active !== false)).slice(0, 20) : [];
+    if (tagged.length) it.mentions = tagged;
     await wsSaveItem(env, it);
-    // Ideas, comments, review notes and new drafts stay inside the project — no Team Chat line or phone alert.
+    if (tagged.length) {
+      const d = kind === "note" ? await wsItem(env, it.draftId) : null;
+      const where = d ? `draft ${d.cut}${it.t != null ? " at " + Math.floor(it.t / 60) + ":" + String(Math.floor(it.t % 60)).padStart(2, "0") : ""} of "${p.title}"` : `"${p.title}"`;
+      const names = tagged.map((id) => "@" + members.find((m) => m.id === id).name).join(" ");
+      const quote = it.text.length > 300 ? it.text.slice(0, 300) + "…" : it.text;
+      await wsNotify(env, ctx, { actor: me, members, project: p, only: tagged, eventId: "ws_mention_" + it.id,
+        text: `💬 ${me.name} tagged ${names} on ${where}: “${quote}”`,
+        push: { title: `${me.name} tagged you: ${p.title}`, body: (d ? `Draft ${d.cut}: ` : "") + it.text } });
+    }
+    // Otherwise ideas, comments, review notes and new drafts stay inside the project — no Team Chat line or phone alert.
     // The team is told about the big moments only (new project, sent for approval, decisions, filed, deleted).
     return json({ item: it });
   }

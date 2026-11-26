@@ -3266,7 +3266,6 @@ function MusicFitter({videoUrl, duration, track, init, applyLabel="Add to video"
         {slider("Music volume", musicVol, setMusicVol, 0, 100, 5, v=>v+"%")}
         {!noOriginal && slider("Original sound", origVol, setOrigVol, 0, 100, 5, v=> v? v+"%" : "Off")}
         <label style={{display:"flex", alignItems:"center", gap:8, fontSize:12.5}}><input type="checkbox" checked={fade} onChange={e=>setFade(e.target.checked)}/> Fade the music out at the end</label>
-        {track.needsCredit && <div style={{fontSize:11.5, color:"var(--ink-mute)", lineHeight:1.45}}>This song's licence asks for a credit, so this line goes in the caption when it's posted: <i>{track.credit}</i></div>}
         <div style={{display:"flex", gap:8, flexWrap:"wrap"}}>
           <Button icon={previewing? undefined : "play"} onClick={togglePreview} disabled={!!busy}>{previewing? "Stop" : "Preview together"}</Button>
           <Button variant="primary" onClick={apply} disabled={!!busy}>{busy? "Working…" : applyLabel}</Button>
@@ -3286,7 +3285,7 @@ function withMusicCredit(vars, credit, add, platforms){
     if(p==="gbp") return;
     const v = {...(out[p]||{})}; const key = p==="youtube" ? "description" : "caption";
     let txt = String(v[key]||"").split("\n").filter(l=>!/^🎵 Music: /.test(l.trim())).join("\n").replace(/\n+$/, "");
-    if(add && credit) txt = (txt ? txt+"\n\n" : "")+credit;
+    // The song credit is no longer added to captions (the team's choice); it stays saved with the post's music details.
     v[key] = txt; out[p] = v;
   });
   return out;
@@ -3356,10 +3355,10 @@ function VideoMusicEditor({form, setForm}){
   return (
     <div>
       {form.music && form.music.baked && !mix && <div style={{marginBottom:10}}><MusicChip item={{music:form.music, platforms:form.platforms}}/>
-        <div style={{fontSize:11.5, color:"var(--ink-mute)", marginTop:4}}>This video already has the music in it (from the Workspace){form.music.credit? ", and the credit line is in the caption" : ""}.</div></div>}
+        <div style={{fontSize:11.5, color:"var(--ink-mute)", marginTop:4}}>This video already has the music in it (from the Workspace).</div></div>}
       {mix && <div style={{display:"flex", alignItems:"center", gap:10, padding:"9px 11px", borderRadius:10, background:"var(--violet-soft)", border:"1px solid var(--violet)", marginBottom: open? 12 : 0, flexWrap:"wrap"}}>
         <span style={{color:"var(--violet)", display:"inline-flex"}}><Icon name="musicNote" size={16}/></span>
-        <span style={{flex:"1 1 200px", minWidth:0, fontSize:13}}><b>{mix.track.title}</b> — {mix.track.artist}<span style={{display:"block", fontSize:11.5, color:"var(--ink-mute)"}}>{mix.photo ? "Photo made into a "+mix.photo.seconds+"s reel" : "Mixed into the video"} from {fmtSecs(mix.start)} · music {mix.musicVol}%{mix.photo? "" : " · original sound "+mix.origVol+"%"}{mix.track.needsCredit? " · credit added to the caption" : ""}</span></span>
+        <span style={{flex:"1 1 200px", minWidth:0, fontSize:13}}><b>{mix.track.title}</b> — {mix.track.artist}<span style={{display:"block", fontSize:11.5, color:"var(--ink-mute)"}}>{mix.photo ? "Photo made into a "+mix.photo.seconds+"s reel" : "Mixed into the video"} from {fmtSecs(mix.start)} · music {mix.musicVol}%{mix.photo? "" : " · original sound "+mix.origVol+"%"}</span></span>
         <Button size="sm" onClick={()=>choose(mix.track)}>Adjust</Button>
         <Button size="sm" onClick={()=>setOpen(o=>!o)}>Change song</Button>
         <Button size="sm" variant="subtle" onClick={remove}>Remove</Button>
@@ -7509,12 +7508,9 @@ function CreateContentPage(){
       variants[p] = makeVariant(p, {status: status==="draft"?"draft":"submitted", scheduledAt: fv.overrideTime || form.scheduledAt || null, ...fv, hashtags: story? [] : parseTags(hashtagsText),
         ...(story? {postType:"Story"} : carousel && (p==="instagram"||p==="facebook")? {postType:"Carousel"} : carousel && p==="tiktok"? {postType:"Photos"} : {})});
     });
-    // A song mixed into the video that needs a credit: make sure every caption ends with it (platforms added later too).
-    const credit = form.music && form.music.baked && form.music.credit;
-    if(credit && !story) form.platforms.forEach(p=>{
-      if(p==="gbp") return; const key = p==="youtube" ? "description" : "caption"; const v = variants[p];
-      if(v && !String(v[key]||"").includes(credit)) variants[p] = {...v, [key]: (String(v[key]||"").replace(/\n+$/, "") ? String(v[key]).replace(/\n+$/, "")+"\n\n" : "")+credit};
-    });
+    // No "🎵 Music: …" credit line in captions; any left over from an older draft is taken out.
+    Object.keys(variants).forEach(p=>{ if(p==="gbp") return; const key = p==="youtube" ? "description" : "caption"; const v = variants[p];
+      if(v && /🎵 Music: /.test(String(v[key]||""))) variants[p] = {...v, [key]: String(v[key]).split("\n").filter(l=>!/^🎵 Music: /.test(l.trim())).join("\n").replace(/\n+$/, "")}; });
     return {
       id: uid("ct"), title: form.title||"Untitled content", brand: form.brand, campaign: form.campaign, pillar: form.pillar,
       creator: form.creator, approver: form.approver, priority: form.priority, notes: form.notes, music: cleanMusic(form.music), status,
@@ -9524,7 +9520,7 @@ function WsHome({onOpen}){
   );
 }
 
-// The song travels with "Create post from this": already mixed into the approved video (credit goes in the caption),
+// The song travels with "Create post from this": already mixed into the approved video (the song is saved with the post, no caption credit),
 // picked in the plan but not mixed in yet (step 4 opens ready to fit it), or an Instagram song added from the phone.
 function wsMusicPrefill(p, f){
   const mixed = (f || p.filed) && (f || p.filed).music;
